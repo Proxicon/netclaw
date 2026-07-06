@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Release image for netclawd: the Netclaw autonomous operations daemon.
 #
 # Supports multi-arch builds (linux/amd64, linux/arm64) via buildx.
@@ -36,10 +37,12 @@
 # can invoke it from inside the container (e.g., `netclaw doctor`).
 ARG TARGETARCH
 ARG NETCLAW_VERSION=unknown
+ARG AZURE_DEVOPS_MCP_PACKAGE=@azure-devops/mcp
 
 FROM ubuntu:24.04
 ARG TARGETARCH
 ARG NETCLAW_VERSION=unknown
+ARG AZURE_DEVOPS_MCP_PACKAGE=@azure-devops/mcp
 
 # Pre-install the general-purpose toolkit an autonomous agent is expected
 # to reach for via its shell_execute tool. An Ubuntu base (not a chiseled
@@ -61,6 +64,8 @@ ARG NETCLAW_VERSION=unknown
 #   Process/OS:  procps
 #   Data/JSON:   jq, sqlite3
 #   VCS/GitHub:  git, gh
+#   Shells:      PowerShell (pwsh)
+#   Azure:       Azure CLI + Azure DevOps extension
 #   Python:      python3, python3-pip, python3-venv
 #   Privileges:  gosu (entrypoint ownership repair, then drop to netclaw)
 #   Init/PID 1:  tini (reaps orphaned subprocess zombies, forwards signals) — https://github.com/krallin/tini
@@ -81,8 +86,38 @@ RUN apt-get update \
       python3-pip \
       python3-venv \
       gh \
+      gnupg \
       libicu74 \
       libsodium23 \
+ && rm -rf /var/lib/apt/lists/*
+
+# PowerShell and Azure CLI support for operator-approved workflows that need
+# pwsh scripts or Azure DevOps CLI commands from inside the Netclaw container.
+# Azure CLI extensions are installed into a shared read-only directory so the
+# non-root netclaw user can run `az devops` without a per-user install step.
+RUN wget -q https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb \
+ && dpkg -i /tmp/packages-microsoft-prod.deb \
+ && rm /tmp/packages-microsoft-prod.deb \
+ && mkdir -p /etc/apt/keyrings /opt/az/extensions \
+ && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg \
+ && chmod go+r /etc/apt/keyrings/microsoft.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ noble main" > /etc/apt/sources.list.d/azure-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends powershell azure-cli \
+ && AZURE_EXTENSION_DIR=/opt/az/extensions az extension add --name azure-devops --yes \
+ && chmod -R a+rX /opt/az/extensions \
+ && rm -rf /var/lib/apt/lists/*
+
+# Local stdio Microsoft Azure DevOps MCP server support for headless Netclaw
+# container workflows. The wrapper converts AZURE_DEVOPS_EXT_PAT into the
+# PERSONAL_ACCESS_TOKEN shape expected by @azure-devops/mcp's PAT auth mode.
+RUN mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
+ && npm install -g "$AZURE_DEVOPS_MCP_PACKAGE" \
+ && npm cache clean --force \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/netclaw
@@ -98,9 +133,13 @@ COPY docker/entrypoint.sh /opt/netclaw/entrypoint.sh
 # plain symlink: it is only ever launched by the supervised entrypoint, which has
 # already dropped to netclaw, so it never runs the root path.
 COPY docker/netclaw-cli-launcher.sh /usr/local/bin/netclaw
+COPY docker/azure-devops-mcp /usr/local/bin/azure-devops-mcp
+COPY --from=codebuddy_mcp . /opt/codebuddy-daemon/
 
-RUN chmod +x /opt/netclaw/cli/netclaw /opt/netclaw/daemon/netclawd /opt/netclaw/entrypoint.sh /usr/local/bin/netclaw \
- && ln -s /opt/netclaw/daemon/netclawd /usr/local/bin/netclawd
+RUN sed -i 's/\r$//' /opt/netclaw/entrypoint.sh /usr/local/bin/netclaw /usr/local/bin/azure-devops-mcp \
+ && chmod +x /opt/netclaw/cli/netclaw /opt/netclaw/daemon/netclawd /opt/netclaw/entrypoint.sh /usr/local/bin/netclaw /usr/local/bin/azure-devops-mcp /opt/codebuddy-daemon/CodeBuddy.Daemon \
+ && ln -s /opt/netclaw/daemon/netclawd /usr/local/bin/netclawd \
+ && ln -s /opt/codebuddy-daemon/CodeBuddy.Daemon /usr/local/bin/codebuddy-daemon
 
 # Non-root runtime user — limits blast radius of daemon-owned tool execution.
 # The entrypoint starts as root only to repair bind-mount ownership, then
@@ -118,6 +157,7 @@ RUN groupadd --gid 1654 netclaw \
 ENV HOME=/home/netclaw
 ENV NETCLAW_HOME=/home/netclaw/.netclaw
 ENV NETCLAW_DAEMON_PATH=/opt/netclaw/daemon/netclawd
+ENV AZURE_EXTENSION_DIR=/opt/az/extensions
 # Make the user-writable install locations (and a mounted /tools/bin toolset)
 # resolve as bare commands in the non-root agent's non-interactive shells, which
 # never source ~/.bashrc/~/.profile. dotnet-install.sh -> ~/.dotnet; .NET global

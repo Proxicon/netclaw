@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+has_auth=0
+for arg in "$@"; do
+    case "$arg" in
+        --authentication|-a)
+            has_auth=1
+            ;;
+    esac
+done
+
+if [ -z "${PERSONAL_ACCESS_TOKEN:-}" ] && [ -n "${AZURE_DEVOPS_EXT_PAT:-}" ]; then
+    PERSONAL_ACCESS_TOKEN="$(printf 'netclaw:%s' "$AZURE_DEVOPS_EXT_PAT" | base64 | tr -d '\n')"
+    export PERSONAL_ACCESS_TOKEN
+fi
+
+if [ "$has_auth" = 0 ]; then
+    if [ -n "${PERSONAL_ACCESS_TOKEN:-}" ]; then
+        exec mcp-server-azuredevops "$@" --authentication pat
+    fi
+
+    if [ -n "${ADO_MCP_AUTH_TOKEN:-}" ]; then
+        exec mcp-server-azuredevops "$@" --authentication envvar
+    fi
+fi
+
+exec mcp-server-azuredevops "$@"
