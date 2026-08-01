@@ -9,18 +9,24 @@ using System.Text.Json;
 using Akka.Actor;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
 using Netclaw.Daemon.Configuration;
+using Netclaw.Daemon.Security;
 using Xunit;
 using TeamsAccount = Microsoft.Teams.Api.Account;
 using TeamsConversation = Microsoft.Teams.Api.Conversation;
@@ -478,6 +484,24 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public async Task Complete_host_preserves_netclaw_default_auth_and_rejects_anonymous_teams_activity()
+    {
+        await using var app = await BuildTeamsTestHostAsync();
+        var schemes = app.Services.GetRequiredService<IAuthenticationSchemeProvider>();
+
+        Assert.Equal("AuthSelector", (await schemes.GetDefaultAuthenticateSchemeAsync())!.Name);
+        Assert.NotNull(await schemes.GetSchemeAsync(HostApplicationBuilderExtensions.TeamsTokenAuthConstants.AuthenticationScheme));
+
+        var client = app.GetTestClient();
+        var response = await client.PostAsync(
+            TeamsActivityEndpointExtensions.ActivityPath,
+            new StringContent("{}"),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Ingress_actor_deduplicates_only_the_process_local_fast_path()
     {
         var actorSystem = ActorSystem.Create($"teams-ingress-{Guid.NewGuid():N}");
@@ -563,6 +587,38 @@ public sealed class TeamsChannelFoundationTests
                 "activity",
                 DateTimeOffset.UnixEpoch),
             "hello");
+
+    private static async Task<WebApplication> BuildTeamsTestHostAsync()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "synthetic-tenant",
+            ["Teams:ClientId"] = "synthetic-client",
+            ["Teams:ClientSecret"] = "synthetic-secret"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.AddTeamsIngress();
+        builder.Services.AddNetclawAuthSchemes(new DaemonConfig());
+        builder.Services.AddAuthorization();
+        builder.Services.AddRateLimiter(options => options.RejectionStatusCode = StatusCodes.Status429TooManyRequests);
+
+        // The real daemon starts Akka before this Teams hosted service. The
+        // HTTP-only fixture intentionally removes it because anonymous auth
+        // rejection must occur before the translator or actor is reachable.
+        builder.Services.RemoveAll<IHostedService>();
+
+        var app = builder.Build();
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.UseRateLimiter();
+        app.UseTeamsIngress();
+        app.MapTeamsActivityEndpoint();
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        return app;
+    }
 
     private sealed class RecordingIngressSink : ITeamsConversationIngressSink
     {
