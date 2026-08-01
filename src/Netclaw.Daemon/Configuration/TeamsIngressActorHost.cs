@@ -24,12 +24,13 @@ internal sealed class DeferredTeamsConversationIngressSink : ITeamsConversationI
     }
 }
 
-internal sealed class TeamsIngressActorHost(ActorSystem actorSystem) : IHostedService
+internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : IHostedService
 {
     private IActorRef? _actor;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        var actorSystem = serviceProvider.GetRequiredService<ActorSystem>();
         _actor = actorSystem.ActorOf(
             DependencyResolver.For(actorSystem).Props<TeamsIngressActor>(),
             "teams-ingress");
