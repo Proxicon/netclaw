@@ -9,6 +9,46 @@ using Netclaw.Configuration;
 
 namespace Netclaw.Channels.Teams;
 
+public enum TeamsIngressActivityKind
+{
+    Message,
+    ConversationUpdate,
+    MessageUpdate,
+    MessageDelete
+}
+
+public enum TeamsTranslationDisposition
+{
+    Accepted,
+    Ignored,
+    RejectedMalformed,
+    RejectedUnsupportedScope,
+    RejectedPendingTenantEvidence
+}
+
+/// <summary>
+/// SDK-free translation outcome. Reason codes are stable diagnostics only and
+/// must never contain activity content, tokens, or platform identifiers.
+/// </summary>
+public sealed record TeamsTranslationResult(
+    TeamsTranslationDisposition Disposition,
+    string ReasonCode,
+    TeamsIngressActivityKind ActivityKind,
+    TeamsInboundActivity? Activity = null)
+{
+    public static TeamsTranslationResult Accepted(TeamsInboundActivity activity)
+        => new(TeamsTranslationDisposition.Accepted, "accepted", TeamsIngressActivityKind.Message, activity);
+
+    public static TeamsTranslationResult Ignored(TeamsIngressActivityKind kind, string reasonCode)
+        => new(TeamsTranslationDisposition.Ignored, reasonCode, kind);
+
+    public static TeamsTranslationResult Rejected(
+        TeamsTranslationDisposition disposition,
+        TeamsIngressActivityKind kind,
+        string reasonCode)
+        => new(disposition, reasonCode, kind);
+}
+
 /// <summary>
 /// Immutable, SDK-free trust context that the future Teams translator supplies
 /// only after its authenticated HTTP boundary has validated required identity.

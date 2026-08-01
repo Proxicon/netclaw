@@ -62,11 +62,11 @@ Netclaw cannot enter the SDK unauthenticated mode and malformed input creates no
 conversation/binding actor. **Tenant prerequisite:** offline only; no claim of
 live token validation. **Rollback:** disable Teams removes endpoint after restart.
 
-- [ ] 2.1 Implement strict credential-mode-aware endpoint registration and
+- [x] 2.1 Implement strict credential-mode-aware endpoint registration and
   contained configuration health failure before `AddTeams`/`UseTeams`.
-- [ ] 2.2 Implement SDK translator and sanitized offline fixtures with complete
+- [x] 2.2 Implement SDK translator and sanitized offline fixtures with complete
   immutable trust context and no synthetic tenant/activity identities.
-- [ ] 2.3 Implement `TeamsIngressActor` as a bounded in-memory fast-path router
+- [x] 2.3 Implement `TeamsIngressActor` as a bounded in-memory fast-path router
   only; no durable duplicate or activity-root persistence.
 
 ## PR 3 — Personal conversation and binding route

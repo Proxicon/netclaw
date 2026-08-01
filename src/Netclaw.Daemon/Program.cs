@@ -144,6 +144,7 @@ static async Task RunDaemonAsync(string[] args, DaemonRestartSignal restartSigna
     var daemonLogLevel = builder.ConfigureNetclawLogging(paths);
     builder.AddNetclawTelemetry();
     ConfigureDaemonServices(builder.Services, builder.Configuration, paths, daemonLogLevel, daemonConfig);
+    builder.AddTeamsIngress();
 
     // Authentication — a PolicyScheme selector is the default scheme.
     // It routes to DeviceBearer when an Authorization: Bearer header is present,
@@ -234,6 +235,7 @@ static async Task RunDaemonAsync(string[] args, DaemonRestartSignal restartSigna
     app.UseAuthentication();
     app.UseAuthorization();
     app.UseRateLimiter();
+    app.UseTeamsIngress();
 
     // Require authorization for the OpenAPI document so the full API surface is not
     // exposed to unauthenticated callers when the daemon binds to a non-loopback
@@ -283,6 +285,7 @@ static async Task RunDaemonAsync(string[] args, DaemonRestartSignal restartSigna
         .RequireAuthorization();
     app.MapWebhookEndpoints();
     app.MapMattermostActionEndpoint();
+    app.MapTeamsActivityEndpoint();
 
     app.MapPairingEndpoints();
 
