@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Teams.Api.Auth;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Activities;
 using Microsoft.Teams.Plugins.AspNetCore;
@@ -31,7 +32,12 @@ internal static class TeamsActivityEndpointExtensions
 
         // AddTeams sets the default authentication scheme. This runs before
         // Netclaw's auth registration so the daemon retains its PolicyScheme.
-        builder.AddTeams(routing: false);
+        var appBuilder = App.Builder()
+            .AddCredentials(new ClientCredentials(
+                options.ClientId!,
+                options.ClientSecret!.Value,
+                options.TenantId!));
+        builder.AddTeams(appBuilder, routing: false);
         builder.Services.AddSingleton<TeamsSdkActivityTranslator>();
         builder.Services.AddSingleton<ITeamsConversationIngressSink, DeferredTeamsConversationIngressSink>();
         builder.Services.AddSingleton<TeamsIngressActorHost>();
