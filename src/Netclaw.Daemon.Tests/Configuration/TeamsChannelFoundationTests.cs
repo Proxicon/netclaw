@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Akka.Actor;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
@@ -25,6 +26,7 @@ using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels;
 using Netclaw.Channels.Teams;
+using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
 using Netclaw.Daemon.Configuration;
 using Netclaw.Daemon.Security;
@@ -723,6 +725,88 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public async Task Rate_limiter_composition_retains_all_inbound_policies()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "tenant",
+            ["Teams:ClientId"] = "client",
+            ["Teams:ClientSecret"] = "secret"
+        });
+        builder.AddTeamsIngress();
+        builder.Services.AddRateLimiter(options =>
+            options.AddPolicy("pairing-exchange", _ => RateLimitPartition.GetNoLimiter("pairing")));
+        builder.Services.AddMattermostActionEndpointRateLimiting();
+        builder.Services.AddRateLimiter(options => options.RejectionStatusCode = StatusCodes.Status429TooManyRequests);
+        builder.Services.RemoveAll<IHostedService>();
+
+        await using var app = builder.Build();
+        app.UseRateLimiter();
+        app.MapPost("/rate/teams", () => Results.Ok()).RequireRateLimiting(TeamsActivityEndpointExtensions.RateLimitPolicy);
+        app.MapPost("/rate/pairing", () => Results.Ok()).RequireRateLimiting("pairing-exchange");
+        app.MapPost("/rate/mattermost", () => Results.Ok()).RequireRateLimiting(MattermostActionEndpointExtensions.CallbackRateLimitPolicy);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/rate/teams", new StringContent("{}"), TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/rate/pairing", new StringContent("{}"), TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/rate/mattermost", new StringContent("{}"), TestContext.Current.CancellationToken)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Teams_rate_limit_uses_one_bounded_partition_when_remote_ip_is_absent()
+    {
+        var endpoint = new RateLimitedEndpoint();
+        await using var app = await BuildTeamsRateLimitHostAsync(endpoint);
+        var client = app.GetTestClient();
+
+        for (var request = 0; request < 30; request++)
+            Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/teams-rate-limit-test", new StringContent("{}"), TestContext.Current.CancellationToken)).StatusCode);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await client.PostAsync("/teams-rate-limit-test", new StringContent("{}"), TestContext.Current.CancellationToken)).StatusCode);
+        Assert.Equal(30, endpoint.Count);
+    }
+
+    [Fact]
+    public async Task Ingress_dispositions_record_routed_telemetry_only_after_sink_acceptance()
+    {
+        var telemetry = ChannelTelemetry.For(ChannelType.Teams);
+        var initial = telemetry.GetSnapshot();
+        var actorSystem = ActorSystem.Create($"teams-ingress-telemetry-{Guid.NewGuid():N}");
+        try
+        {
+            var accepted = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(new RecordingIngressSink(), TimeProvider.System)));
+            var unavailable = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(new SequencedIngressSink(TeamsIngressSinkResult.Unavailable), TimeProvider.System)));
+            var failed = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(new ThrowThenAcceptIngressSink(), TimeProvider.System)));
+
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(accepted, CreateInboundActivity())).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Duplicate, (await RouteAsync(accepted, CreateInboundActivity())).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Unavailable, (await RouteAsync(unavailable, CreateInboundActivity(activityId: "unavailable"))).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.RouteFailed, (await RouteAsync(failed, CreateInboundActivity(activityId: "failed"))).Disposition);
+
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            Assert.Equal(
+                TeamsIngressRouteDisposition.Cancelled,
+                (await accepted.Ask<TeamsIngressRouteResult>(
+                    new TeamsIngressReceived(CreateInboundActivity(activityId: "cancelled"), cancellation.Token),
+                    TestContext.Current.CancellationToken)).Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+
+        var final = telemetry.GetSnapshot();
+        Assert.Equal(initial.EventsRouted + 1, final.EventsRouted);
+        Assert.Equal(initial.EventsFiltered + 1, final.EventsFiltered);
+        Assert.True(final.EventsDropped >= initial.EventsDropped + 2);
+    }
+
+    [Fact]
     public async Task Teams_activity_body_guard_returns_semantic_4xx_and_never_calls_the_endpoint_for_oversized_bodies()
     {
         var endpoint = new RecordingBodyEndpoint();
@@ -750,6 +834,55 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversized.StatusCode);
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, chunkedOversized.StatusCode);
         Assert.Equal(2, endpoint.Count);
+    }
+
+    [Fact]
+    public async Task Teams_safe_outputs_do_not_disclose_ingress_secrets_or_tenant_values()
+    {
+        const string configuredTenant = "configured-tenant-sentinel";
+        const string authenticatedTenant = "authenticated-tenant-sentinel";
+        const string activityTenant = "activity-tenant-sentinel";
+        const string secret = "client-secret-sentinel";
+        const string authorization = "authorization-sentinel";
+        const string rawBody = "raw-body-sentinel";
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = configuredTenant, ClientSecret = new SensitiveString(secret) },
+            TimeProvider.System);
+        var configuredMismatch = translator.Translate(CreateSdkMessage(), authenticatedTenant);
+        var activity = CreateSdkMessage();
+        activity.Conversation.TenantId = activityTenant;
+        var activityMismatch = translator.Translate(activity, configuredTenant);
+        var snapshot = await SnapshotAsync(new TeamsChannelOptions
+        {
+            Enabled = true,
+            TenantId = configuredTenant,
+            ClientId = "client",
+            ClientSecret = new SensitiveString(secret)
+        });
+        await using var app = await BuildTeamsTestHostAsync();
+        var request = new HttpRequestMessage(HttpMethod.Post, TeamsActivityEndpointExtensions.ActivityPath)
+        {
+            Content = new StringContent(rawBody)
+        };
+        request.Headers.TryAddWithoutValidation("Authorization", authorization);
+        var response = await app.GetTestClient().SendAsync(request, TestContext.Current.CancellationToken);
+        var safeOutputs = string.Join("\n", new[]
+        {
+            configuredMismatch.ReasonCode,
+            activityMismatch.ReasonCode,
+            snapshot.HealthDetail,
+            await response.Content.ReadAsStringAsync(TestContext.Current.CancellationToken)
+        });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal("configured_tenant_mismatch", configuredMismatch.ReasonCode);
+        Assert.Equal("tenant_mismatch", activityMismatch.ReasonCode);
+        Assert.DoesNotContain(configuredTenant, safeOutputs, StringComparison.Ordinal);
+        Assert.DoesNotContain(authenticatedTenant, safeOutputs, StringComparison.Ordinal);
+        Assert.DoesNotContain(activityTenant, safeOutputs, StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, safeOutputs, StringComparison.Ordinal);
+        Assert.DoesNotContain(authorization, safeOutputs, StringComparison.Ordinal);
+        Assert.DoesNotContain(rawBody, safeOutputs, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -923,7 +1056,7 @@ public sealed class TeamsChannelFoundationTests
         return app;
     }
 
-    private static async Task<WebApplication> BuildTeamsRateLimitHostAsync()
+    private static async Task<WebApplication> BuildTeamsRateLimitHostAsync(RateLimitedEndpoint? endpoint = null)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -942,11 +1075,13 @@ public sealed class TeamsChannelFoundationTests
         var app = builder.Build();
         app.Use((context, next) =>
         {
-            context.Connection.RemoteIpAddress = IPAddress.Parse(context.Request.Headers["X-Test-Remote"].ToString());
+            var testRemote = context.Request.Headers["X-Test-Remote"].ToString();
+            if (!string.IsNullOrWhiteSpace(testRemote))
+                context.Connection.RemoteIpAddress = IPAddress.Parse(testRemote);
             return next(context);
         });
         app.UseRateLimiter();
-        app.MapPost("/teams-rate-limit-test", () => Results.Ok())
+        app.MapPost("/teams-rate-limit-test", () => endpoint is null ? Results.Ok() : endpoint.Handle())
             .RequireRateLimiting(TeamsActivityEndpointExtensions.RateLimitPolicy);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;
@@ -1051,6 +1186,19 @@ public sealed class TeamsChannelFoundationTests
             {
                 return Results.BadRequest();
             }
+        }
+    }
+
+    private sealed class RateLimitedEndpoint
+    {
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public IResult Handle()
+        {
+            Interlocked.Increment(ref _count);
+            return Results.Ok();
         }
     }
 
