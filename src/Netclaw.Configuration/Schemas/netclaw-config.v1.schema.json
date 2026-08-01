@@ -94,6 +94,47 @@
       },
       "additionalProperties": false
     },
+    "Teams": {
+      "type": "object",
+      "description": "Microsoft Teams channel settings. The integration is disabled by default. Team and channel allow-lists are fail closed when empty. ClientSecret belongs only in secrets.json or NETCLAW_Teams__ClientSecret and is intentionally excluded from this normal configuration schema.",
+      "properties": {
+        "Enabled": { "type": "boolean", "default": false },
+        "TenantId": { "type": ["string", "null"] },
+        "ClientId": { "type": ["string", "null"] },
+        "AuthenticationMode": {
+          "type": "string",
+          "enum": ["ClientSecret"],
+          "default": "ClientSecret"
+        },
+        "AllowDirectMessages": { "type": "boolean", "default": false },
+        "MentionOnly": { "type": "boolean", "default": true },
+        "AllowedTeamIds": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" }
+        },
+        "AllowedChannelIds": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" }
+        },
+        "AllowedUserIds": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" }
+        },
+        "ChannelAudiences": {
+          "type": "object",
+          "description": "Audience overrides keyed by canonical team/channel or team ID. Values are personal, team, or public.",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["personal", "team", "public"]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "Logging": {
       "type": "object",
       "properties": {
