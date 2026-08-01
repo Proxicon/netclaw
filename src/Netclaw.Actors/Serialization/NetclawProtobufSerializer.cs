@@ -48,6 +48,7 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
     private const string PendingApprovalPromptClearedManifest = "papc-v1";
     private const string DurableActivityDispatchReservedManifest = "dadr-v1";
     private const string DurableActivityDispatchReleasedManifest = "dadl-v1";
+    private const string DurableActivityDispatchSnapshotManifest = "dads-v1";
 
     private static readonly FrozenDictionary<Type, string> TypeToManifest = new Dictionary<Type, string>
     {
@@ -78,6 +79,7 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
         [typeof(Channels.PendingApprovalPromptCleared)] = PendingApprovalPromptClearedManifest,
         [typeof(Channels.DurableActivityDispatchReserved)] = DurableActivityDispatchReservedManifest,
         [typeof(Channels.DurableActivityDispatchReleased)] = DurableActivityDispatchReleasedManifest,
+        [typeof(Channels.DurableActivityDispatchSnapshot)] = DurableActivityDispatchSnapshotManifest,
     }.ToFrozenDictionary();
 
     public override int Identifier => 150;
@@ -158,6 +160,8 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
                 Proto.DurableActivityDispatchReservedProto.Parser.ParseFrom(bytes)),
             DurableActivityDispatchReleasedManifest => NetclawProtoMapper.FromProto(
                 Proto.DurableActivityDispatchReleasedProto.Parser.ParseFrom(bytes)),
+            DurableActivityDispatchSnapshotManifest => NetclawProtoMapper.FromProto(
+                Proto.DurableActivityDispatchSnapshotProto.Parser.ParseFrom(bytes)),
             _ => throw new ArgumentException(
                 $"Unknown manifest '{manifest}'. Add it to NetclawProtobufSerializer.")
         };

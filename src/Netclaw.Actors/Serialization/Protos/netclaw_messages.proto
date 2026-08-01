@@ -330,12 +330,16 @@ message PendingApprovalPromptClearedProto {
 // ── Durable channel activity dispatch ──
 
 message DurableActivityDispatchReservedProto {
-  string activity_id = 1;
-  optional string evicted_activity_id = 2;
+  string activity_fingerprint = 1;
+  optional string evicted_activity_fingerprint = 2;
 }
 
 message DurableActivityDispatchReleasedProto {
-  string activity_id = 1;
+  string activity_fingerprint = 1;
+}
+
+message DurableActivityDispatchSnapshotProto {
+  repeated string activity_fingerprints = 1;
 }
 
 // ── Memory observer events ──

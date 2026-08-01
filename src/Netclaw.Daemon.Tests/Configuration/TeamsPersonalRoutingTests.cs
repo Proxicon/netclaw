@@ -86,6 +86,19 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         Assert.Equal(
             TeamsBindingRouteDisposition.Denied,
             (await RouteAsync(wrongTenant, CreateActivity("activity-wrong-tenant", "tenant-b", "conversation-wrong-tenant"))).Disposition);
+
+        var oversizedActivity = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            CreateSessionId("tenant-a", "conversation-oversized-activity"),
+            CreateDependencies(disabledPipeline)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Denied,
+            (await RouteAsync(
+                oversizedActivity,
+                CreateActivity(
+                    new string('a', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1),
+                    "tenant-a",
+                    "conversation-oversized-activity"))).Disposition);
     }
 
     [Fact]
@@ -95,7 +108,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         var dependencies = CreateDependencies(pipeline);
         var sessionId = CreateSessionId("tenant-a", "conversation-restart");
         var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-restart-first");
-        var activity = CreateActivity("activity-restart", "tenant-a", "conversation-restart");
+        var activity = CreateActivity("activity-restart-活動", "tenant-a", "conversation-restart");
 
         Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
         ReceiveDispatchedMessage();
@@ -104,6 +117,26 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         ExpectTerminated(actor, cancellationToken: TestContext.Current.CancellationToken);
 
         var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-restart-second");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Duplicate, (await RouteAsync(recovered, activity)).Disposition);
+    }
+
+    [Fact]
+    public async Task A_passivated_binding_rehydrates_its_durable_activity_reservation()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var dependencies = CreateDependencies(pipeline);
+        var sessionId = CreateSessionId("tenant-a", "conversation-passivation");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-passivation-first");
+        var activity = CreateActivity("activity-passivation", "tenant-a", "conversation-passivation");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        ReceiveDispatchedMessage();
+        Watch(actor);
+        actor.Tell(ReceiveTimeout.Instance);
+        ExpectTerminated(actor, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-passivation-second");
 
         Assert.Equal(TeamsBindingRouteDisposition.Duplicate, (await RouteAsync(recovered, activity)).Disposition);
     }
@@ -128,6 +161,39 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
 
         Assert.Equal(TeamsBindingRouteDisposition.Duplicate, retained.Disposition);
         Assert.Equal(TeamsBindingRouteDisposition.Accepted, evicted.Disposition);
+
+        Watch(actor);
+        actor.Tell(PoisonPill.Instance);
+        ExpectTerminated(actor, cancellationToken: TestContext.Current.CancellationToken);
+        var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Duplicate,
+            (await RouteAsync(recovered, CreateActivity("activity-2", "tenant-a", "conversation-retention"))).Disposition);
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(recovered, CreateActivity("activity-1", "tenant-a", "conversation-retention"))).Disposition);
+    }
+
+    [Fact]
+    public async Task The_same_activity_identifier_in_another_tenant_uses_an_independent_binding()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var tenantA = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            CreateSessionId("tenant-a", "conversation-a"),
+            CreateDependencies(pipeline, tenantId: "tenant-a")));
+        var tenantB = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            CreateSessionId("tenant-b", "conversation-a"),
+            CreateDependencies(pipeline, tenantId: "tenant-b")));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(tenantA, CreateActivity("activity-shared", "tenant-a", "conversation-a"))).Disposition);
+        ReceiveDispatchedMessage();
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(tenantB, CreateActivity("activity-shared", "tenant-b", "conversation-a"))).Disposition);
+        ReceiveDispatchedMessage();
     }
 
     [Fact]
@@ -175,6 +241,44 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             "hello");
 
         Assert.Equal(TeamsIngressSinkResult.Unavailable, await sink.RouteAsync(channel, TestContext.Current.CancellationToken));
+        var blockedSession = CreateSessionId("tenant-a", "conversation-channel");
+        await Assert.ThrowsAsync<ActorNotFoundException>(() =>
+            Sys.ActorSelection($"/user/{TeamsActorNames.Conversation(blockedSession)}")
+                .ResolveOne(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Concurrent_personal_ingress_resolves_one_conversation_and_binding()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            AllowDirectMessages = true,
+            AllowedUserIds = ["user-a"]
+        };
+        var services = new ServiceCollection();
+        services.AddSingleton<ISessionPipeline>(pipeline);
+        services.AddSingleton<TimeProvider>(TimeProvider.System);
+        using var provider = services.BuildServiceProvider();
+        var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
+        var activity = CreateActivity("activity-concurrent", "tenant-a", "conversation-concurrent");
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 8)
+            .Select(_ => sink.RouteAsync(activity, TestContext.Current.CancellationToken).AsTask()));
+
+        Assert.Equal(1, results.Count(result => result == TeamsIngressSinkResult.Accepted));
+        Assert.Equal(7, results.Count(result => result == TeamsIngressSinkResult.Duplicate));
+        ReceiveDispatchedMessage();
+
+        var sessionId = CreateSessionId("tenant-a", "conversation-concurrent");
+        var conversation = await Sys.ActorSelection($"/user/{TeamsActorNames.Conversation(sessionId)}")
+            .ResolveOne(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        var binding = await Sys.ActorSelection($"/user/{TeamsActorNames.Conversation(sessionId)}/{TeamsActorNames.Binding(sessionId)}")
+            .ResolveOne(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(ActorRefs.Nobody, conversation);
+        Assert.NotEqual(ActorRefs.Nobody, binding);
     }
 
     [Fact]
@@ -225,10 +329,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
     private static TeamsConversationDependencies CreateDependencies(
         ISessionPipeline pipeline,
         bool allowDirectMessages = true,
-        string[]? allowedUserIds = null) => new(
+        string[]? allowedUserIds = null,
+        string tenantId = "tenant-a") => new(
         new TeamsChannelOptions
         {
-            TenantId = "tenant-a",
+            TenantId = tenantId,
             AllowDirectMessages = allowDirectMessages,
             AllowedUserIds = allowedUserIds ?? ["user-a"]
         },

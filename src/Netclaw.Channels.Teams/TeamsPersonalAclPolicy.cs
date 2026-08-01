@@ -31,6 +31,9 @@ public static class TeamsPersonalAclPolicy
         if (string.IsNullOrWhiteSpace(activity.Trust.SenderId))
             return ChannelAclDecision.Deny(AclDenyReasons.MissingUserId);
 
+        if (!TeamsSessionIdentifierCodec.IsValidActivityIdentifier(activity.Trust.ActivityId))
+            return ChannelAclDecision.Deny("invalid_activity_id");
+
         if (string.IsNullOrWhiteSpace(options.TenantId)
             || !string.Equals(activity.Trust.TenantId, options.TenantId, StringComparison.Ordinal))
         {
