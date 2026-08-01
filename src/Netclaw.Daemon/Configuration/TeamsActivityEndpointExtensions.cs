@@ -4,7 +4,6 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Threading.RateLimiting;
-using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Activities;
@@ -107,10 +106,6 @@ internal static class TeamsActivityEndpointExtensions
 
                 if (request.ContentLength == 0)
                     return Results.BadRequest();
-
-                var bodySizeFeature = filterContext.HttpContext.Features.Get<IHttpMaxRequestBodySizeFeature>();
-                if (bodySizeFeature is { IsReadOnly: false })
-                    bodySizeFeature.MaxRequestBodySize = MaxActivityBodyBytes;
 
                 return await next(filterContext);
             })
