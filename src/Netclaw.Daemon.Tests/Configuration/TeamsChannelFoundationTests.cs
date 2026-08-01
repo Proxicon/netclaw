@@ -1,0 +1,345 @@
+// -----------------------------------------------------------------------
+// <copyright file="TeamsChannelFoundationTests.cs" company="Petabridge, LLC">
+//      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
+// </copyright>
+// -----------------------------------------------------------------------
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Netclaw.Actors.Channels;
+using Netclaw.Channels;
+using Netclaw.Channels.Teams;
+using Netclaw.Configuration;
+using Netclaw.Daemon.Configuration;
+using Xunit;
+
+namespace Netclaw.Daemon.Tests.Configuration;
+
+public sealed class TeamsChannelFoundationTests
+{
+    [Fact]
+    public void Options_default_to_disabled_and_fail_closed()
+    {
+        var options = new TeamsChannelOptions();
+
+        Assert.False(options.Enabled);
+        Assert.False(options.AllowDirectMessages);
+        Assert.True(options.MentionOnly);
+        Assert.Equal(TeamsAuthenticationMode.ClientSecret, options.AuthenticationMode);
+        Assert.Empty(options.AllowedTeamIds);
+        Assert.Empty(options.AllowedChannelIds);
+        Assert.Empty(options.AllowedUserIds);
+        Assert.Empty(options.ChannelAudiences);
+    }
+
+    [Fact]
+    public void Secret_overlay_binds_effective_secret_without_serializing_it()
+    {
+        const string secret = "teams-pr1-synthetic-sentinel";
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Teams:Enabled"] = "true",
+                ["Teams:TenantId"] = "tenant",
+                ["Teams:ClientId"] = "client",
+                ["Teams:ClientSecret"] = secret,
+            })
+            .Build();
+
+        var options = configuration.GetSection("Teams").Get<TeamsChannelOptions>();
+
+        Assert.NotNull(options);
+        Assert.Equal(secret, options.ClientSecret!.Value);
+        var serialized = JsonSerializer.Serialize(options);
+        Assert.DoesNotContain(secret, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(nameof(TeamsChannelOptions.ClientSecret), serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Environment_secret_overlay_binds_the_teams_client_secret()
+    {
+        const string variableName = "NETCLAW_Teams__ClientSecret";
+        const string secret = "teams-pr1-environment-sentinel";
+        var previousValue = Environment.GetEnvironmentVariable(variableName);
+        Environment.SetEnvironmentVariable(variableName, secret);
+
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddEnvironmentVariables("NETCLAW_")
+                .Build();
+
+            var options = configuration.GetSection("Teams").Get<TeamsChannelOptions>();
+
+            Assert.NotNull(options);
+            Assert.Equal(secret, options.ClientSecret!.Value);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variableName, previousValue);
+        }
+    }
+
+    [Fact]
+    public async Task Disabled_teams_is_descriptor_visible_without_runtime_side_effects()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        var configuration = new ConfigurationBuilder().Build();
+
+        services.AddChannelIntegrations(configuration);
+
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IChannel));
+
+        using var provider = services.BuildServiceProvider();
+        var registry = provider.GetRequiredService<IChannelRegistry>();
+        var descriptor = registry.GetChannel(ChannelDescriptorKey.FromChannelType(ChannelType.Teams));
+        var snapshot = await registry.GetSnapshotAsync(descriptor.Key, TestContext.Current.CancellationToken);
+
+        Assert.False(descriptor.IsEnabled);
+        Assert.Equal("Teams", descriptor.DisplayName);
+        Assert.False(snapshot.IsEnabled);
+        Assert.Contains("disabled", snapshot.HealthDetail!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Enabled_teams_has_no_transport_registration_or_secret_diagnostic_disclosure()
+    {
+        const string secret = "teams-pr1-synthetic-sentinel";
+        var services = new ServiceCollection();
+        services.AddLogging();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Teams:Enabled"] = "true",
+                ["Teams:TenantId"] = "tenant",
+                ["Teams:ClientId"] = "client",
+                ["Teams:ClientSecret"] = secret,
+            })
+            .Build();
+
+        services.AddChannelIntegrations(configuration);
+
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IHostedService));
+        Assert.DoesNotContain(services, descriptor => descriptor.ServiceType == typeof(IChannel));
+
+        using var provider = services.BuildServiceProvider();
+        var registry = provider.GetRequiredService<IChannelRegistry>();
+        var snapshot = await registry.GetSnapshotAsync(ChannelDescriptorKey.FromChannelType(ChannelType.Teams), TestContext.Current.CancellationToken);
+
+        Assert.True(snapshot.IsEnabled);
+        Assert.DoesNotContain(secret, snapshot.HealthDetail!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Channel_type_teams_uses_a_stable_wire_value_without_changing_existing_values()
+    {
+        Assert.Equal(0, (int)ChannelType.Slack);
+        Assert.Equal(1, (int)ChannelType.Tui);
+        Assert.Equal(2, (int)ChannelType.Headless);
+        Assert.Equal(3, (int)ChannelType.SignalR);
+        Assert.Equal(4, (int)ChannelType.Reminder);
+        Assert.Equal(5, (int)ChannelType.Webhook);
+        Assert.Equal(6, (int)ChannelType.Discord);
+        Assert.Equal(7, (int)ChannelType.Mattermost);
+        Assert.Equal(8, (int)ChannelType.Teams);
+        Assert.Equal("teams", ChannelType.Teams.ToWireValue());
+        Assert.True(ChannelTypeExtensions.TryFromWireValue("teams", out var teams));
+        Assert.Equal(ChannelType.Teams, teams);
+        Assert.False(ChannelTypeExtensions.TryFromWireValue("not-a-channel", out _));
+        Assert.True(ChannelType.Teams.SupportsInteractiveApproval());
+        Assert.Equal("slack", ChannelType.Slack.ToWireValue());
+        Assert.Equal("discord", ChannelType.Discord.ToWireValue());
+        Assert.Equal("mattermost", ChannelType.Mattermost.ToWireValue());
+    }
+
+    [Fact]
+    public void Personal_identifier_round_trips_canonically()
+    {
+        Assert.True(TeamsSessionIdentifierCodec.TryCreatePersonal("tenant/α", "conversation/β", out var sessionId, out var createError));
+        Assert.Equal(TeamsIdentifierValidationError.None, createError);
+        Assert.True(TeamsSessionIdentifierCodec.TryParse(sessionId, out var parsed, out var parseError));
+
+        Assert.Equal(TeamsIdentifierValidationError.None, parseError);
+        Assert.Equal("tenant/α", parsed.TenantId);
+        Assert.Equal(TeamsConversationScope.Personal, parsed.Scope);
+        Assert.Equal("conversation/β", parsed.ConversationId);
+        Assert.Equal("conversation", parsed.ThreadKey);
+        Assert.Null(parsed.RootActivityId);
+    }
+
+    [Fact]
+    public void Channel_identifier_separates_tenants_and_roots()
+    {
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", "conversation", "root-a", out var first, out _));
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", "conversation", "root-b", out var second, out _));
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-b", "conversation", "root-a", out var third, out _));
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", "conversation", "root-a", out var repeat, out _));
+
+        Assert.NotEqual(first, second);
+        Assert.NotEqual(first, third);
+        Assert.Equal(first, repeat);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void Identifier_rejects_blank_tenant(string tenant)
+    {
+        Assert.False(TeamsSessionIdentifierCodec.TryCreatePersonal(tenant, "conversation", out _, out var error));
+        Assert.Equal(TeamsIdentifierValidationError.MissingTenantId, error);
+    }
+
+    [Fact]
+    public void Channel_identifier_rejects_missing_root()
+    {
+        Assert.False(TeamsSessionIdentifierCodec.TryCreateChannel("tenant", "conversation", null, out _, out var error));
+        Assert.Equal(TeamsIdentifierValidationError.MissingActivityId, error);
+    }
+
+    [Fact]
+    public void Identifier_parser_rejects_padded_noncanonical_invalid_and_oversized_components()
+    {
+        var conversation = Convert.ToBase64String(Encoding.UTF8.GetBytes("conversation")).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var padded = new Netclaw.Actors.Protocol.SessionId($"teams~dGVuYW50=~personal~{conversation}/conversation");
+        var nonCanonical = new Netclaw.Actors.Protocol.SessionId($"teams~Zh~personal~{conversation}/conversation");
+        var invalid = new Netclaw.Actors.Protocol.SessionId($"teams~tenant!~personal~{conversation}/conversation");
+        var oversizedTenant = Convert.ToBase64String(Encoding.UTF8.GetBytes(new string('a', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var oversized = new Netclaw.Actors.Protocol.SessionId($"teams~{oversizedTenant}~personal~{conversation}/conversation");
+
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(padded, out _, out _));
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(nonCanonical, out _, out _));
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(invalid, out _, out _));
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(oversized, out _, out var oversizedError));
+        Assert.Equal(TeamsIdentifierValidationError.OversizedIdentifier, oversizedError);
+    }
+
+    [Fact]
+    public void Identifier_rejects_oversized_raw_values_without_truncation()
+    {
+        var oversized = new string('a', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1);
+
+        Assert.False(TeamsSessionIdentifierCodec.TryCreatePersonal(oversized, "conversation", out _, out var error));
+        Assert.Equal(TeamsIdentifierValidationError.OversizedIdentifier, error);
+    }
+
+    [Theory]
+    [InlineData(1023, true)]
+    [InlineData(1024, true)]
+    [InlineData(1025, false)]
+    public void Identifier_uses_utf8_byte_limits_for_ascii_components(int byteCount, bool shouldSucceed)
+    {
+        var value = new string('a', byteCount);
+
+        var result = TeamsSessionIdentifierCodec.TryCreatePersonal(value, "conversation", out _, out var error);
+
+        Assert.Equal(shouldSucceed, result);
+        Assert.Equal(
+            shouldSucceed ? TeamsIdentifierValidationError.None : TeamsIdentifierValidationError.OversizedIdentifier,
+            error);
+    }
+
+    [Theory]
+    [InlineData(511, true)]
+    [InlineData(512, true)]
+    [InlineData(513, false)]
+    public void Identifier_uses_utf8_byte_limits_for_multibyte_components(int characterCount, bool shouldSucceed)
+    {
+        var value = new string('β', characterCount);
+
+        var result = TeamsSessionIdentifierCodec.TryCreatePersonal(value, "conversation", out _, out var error);
+
+        Assert.Equal(shouldSucceed, result);
+        Assert.Equal(
+            shouldSucceed ? TeamsIdentifierValidationError.None : TeamsIdentifierValidationError.OversizedIdentifier,
+            error);
+    }
+
+    [Fact]
+    public void Identifier_parser_enforces_encoded_component_boundaries_and_canonical_base64url()
+    {
+        var conversation = EncodeForSession("conversation");
+        var encoded1024Bytes = EncodeForSession(new string('a', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes));
+        var encoded1365Characters = new string('A', TeamsSessionIdentifierCodec.MaxEncodedIdentifierLength - 1);
+        var encoded1367Characters = new string('A', TeamsSessionIdentifierCodec.MaxEncodedIdentifierLength + 1);
+        var invalidLengthModuloFour = "A";
+
+        Assert.Equal(TeamsSessionIdentifierCodec.MaxEncodedIdentifierLength, encoded1024Bytes.Length);
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{encoded1365Characters}~personal~{conversation}/conversation"),
+            out _, out _));
+        Assert.True(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{encoded1024Bytes}~personal~{conversation}/conversation"),
+            out _, out var acceptedError));
+        Assert.Equal(TeamsIdentifierValidationError.None, acceptedError);
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{encoded1367Characters}~personal~{conversation}/conversation"),
+            out _, out var oversizedError));
+        Assert.Equal(TeamsIdentifierValidationError.OversizedIdentifier, oversizedError);
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{invalidLengthModuloFour}~personal~{conversation}/conversation"),
+            out _, out _));
+    }
+
+    [Fact]
+    public void Identifier_parser_rejects_extra_separators_and_invalid_thread_forms()
+    {
+        var tenant = EncodeForSession("tenant");
+        var conversation = EncodeForSession("conversation");
+        var root = EncodeForSession("root");
+
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{tenant}~personal~{conversation}/conversation/extra"),
+            out _, out _));
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{tenant}~personal~{conversation}/other"),
+            out _, out _));
+        Assert.False(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{tenant}~channel~{conversation}/"),
+            out _, out _));
+        Assert.True(TeamsSessionIdentifierCodec.TryParse(
+            new Netclaw.Actors.Protocol.SessionId($"teams~{tenant}~channel~{conversation}/{root}"),
+            out var parsed,
+            out _));
+        Assert.Equal("root", parsed.RootActivityId);
+    }
+
+    [Fact]
+    public void Contracts_reject_missing_or_invalid_trust_and_destination_data()
+    {
+        Assert.Throws<ArgumentException>(() => new TeamsIngressTrustContext(
+            TrustAudience.Team,
+            PrincipalClassification.TrustedInternal,
+            TrustBoundary.Team,
+            new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+            "sender",
+            "tenant",
+            "conversation",
+            TeamsConversationScope.Personal,
+            "activity",
+            default));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            " ",
+            TeamsConversationScope.Personal));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new TeamsAttachmentMetadata("file.txt", null, -1));
+    }
+
+    [Fact]
+    public void Teams_contract_assembly_has_no_microsoft_teams_dependency()
+    {
+        var assembly = typeof(TeamsInboundActivity).Assembly;
+
+        Assert.DoesNotContain(assembly.GetReferencedAssemblies(), name => name.Name!.StartsWith("Microsoft.Teams", StringComparison.Ordinal));
+        Assert.All(
+            new[] { typeof(TeamsIngressTrustContext), typeof(TeamsInboundActivity), typeof(TeamsOutboundMessage) },
+            type => Assert.DoesNotContain(type.GetProperties(), property => property.PropertyType.Namespace?.StartsWith("Microsoft.Teams", StringComparison.Ordinal) == true));
+    }
+
+    private static string EncodeForSession(string value)
+        => Convert.ToBase64String(Encoding.UTF8.GetBytes(value)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+}
