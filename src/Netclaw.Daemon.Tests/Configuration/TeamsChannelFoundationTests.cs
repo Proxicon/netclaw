@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Reflection;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using Akka.Actor;
@@ -439,6 +440,19 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_rejects_a_missing_configured_tenant_before_constructing_an_activity()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions(), new FakeTimeProvider());
+
+        var result = translator.Translate(CreateSdkMessage(), "authenticated-tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedPendingTenantEvidence, result.Disposition);
+        Assert.Equal("configured_tenant_mismatch", result.ReasonCode);
+        Assert.Null(result.Activity);
+        Assert.DoesNotContain("authenticated-tenant", result.ReasonCode, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Incomplete_configuration_never_maps_the_activity_route()
     {
         var builder = WebApplication.CreateBuilder();
@@ -574,6 +588,39 @@ public sealed class TeamsChannelFoundationTests
         {
             await actorSystem.Terminate();
         }
+    }
+
+    [Fact]
+    public async Task Ingress_actor_failure_does_not_poison_a_retry_or_consume_a_cache_entry()
+    {
+        var actorSystem = ActorSystem.Create($"teams-ingress-failure-{Guid.NewGuid():N}");
+        try
+        {
+            var sink = new ThrowThenAcceptIngressSink();
+            var actor = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(sink, TimeProvider.System)));
+            var activity = CreateInboundActivity();
+
+            Assert.Equal(TeamsIngressRouteDisposition.RouteFailed, (await RouteAsync(actor, activity)).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, activity)).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Duplicate, (await RouteAsync(actor, activity)).Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    [Fact]
+    public async Task Teams_activity_rate_limit_rejects_the_thirty_first_request_and_isolates_sources()
+    {
+        await using var app = await BuildTeamsRateLimitHostAsync();
+        var client = app.GetTestClient();
+
+        for (var request = 0; request < 30; request++)
+            Assert.Equal(System.Net.HttpStatusCode.OK, (await SendRateLimitedRequestAsync(client, "192.0.2.10")).StatusCode);
+
+        Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, (await SendRateLimitedRequestAsync(client, "192.0.2.10")).StatusCode);
+        Assert.Equal(System.Net.HttpStatusCode.OK, (await SendRateLimitedRequestAsync(client, "192.0.2.11")).StatusCode);
     }
 
     [Fact]
@@ -740,6 +787,44 @@ public sealed class TeamsChannelFoundationTests
         return app;
     }
 
+    private static async Task<WebApplication> BuildTeamsRateLimitHostAsync()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "synthetic-tenant",
+            ["Teams:ClientId"] = "synthetic-client",
+            ["Teams:ClientSecret"] = "synthetic-secret"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.AddTeamsIngress();
+        builder.Services.AddRateLimiter(options => options.RejectionStatusCode = StatusCodes.Status429TooManyRequests);
+
+        var app = builder.Build();
+        app.Use((context, next) =>
+        {
+            context.Connection.RemoteIpAddress = IPAddress.Parse(context.Request.Headers["X-Test-Remote"].ToString());
+            return next(context);
+        });
+        app.UseRateLimiter();
+        app.MapPost("/teams-rate-limit-test", () => Results.Ok())
+            .RequireRateLimiting(TeamsActivityEndpointExtensions.RateLimitPolicy);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        return app;
+    }
+
+    private static Task<HttpResponseMessage> SendRateLimitedRequestAsync(HttpClient client, string source)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/teams-rate-limit-test")
+        {
+            Content = new StringContent("{}")
+        };
+        request.Headers.Add("X-Test-Remote", source);
+        return client.SendAsync(request, TestContext.Current.CancellationToken);
+    }
+
     private sealed class RecordingIngressSink : ITeamsConversationIngressSink
     {
         private int _count;
@@ -759,6 +844,22 @@ public sealed class TeamsChannelFoundationTests
 
         public ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
             => ValueTask.FromResult(_results.Dequeue());
+    }
+
+    private sealed class ThrowThenAcceptIngressSink : ITeamsConversationIngressSink
+    {
+        private bool _shouldThrow = true;
+
+        public ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
+        {
+            if (_shouldThrow)
+            {
+                _shouldThrow = false;
+                throw new InvalidOperationException("synthetic sink failure");
+            }
+
+            return ValueTask.FromResult(TeamsIngressSinkResult.Accepted);
+        }
     }
 
     private static string EncodeForSession(string value)
