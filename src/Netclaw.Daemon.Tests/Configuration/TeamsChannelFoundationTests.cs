@@ -685,6 +685,31 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public async Task Ingress_host_maps_an_ask_timeout_to_unavailable()
+    {
+        var actorSystem = ActorSystem.Create($"teams-ingress-timeout-{Guid.NewGuid():N}");
+        try
+        {
+            var services = new ServiceCollection();
+            services.AddSingleton(actorSystem);
+            services.AddSingleton<TimeProvider>(TimeProvider.System);
+            services.AddSingleton<ITeamsConversationIngressSink, NeverCompletingIngressSink>();
+            using var provider = services.BuildServiceProvider();
+            var host = new TeamsIngressActorHost(provider);
+            await host.StartAsync(TestContext.Current.CancellationToken);
+
+            var result = await host.SubmitAsync(CreateInboundActivity(), TestContext.Current.CancellationToken);
+
+            Assert.Equal(TeamsIngressRouteDisposition.Unavailable, result.Disposition);
+            await host.StopAsync(TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    [Fact]
     public async Task Teams_activity_rate_limit_rejects_the_thirty_first_request_and_isolates_sources()
     {
         await using var app = await BuildTeamsRateLimitHostAsync();
@@ -1000,6 +1025,12 @@ public sealed class TeamsChannelFoundationTests
 
             return ValueTask.FromResult(TeamsIngressSinkResult.Accepted);
         }
+    }
+
+    private sealed class NeverCompletingIngressSink : ITeamsConversationIngressSink
+    {
+        public ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
+            => new(new TaskCompletionSource<TeamsIngressSinkResult>().Task);
     }
 
     private sealed class RecordingBodyEndpoint
