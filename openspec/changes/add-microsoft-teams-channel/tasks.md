@@ -72,15 +72,16 @@ live token validation. **Rollback:** disable Teams removes endpoint after restar
 ## PR 3 — Personal conversation and binding route
 
 **Objective:** route allowed personal messages through durable bindings.
-**Areas:** conversation/binding actors, pipeline integration, personal replies.
+**Areas:** conversation/binding actors and pipeline integration; outbound
+delivery remains deferred.
 **Focused tests:** deterministic personal session, processed-ID persistence
-before dispatch, restart/passivation, approved outbound destination ownership.
+before dispatch, restart/passivation, and no outbound delivery.
 **Acceptance:** personal sessions are stable and default-deny. **Tenant
 prerequisite:** personal reply observation remains tenant smoke-gated. **Rollback:**
 disable Teams; endpoint may remain separately testable but performs no dispatch.
 
-- [ ] 3.1 Implement personal conversation and binding actors with binding-owned
-  durable processed-ID dedupe, pipeline dispatch, destination, and output state.
+- [x] 3.1 Implement personal conversation and binding actors with binding-owned
+  durable processed-ID dedupe and pipeline dispatch without outbound delivery.
 
 ## PR 4 — Channel routing, mention ACL, and activity-root index
 
