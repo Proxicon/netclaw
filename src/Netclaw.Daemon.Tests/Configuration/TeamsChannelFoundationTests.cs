@@ -380,6 +380,27 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public async Task Teams_health_stays_degraded_and_not_ready_until_tenant_validation()
+    {
+        var disabled = await SnapshotAsync(new TeamsChannelOptions());
+        var incomplete = await SnapshotAsync(new TeamsChannelOptions { Enabled = true, TenantId = "tenant" });
+        var complete = await SnapshotAsync(new TeamsChannelOptions
+        {
+            Enabled = true,
+            TenantId = "tenant",
+            ClientId = "client",
+            ClientSecret = new SensitiveString("secret")
+        });
+
+        Assert.All(new[] { disabled, incomplete, complete }, snapshot =>
+        {
+            Assert.Equal(ChannelHealthStatus.Degraded, snapshot.Health);
+            Assert.False(snapshot.IsReady);
+            Assert.False(snapshot.IsConnected);
+        });
+    }
+
+    [Fact]
     public void Translator_accepts_only_complete_personal_messages()
     {
         var translator = new TeamsSdkActivityTranslator(
@@ -447,7 +468,7 @@ public sealed class TeamsChannelFoundationTests
         var result = translator.Translate(CreateSdkMessage(), "authenticated-tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedPendingTenantEvidence, result.Disposition);
-        Assert.Equal("configured_tenant_mismatch", result.ReasonCode);
+        Assert.Equal("missing_configured_tenant_id", result.ReasonCode);
         Assert.Null(result.Activity);
         Assert.DoesNotContain("authenticated-tenant", result.ReasonCode, StringComparison.Ordinal);
     }
@@ -611,6 +632,59 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public async Task Ingress_actor_cancellation_during_sink_routing_remains_retryable()
+    {
+        var actorSystem = ActorSystem.Create($"teams-ingress-cancel-{Guid.NewGuid():N}");
+        try
+        {
+            using var cancellation = new CancellationTokenSource();
+            var sink = new CancelThenAcceptIngressSink(cancellation);
+            var actor = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(sink, TimeProvider.System)));
+            var activity = CreateInboundActivity();
+
+            Assert.Equal(
+                TeamsIngressRouteDisposition.Cancelled,
+                (await actor.Ask<TeamsIngressRouteResult>(
+                    new TeamsIngressReceived(activity, cancellation.Token),
+                    TestContext.Current.CancellationToken)).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, activity)).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Duplicate, (await RouteAsync(actor, activity)).Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    [Fact]
+    public async Task Deferred_sink_is_unavailable_and_cancelled_host_submission_is_cancelled()
+    {
+        var sink = new DeferredTeamsConversationIngressSink();
+        Assert.Equal(
+            TeamsIngressSinkResult.Unavailable,
+            await sink.RouteAsync(CreateInboundActivity(), TestContext.Current.CancellationToken));
+
+        var actorSystem = ActorSystem.Create($"teams-ingress-cancelled-host-{Guid.NewGuid():N}");
+        try
+        {
+            var services = new ServiceCollection();
+            services.AddSingleton(actorSystem);
+            using var provider = services.BuildServiceProvider();
+            var host = new TeamsIngressActorHost(provider);
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+
+            Assert.Equal(
+                TeamsIngressRouteDisposition.Cancelled,
+                (await host.SubmitAsync(CreateInboundActivity(), cancellation.Token)).Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    [Fact]
     public async Task Teams_activity_rate_limit_rejects_the_thirty_first_request_and_isolates_sources()
     {
         await using var app = await BuildTeamsRateLimitHostAsync();
@@ -621,6 +695,36 @@ public sealed class TeamsChannelFoundationTests
 
         Assert.Equal(System.Net.HttpStatusCode.TooManyRequests, (await SendRateLimitedRequestAsync(client, "192.0.2.10")).StatusCode);
         Assert.Equal(System.Net.HttpStatusCode.OK, (await SendRateLimitedRequestAsync(client, "192.0.2.11")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Teams_activity_body_guard_returns_semantic_4xx_and_never_calls_the_endpoint_for_oversized_bodies()
+    {
+        var endpoint = new RecordingBodyEndpoint();
+        await using var app = await BuildTeamsBodyGuardHostAsync(endpoint);
+        var client = app.GetTestClient();
+
+        var empty = await client.PostAsync(TeamsActivityEndpointExtensions.ActivityPath, new ByteArrayContent([]), TestContext.Current.CancellationToken);
+        var malformed = await client.PostAsync(TeamsActivityEndpointExtensions.ActivityPath, new StringContent("{"), TestContext.Current.CancellationToken);
+        var exactLimit = await client.PostAsync(
+            TeamsActivityEndpointExtensions.ActivityPath,
+            new ByteArrayContent(Encoding.UTF8.GetBytes(new string('a', TeamsActivityEndpointExtensions.MaxActivityBodyBytes))),
+            TestContext.Current.CancellationToken);
+        var oversized = await client.PostAsync(
+            TeamsActivityEndpointExtensions.ActivityPath,
+            new ByteArrayContent(Encoding.UTF8.GetBytes(new string('a', TeamsActivityEndpointExtensions.MaxActivityBodyBytes + 1))),
+            TestContext.Current.CancellationToken);
+        var chunkedOversized = await client.PostAsync(
+            TeamsActivityEndpointExtensions.ActivityPath,
+            new ChunkedContent(Encoding.UTF8.GetBytes(new string('a', TeamsActivityEndpointExtensions.MaxActivityBodyBytes + 1))),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.BadRequest, empty.StatusCode);
+        Assert.InRange((int)malformed.StatusCode, 400, 499);
+        Assert.NotEqual(HttpStatusCode.RequestEntityTooLarge, exactLimit.StatusCode);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, oversized.StatusCode);
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, chunkedOversized.StatusCode);
+        Assert.Equal(2, endpoint.Count);
     }
 
     [Fact]
@@ -732,6 +836,13 @@ public sealed class TeamsChannelFoundationTests
             new TeamsIngressReceived(activity, TestContext.Current.CancellationToken),
             TestContext.Current.CancellationToken);
 
+    private static async Task<ChannelRuntimeSnapshot> SnapshotAsync(TeamsChannelOptions options)
+    {
+        var descriptor = ChannelDescriptor.CreateRemoteChat(ChannelType.Teams, "Teams", options.Enabled, options.AllowDirectMessages);
+        var provider = new TeamsChannelRuntimeSnapshotProvider(descriptor, TeamsIngressRegistration.Evaluate(options));
+        return await provider.GetSnapshotAsync(TestContext.Current.CancellationToken);
+    }
+
     private static MessageActivity CreateSdkMessage(TeamsConversationType? type = null)
         => new("hello")
         {
@@ -801,6 +912,7 @@ public sealed class TeamsChannelFoundationTests
         builder.Services.AddChannelIntegrations(builder.Configuration);
         builder.AddTeamsIngress();
         builder.Services.AddRateLimiter(options => options.RejectionStatusCode = StatusCodes.Status429TooManyRequests);
+        builder.Services.RemoveAll<IHostedService>();
 
         var app = builder.Build();
         app.Use((context, next) =>
@@ -811,6 +923,17 @@ public sealed class TeamsChannelFoundationTests
         app.UseRateLimiter();
         app.MapPost("/teams-rate-limit-test", () => Results.Ok())
             .RequireRateLimiting(TeamsActivityEndpointExtensions.RateLimitPolicy);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        return app;
+    }
+
+    private static async Task<WebApplication> BuildTeamsBodyGuardHostAsync(RecordingBodyEndpoint endpoint)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        var app = builder.Build();
+        app.UseTeamsActivityBodyGuard();
+        app.MapPost(TeamsActivityEndpointExtensions.ActivityPath, endpoint.HandleAsync);
         await app.StartAsync(TestContext.Current.CancellationToken);
         return app;
     }
@@ -860,6 +983,56 @@ public sealed class TeamsChannelFoundationTests
 
             return ValueTask.FromResult(TeamsIngressSinkResult.Accepted);
         }
+    }
+
+    private sealed class CancelThenAcceptIngressSink(CancellationTokenSource cancellation) : ITeamsConversationIngressSink
+    {
+        private bool _shouldCancel = true;
+
+        public ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
+        {
+            if (_shouldCancel)
+            {
+                _shouldCancel = false;
+                cancellation.Cancel();
+                throw new OperationCanceledException(cancellation.Token);
+            }
+
+            return ValueTask.FromResult(TeamsIngressSinkResult.Accepted);
+        }
+    }
+
+    private sealed class RecordingBodyEndpoint
+    {
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public async Task<IResult> HandleAsync(HttpRequest request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _count);
+            try
+            {
+                await JsonDocument.ParseAsync(request.Body, cancellationToken: cancellationToken);
+                return Results.Ok();
+            }
+            catch (JsonException)
+            {
+                return Results.BadRequest();
+            }
+        }
+    }
+
+    private sealed class ChunkedContent(byte[] content) : HttpContent
+    {
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => stream.WriteAsync(content).AsTask();
     }
 
     private static string EncodeForSession(string value)

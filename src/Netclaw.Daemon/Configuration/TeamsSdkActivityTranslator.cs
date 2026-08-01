@@ -42,8 +42,12 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         if (string.IsNullOrWhiteSpace(authenticatedTenantId))
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, TeamsIngressActivityKind.Message, "missing_authenticated_tenant_id");
 
-        if (string.IsNullOrWhiteSpace(options.TenantId)
-            || !string.Equals(authenticatedTenantId, options.TenantId, StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(options.TenantId))
+        {
+            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, TeamsIngressActivityKind.Message, "missing_configured_tenant_id");
+        }
+
+        if (!string.Equals(authenticatedTenantId, options.TenantId, StringComparison.Ordinal))
         {
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, TeamsIngressActivityKind.Message, "configured_tenant_mismatch");
         }

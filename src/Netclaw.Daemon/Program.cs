@@ -27,6 +27,7 @@ using Netclaw.Actors.Skills;
 using Netclaw.Actors.SubAgents;
 using Netclaw.Actors.Tools;
 using Netclaw.Channels;
+using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
 using Netclaw.Configuration.Http;
 using Netclaw.Providers;
@@ -231,6 +232,9 @@ static async Task RunDaemonAsync(string[] args, DaemonRestartSignal restartSigna
     // timing of the previous eager-resolution path while letting detection use
     // the host's IModelCapabilityResolver chain and ILoggerFactory.
     app.Services.GetRequiredService<ModelCapabilities>();
+
+    if (app.Services.GetRequiredService<TeamsIngressRegistration>().CanActivateSdk)
+        app.UseTeamsActivityBodyGuard();
 
     app.UseAuthentication();
     app.UseAuthorization();
