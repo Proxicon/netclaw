@@ -375,7 +375,9 @@ public sealed class TeamsChannelFoundationTests
     [Fact]
     public void Translator_accepts_only_complete_personal_messages()
     {
-        var translator = new TeamsSdkActivityTranslator(new FakeTimeProvider());
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "tenant" },
+            new FakeTimeProvider());
         var activity = new MessageActivity("hello")
         {
             Id = "activity",
@@ -398,6 +400,36 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal(TeamsConversationScope.Personal, accepted.Activity.Trust.Scope);
         Assert.Equal(TeamsTranslationDisposition.RejectedPendingTenantEvidence, missingTenant.Disposition);
         Assert.Equal(TeamsTranslationDisposition.RejectedUnsupportedScope, groupChat.Disposition);
+    }
+
+    [Fact]
+    public void Translator_enforces_configured_and_activity_tenant_boundaries_without_identifier_disclosure()
+    {
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "configured-tenant" },
+            new FakeTimeProvider());
+        var activity = new MessageActivity("hello")
+        {
+            Id = "activity",
+            From = new TeamsAccount { Id = "sender" },
+            Conversation = new TeamsConversation
+            {
+                Id = "conversation",
+                TenantId = "configured-tenant",
+                Type = TeamsConversationType.Personal
+            }
+        };
+
+        var configuredMismatch = translator.Translate(activity, "authenticated-other-tenant");
+        activity.Conversation.TenantId = "conversation-other-tenant";
+        var activityMismatch = translator.Translate(activity, "configured-tenant");
+        activity.Conversation.TenantId = "configured-tenant";
+        var missingAuthenticatedTenant = translator.Translate(activity, null);
+
+        Assert.Equal("configured_tenant_mismatch", configuredMismatch.ReasonCode);
+        Assert.DoesNotContain("authenticated-other-tenant", configuredMismatch.ReasonCode, StringComparison.Ordinal);
+        Assert.Equal("tenant_mismatch", activityMismatch.ReasonCode);
+        Assert.Equal("missing_authenticated_tenant_id", missingAuthenticatedTenant.ReasonCode);
     }
 
     [Fact]
@@ -472,6 +504,51 @@ public sealed class TeamsChannelFoundationTests
         }
     }
 
+    [Fact]
+    public async Task Ingress_actor_failure_and_unavailable_result_do_not_poison_a_retry()
+    {
+        var actorSystem = ActorSystem.Create($"teams-ingress-retry-{Guid.NewGuid():N}");
+        try
+        {
+            var sink = new SequencedIngressSink(TeamsIngressSinkResult.Unavailable, TeamsIngressSinkResult.Accepted);
+            var actor = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(sink, TimeProvider.System)));
+            var activity = CreateInboundActivity();
+
+            var unavailable = await actor.Ask<TeamsIngressRouteResult>(new TeamsIngressReceived(activity, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken);
+            var retry = await actor.Ask<TeamsIngressRouteResult>(new TeamsIngressReceived(activity, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken);
+            var duplicate = await actor.Ask<TeamsIngressRouteResult>(new TeamsIngressReceived(activity, TestContext.Current.CancellationToken), TestContext.Current.CancellationToken);
+
+            Assert.Equal(TeamsIngressRouteDisposition.Unavailable, unavailable.Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, retry.Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Duplicate, duplicate.Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    [Fact]
+    public async Task Ingress_host_reports_unavailable_before_start_and_after_stop()
+    {
+        var actorSystem = ActorSystem.Create($"teams-ingress-host-{Guid.NewGuid():N}");
+        try
+        {
+            var host = new TeamsIngressActorHost(actorSystem);
+
+            var beforeStart = await host.SubmitAsync(CreateInboundActivity(), TestContext.Current.CancellationToken);
+            await host.StopAsync(TestContext.Current.CancellationToken);
+            var afterStop = await host.SubmitAsync(CreateInboundActivity(), TestContext.Current.CancellationToken);
+
+            Assert.Equal(TeamsIngressRouteDisposition.Unavailable, beforeStart.Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Unavailable, afterStop.Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
     private static TeamsInboundActivity CreateInboundActivity()
         => new(
             new TeamsIngressTrustContext(
@@ -493,11 +570,19 @@ public sealed class TeamsChannelFoundationTests
 
         public int Count => Volatile.Read(ref _count);
 
-        public ValueTask RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
+        public ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref _count);
-            return ValueTask.CompletedTask;
+            return ValueTask.FromResult(TeamsIngressSinkResult.Accepted);
         }
+    }
+
+    private sealed class SequencedIngressSink(params TeamsIngressSinkResult[] results) : ITeamsConversationIngressSink
+    {
+        private readonly Queue<TeamsIngressSinkResult> _results = new(results);
+
+        public ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
+            => ValueTask.FromResult(_results.Dequeue());
     }
 
     private static string EncodeForSession(string value)

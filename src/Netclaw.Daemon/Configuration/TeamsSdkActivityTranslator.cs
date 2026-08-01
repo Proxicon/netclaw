@@ -15,7 +15,7 @@ namespace Netclaw.Daemon.Configuration;
 /// Keeps Microsoft SDK activity objects at the HTTP hosting edge. No Teams
 /// SDK type is allowed to cross into the channel contracts or actor boundary.
 /// </summary>
-internal sealed class TeamsSdkActivityTranslator(TimeProvider timeProvider)
+internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, TimeProvider timeProvider)
 {
     public TeamsTranslationResult Translate(IActivity activity, string? authenticatedTenantId)
     {
@@ -33,7 +33,7 @@ internal sealed class TeamsSdkActivityTranslator(TimeProvider timeProvider)
                 TeamsIngressActivityKind.ConversationUpdate,
                 "conversation_update_recording_not_implemented"),
             MessageActivity message => TranslateMessage(message, authenticatedTenantId),
-            _ => TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "unsupported_activity_type")
+            _ => TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Unknown, "unsupported_activity_type")
         };
     }
 
@@ -41,6 +41,12 @@ internal sealed class TeamsSdkActivityTranslator(TimeProvider timeProvider)
     {
         if (string.IsNullOrWhiteSpace(authenticatedTenantId))
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, TeamsIngressActivityKind.Message, "missing_authenticated_tenant_id");
+
+        if (string.IsNullOrWhiteSpace(options.TenantId)
+            || !string.Equals(authenticatedTenantId, options.TenantId, StringComparison.Ordinal))
+        {
+            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, TeamsIngressActivityKind.Message, "configured_tenant_mismatch");
+        }
 
         if (activity.Conversation is null || string.IsNullOrWhiteSpace(activity.Conversation.Id))
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "missing_conversation_id");
@@ -70,6 +76,9 @@ internal sealed class TeamsSdkActivityTranslator(TimeProvider timeProvider)
         if (scope is null)
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, TeamsIngressActivityKind.Message, "unsupported_conversation_scope");
 
+        if (scope == TeamsConversationScope.Channel)
+            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, TeamsIngressActivityKind.Message, "channel_root_mapping_pending_tenant_evidence");
+
         var trust = new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
@@ -80,7 +89,8 @@ internal sealed class TeamsSdkActivityTranslator(TimeProvider timeProvider)
             activity.Conversation.Id,
             scope.Value,
             activity.Id,
-            activity.Timestamp ?? timeProvider.GetUtcNow());
+            timeProvider.GetUtcNow(),
+            activity.Timestamp is { } timestamp ? new DateTimeOffset(timestamp.ToUniversalTime()) : null);
 
         // Mention extraction is a PR 4 concern; false cannot grant a channel pass.
         return TeamsTranslationResult.Accepted(new TeamsInboundActivity(trust, activity.Text, null, false));
