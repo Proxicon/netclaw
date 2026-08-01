@@ -11,6 +11,7 @@ namespace Netclaw.Channels.Teams;
 
 public enum TeamsIngressActivityKind
 {
+    Unknown,
     Message,
     ConversationUpdate,
     MessageUpdate,
@@ -65,7 +66,8 @@ public sealed record TeamsIngressTrustContext
         string conversationId,
         TeamsConversationScope scope,
         string activityId,
-        DateTimeOffset receivedAtUtc)
+        DateTimeOffset receivedAtUtc,
+        DateTimeOffset? platformTimestampUtc = null)
     {
         Audience = ValidateEnum(audience, nameof(audience));
         Principal = ValidateEnum(principal, nameof(principal));
@@ -81,6 +83,7 @@ public sealed record TeamsIngressTrustContext
         ReceivedAtUtc = receivedAtUtc == default
             ? throw new ArgumentException("Received timestamp is required.", nameof(receivedAtUtc))
             : receivedAtUtc;
+        PlatformTimestampUtc = platformTimestampUtc;
     }
 
     public TrustAudience Audience { get; }
@@ -102,6 +105,12 @@ public sealed record TeamsIngressTrustContext
     public string ActivityId { get; }
 
     public DateTimeOffset ReceivedAtUtc { get; }
+
+    /// <summary>
+    /// Optional Teams-supplied event time. Receipt time remains local so the
+    /// SDK payload cannot influence daemon ordering or retention decisions.
+    /// </summary>
+    public DateTimeOffset? PlatformTimestampUtc { get; }
 
     private static T ValidateEnum<T>(T value, string parameterName)
         where T : struct, Enum

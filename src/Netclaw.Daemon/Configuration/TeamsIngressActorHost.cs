@@ -17,10 +17,10 @@ namespace Netclaw.Daemon.Configuration;
 /// </summary>
 internal sealed class DeferredTeamsConversationIngressSink : ITeamsConversationIngressSink
 {
-    public ValueTask RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
+    public ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
     {
         ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("conversation_routing_not_implemented");
-        return ValueTask.CompletedTask;
+        return ValueTask.FromResult(TeamsIngressSinkResult.Unavailable);
     }
 }
 
@@ -43,9 +43,28 @@ internal sealed class TeamsIngressActorHost(ActorSystem actorSystem) : IHostedSe
         return Task.CompletedTask;
     }
 
-    public void Submit(TeamsInboundActivity activity, CancellationToken cancellationToken)
+    public async ValueTask<TeamsIngressRouteResult> SubmitAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
     {
-        var actor = _actor ?? throw new InvalidOperationException("Teams ingress actor is not started.");
-        actor.Tell(new TeamsIngressReceived(activity, cancellationToken));
+        var actor = _actor;
+        if (actor is null || cancellationToken.IsCancellationRequested)
+            return new TeamsIngressRouteResult(cancellationToken.IsCancellationRequested
+                ? TeamsIngressRouteDisposition.Cancelled
+                : TeamsIngressRouteDisposition.Unavailable);
+
+        try
+        {
+            return await actor.Ask<TeamsIngressRouteResult>(
+                new TeamsIngressReceived(activity, cancellationToken),
+                TimeSpan.FromSeconds(2),
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Cancelled);
+        }
+        catch (AskTimeoutException)
+        {
+            return new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Unavailable);
+        }
     }
 }

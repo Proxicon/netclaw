@@ -16,7 +16,13 @@ namespace Netclaw.Channels.Teams;
 /// </summary>
 public interface ITeamsConversationIngressSink
 {
-    ValueTask RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken);
+    ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken);
+}
+
+public enum TeamsIngressSinkResult
+{
+    Accepted,
+    Unavailable
 }
 
 public sealed record TeamsIngressReceived(TeamsInboundActivity Activity, CancellationToken CancellationToken);
@@ -25,7 +31,9 @@ public enum TeamsIngressRouteDisposition
 {
     Routed,
     Duplicate,
-    Cancelled
+    Cancelled,
+    Unavailable,
+    RouteFailed
 }
 
 public sealed record TeamsIngressRouteResult(TeamsIngressRouteDisposition Disposition);
@@ -75,13 +83,33 @@ public sealed class TeamsIngressActor : ReceiveActor
             return;
         }
 
-        _recent.Add(key, now);
-        _order.Enqueue(key);
-        EvictExcess();
+        try
+        {
+            var sinkResult = await _conversationSink.RouteAsync(received.Activity, received.CancellationToken);
+            if (sinkResult != TeamsIngressSinkResult.Accepted)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("conversation_boundary_unavailable");
+                Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Unavailable));
+                return;
+            }
 
-        await _conversationSink.RouteAsync(received.Activity, received.CancellationToken);
-        ChannelTelemetry.For(ChannelType.Teams).RecordEventRouted("conversation_boundary");
-        Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Routed));
+            // Retain only work accepted by the next boundary. PR 3 owns the
+            // durable processed-ID record; this cache must never suppress a retry.
+            _recent.Add(key, now);
+            _order.Enqueue(key);
+            EvictExcess();
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventRouted("conversation_boundary");
+            Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Routed));
+        }
+        catch (OperationCanceledException) when (received.CancellationToken.IsCancellationRequested)
+        {
+            Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Cancelled));
+        }
+        catch (Exception)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("conversation_boundary_failed");
+            Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.RouteFailed));
+        }
     }
 
     private void EvictExpired(DateTimeOffset now)

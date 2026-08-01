@@ -71,8 +71,9 @@ internal static class TeamsActivityEndpointExtensions
 
             if (result.Disposition == TeamsTranslationDisposition.Accepted)
             {
-                ingress.Submit(result.Activity!, cancellationToken);
-                ChannelTelemetry.For(ChannelType.Teams).RecordEventRouted("ingress_actor");
+                var routeResult = await ingress.SubmitAsync(result.Activity!, cancellationToken);
+                if (routeResult.Disposition != TeamsIngressRouteDisposition.Routed)
+                    ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped($"ingress_{routeResult.Disposition.ToString().ToLowerInvariant()}");
             }
             else
             {
@@ -101,8 +102,11 @@ internal static class TeamsActivityEndpointExtensions
             .AddEndpointFilter(async (filterContext, next) =>
             {
                 var request = filterContext.HttpContext.Request;
-                if (request.ContentLength is > MaxActivityBodyBytes || request.ContentLength == 0)
+                if (request.ContentLength is > MaxActivityBodyBytes)
                     return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+
+                if (request.ContentLength == 0)
+                    return Results.BadRequest();
 
                 var bodySizeFeature = filterContext.HttpContext.Features.Get<IHttpMaxRequestBodySizeFeature>();
                 if (bodySizeFeature is { IsReadOnly: false })
