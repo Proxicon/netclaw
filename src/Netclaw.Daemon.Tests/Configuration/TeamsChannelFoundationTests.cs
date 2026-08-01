@@ -6,15 +6,25 @@
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Akka.Actor;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Time.Testing;
+using Microsoft.Teams.Api.Activities;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
 using Netclaw.Daemon.Configuration;
 using Xunit;
+using TeamsAccount = Microsoft.Teams.Api.Account;
+using TeamsConversation = Microsoft.Teams.Api.Conversation;
+using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -338,6 +348,156 @@ public sealed class TeamsChannelFoundationTests
         Assert.All(
             new[] { typeof(TeamsIngressTrustContext), typeof(TeamsInboundActivity), typeof(TeamsOutboundMessage) },
             type => Assert.DoesNotContain(type.GetProperties(), property => property.PropertyType.Namespace?.StartsWith("Microsoft.Teams", StringComparison.Ordinal) == true));
+    }
+
+    [Fact]
+    public void Ingress_registration_requires_the_complete_client_secret_credential_set()
+    {
+        var missingSecret = TeamsIngressRegistration.Evaluate(new TeamsChannelOptions
+        {
+            Enabled = true,
+            TenantId = "tenant",
+            ClientId = "client"
+        });
+        var complete = TeamsIngressRegistration.Evaluate(new TeamsChannelOptions
+        {
+            Enabled = true,
+            TenantId = "tenant",
+            ClientId = "client",
+            ClientSecret = new SensitiveString("synthetic-secret")
+        });
+
+        Assert.False(missingSecret.CanActivateSdk);
+        Assert.Equal("missing_client_secret", missingSecret.ReasonCode);
+        Assert.True(complete.CanActivateSdk);
+    }
+
+    [Fact]
+    public void Translator_accepts_only_complete_personal_messages()
+    {
+        var translator = new TeamsSdkActivityTranslator(new FakeTimeProvider());
+        var activity = new MessageActivity("hello")
+        {
+            Id = "activity",
+            From = new TeamsAccount { Id = "sender" },
+            Conversation = new TeamsConversation
+            {
+                Id = "conversation",
+                TenantId = "tenant",
+                Type = TeamsConversationType.Personal
+            }
+        };
+
+        var accepted = translator.Translate(activity, "tenant");
+        var missingTenant = translator.Translate(activity, null);
+        activity.Conversation.Type = TeamsConversationType.GroupChat;
+        var groupChat = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, accepted.Disposition);
+        Assert.Equal("tenant", accepted.Activity!.Trust.TenantId);
+        Assert.Equal(TeamsConversationScope.Personal, accepted.Activity.Trust.Scope);
+        Assert.Equal(TeamsTranslationDisposition.RejectedPendingTenantEvidence, missingTenant.Disposition);
+        Assert.Equal(TeamsTranslationDisposition.RejectedUnsupportedScope, groupChat.Disposition);
+    }
+
+    [Fact]
+    public void Incomplete_configuration_never_maps_the_activity_route()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "tenant",
+            ["Teams:ClientId"] = "client"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.AddTeamsIngress();
+        var app = builder.Build();
+
+        app.MapTeamsActivityEndpoint();
+
+        Assert.DoesNotContain(
+            ((IEndpointRouteBuilder)app).DataSources.SelectMany(source => source.Endpoints).OfType<RouteEndpoint>(),
+            endpoint => string.Equals(endpoint.RoutePattern.RawText, TeamsActivityEndpointExtensions.ActivityPath, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Complete_configuration_maps_exactly_one_authenticated_activity_route()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "tenant",
+            ["Teams:ClientId"] = "client",
+            ["Teams:ClientSecret"] = "synthetic-secret"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.AddTeamsIngress();
+        var app = builder.Build();
+
+        app.MapTeamsActivityEndpoint();
+
+        var route = Assert.Single(
+            ((IEndpointRouteBuilder)app).DataSources.SelectMany(source => source.Endpoints).OfType<RouteEndpoint>(),
+            endpoint => string.Equals(endpoint.RoutePattern.RawText, TeamsActivityEndpointExtensions.ActivityPath, StringComparison.Ordinal));
+        Assert.Contains(route.Metadata, metadata => metadata is AuthorizeAttribute);
+        Assert.Contains(route.Metadata, metadata => metadata is EnableRateLimitingAttribute);
+    }
+
+    [Fact]
+    public async Task Ingress_actor_deduplicates_only_the_process_local_fast_path()
+    {
+        var actorSystem = ActorSystem.Create($"teams-ingress-{Guid.NewGuid():N}");
+        try
+        {
+            var sink = new RecordingIngressSink();
+            var actor = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(sink, TimeProvider.System)));
+            var activity = CreateInboundActivity();
+
+            var first = await actor.Ask<TeamsIngressRouteResult>(
+                new TeamsIngressReceived(activity, TestContext.Current.CancellationToken),
+                TestContext.Current.CancellationToken);
+            var duplicate = await actor.Ask<TeamsIngressRouteResult>(
+                new TeamsIngressReceived(activity, TestContext.Current.CancellationToken),
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, first.Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Duplicate, duplicate.Disposition);
+            Assert.Equal(1, sink.Count);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    private static TeamsInboundActivity CreateInboundActivity()
+        => new(
+            new TeamsIngressTrustContext(
+                TrustAudience.Public,
+                PrincipalClassification.UntrustedExternal,
+                TrustBoundary.Public,
+                new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+                "sender",
+                "tenant",
+                "conversation",
+                TeamsConversationScope.Personal,
+                "activity",
+                DateTimeOffset.UnixEpoch),
+            "hello");
+
+    private sealed class RecordingIngressSink : ITeamsConversationIngressSink
+    {
+        private int _count;
+
+        public int Count => Volatile.Read(ref _count);
+
+        public ValueTask RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _count);
+            return ValueTask.CompletedTask;
+        }
     }
 
     private static string EncodeForSession(string value)
