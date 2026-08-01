@@ -407,14 +407,16 @@ public sealed class MattermostSessionBindingContractTests(ITestOutputHelper outp
             new MattermostRootPostId("root-test"),
             deps), $"mm-session-store-{Interlocked.Increment(ref _actorCounter)}");
 
-        await AwaitAssertAsync(() => Assert.Single(_replyClient.Posts), cancellationToken: ct);
-
-        var actions = _replyClient.Posts[0].Attachments![0].Actions!;
-        foreach (var action in actions)
+        await AwaitAssertAsync(() =>
         {
-            Assert.True(store.TryGet(action.Context["action_token"], out var stored));
-            Assert.Equal("post-1", stored!.PromptPostId);
-            Assert.Equal("call-mm-association", stored.CallId);
-        }
+            var post = Assert.Single(_replyClient.Posts);
+            var actions = post.Attachments![0].Actions!;
+            foreach (var action in actions)
+            {
+                Assert.True(store.TryGet(action.Context["action_token"], out var stored));
+                Assert.Equal("post-1", stored!.PromptPostId);
+                Assert.Equal("call-mm-association", stored.CallId);
+            }
+        }, cancellationToken: ct);
     }
 }
