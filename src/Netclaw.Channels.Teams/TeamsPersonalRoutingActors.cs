@@ -4,6 +4,8 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Threading.Channels;
+using System.Security.Cryptography;
+using System.Text;
 using Akka.Actor;
 using Akka.Event;
 using Akka.Persistence;
@@ -14,6 +16,7 @@ using Netclaw.Actors.Protocol;
 using Netclaw.Channels;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
+using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Channels.Teams;
 
@@ -249,6 +252,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 {
     internal const int ProcessedActivityCapacity = 1_024;
 
+    private const long SnapshotInterval = 64;
+
     private readonly SessionId _sessionId;
     private readonly TeamsConversationDependencies _dependencies;
     private readonly SessionPipelineHandle _pipelineHandle;
@@ -265,6 +270,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         Recover<DurableActivityDispatchReserved>(ApplyReserved);
         Recover<DurableActivityDispatchReleased>(ApplyReleased);
+        Recover<SnapshotOffer>(offer =>
+        {
+            if (offer.Snapshot is DurableActivityDispatchSnapshot snapshot)
+                ApplySnapshot(snapshot);
+        });
 
         Context.SetReceiveTimeout(TimeSpan.FromHours(1));
         Command<ReceiveTimeout>(_ => Context.Stop(Self));
@@ -281,6 +291,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 "Teams personal pipeline output terminated",
                 () => ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_pipeline_reinitialize_failed"));
         });
+        Command<SaveSnapshotSuccess>(saved =>
+        {
+            DeleteMessages(saved.Metadata.SequenceNr);
+            DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr - 1));
+        });
+        Command<SaveSnapshotFailure>(_ =>
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_processed_state_snapshot_failed"));
     }
 
     public override string PersistenceId =>
@@ -324,23 +341,28 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
         }
 
-        var activityId = ingress.Activity.Trust.ActivityId;
-        if (_processedActivityIds.Contains(activityId))
+        var activityFingerprint = ActivityFingerprint.Create(ingress.Activity.Trust.ActivityId);
+        if (_processedActivityIds.Contains(activityFingerprint))
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("durable_activity_duplicate");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Duplicate));
             return;
         }
 
-        var evictedActivityId = _processedActivityOrder.Count == ProcessedActivityCapacity
+        var evictedActivityFingerprint = _processedActivityOrder.Count == ProcessedActivityCapacity
             ? _processedActivityOrder.Peek()
             : null;
         Persist(
-            new DurableActivityDispatchReserved(activityId, evictedActivityId),
+            new DurableActivityDispatchReserved(activityFingerprint, evictedActivityFingerprint),
             reserved =>
             {
                 ApplyReserved(reserved);
-                Self.Tell(new DispatchReservedActivity(ingress.Activity, replyTo, ingress.CancellationToken));
+                SaveSnapshotWhenDue();
+                Self.Tell(new DispatchReservedActivity(
+                    ingress.Activity,
+                    activityFingerprint,
+                    replyTo,
+                    ingress.CancellationToken));
             });
     }
 
@@ -373,10 +395,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         TeamsBindingRouteDisposition disposition)
     {
         Persist(
-            new DurableActivityDispatchReleased(dispatch.Activity.Trust.ActivityId),
+            new DurableActivityDispatchReleased(dispatch.ActivityFingerprint),
             released =>
             {
                 ApplyReleased(released);
+                SaveSnapshotWhenDue();
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(
                     disposition == TeamsBindingRouteDisposition.Cancelled
                         ? "pipeline_dispatch_cancelled"
@@ -398,7 +421,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 ChannelType = ChannelType.Teams,
                 Filter = OutputFilter.None
             },
-            _ => { },
+            DiscardDeferredOutput,
             (generation, cause) => Self.Tell(new OutputStreamTerminated(generation, cause)),
             cancellationToken);
     }
@@ -423,34 +446,78 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private void ApplyReserved(DurableActivityDispatchReserved reserved)
     {
-        if (reserved.EvictedActivityId is { } evicted)
+        EnsureValidFingerprint(reserved.ActivityFingerprint);
+        if (reserved.EvictedActivityFingerprint is { } evicted)
         {
-            if (_processedActivityOrder.Count > 0
-                && string.Equals(_processedActivityOrder.Peek(), evicted, StringComparison.Ordinal))
+            EnsureValidFingerprint(evicted);
+            if (_processedActivityOrder.Count == 0
+                || !string.Equals(_processedActivityOrder.Peek(), evicted, StringComparison.Ordinal)
+                || !_processedActivityIds.Remove(evicted))
             {
-                _processedActivityOrder.Dequeue();
+                throw new InvalidOperationException("The Teams processed activity state has invalid retention ordering.");
             }
 
-            _processedActivityIds.Remove(evicted);
+            _processedActivityOrder.Dequeue();
         }
+        else if (_processedActivityOrder.Count >= ProcessedActivityCapacity)
+            throw new InvalidOperationException("The Teams processed activity state exceeds its retention limit.");
 
-        if (_processedActivityIds.Add(reserved.ActivityId))
-            _processedActivityOrder.Enqueue(reserved.ActivityId);
+        if (!_processedActivityIds.Add(reserved.ActivityFingerprint))
+            throw new InvalidOperationException("The Teams processed activity state contains a duplicate reservation.");
+
+        _processedActivityOrder.Enqueue(reserved.ActivityFingerprint);
     }
 
     private void ApplyReleased(DurableActivityDispatchReleased released)
     {
-        if (!_processedActivityIds.Remove(released.ActivityId))
+        EnsureValidFingerprint(released.ActivityFingerprint);
+        if (!_processedActivityIds.Remove(released.ActivityFingerprint))
             return;
 
-        var retained = _processedActivityOrder.Where(id => id != released.ActivityId).ToArray();
+        var retained = _processedActivityOrder.Where(id => id != released.ActivityFingerprint).ToArray();
         _processedActivityOrder.Clear();
-        foreach (var activityId in retained)
-            _processedActivityOrder.Enqueue(activityId);
+        foreach (var fingerprint in retained)
+            _processedActivityOrder.Enqueue(fingerprint);
+    }
+
+    private void ApplySnapshot(DurableActivityDispatchSnapshot snapshot)
+    {
+        if (snapshot.ActivityFingerprints.Count > ProcessedActivityCapacity)
+            throw new InvalidOperationException("The Teams processed activity snapshot exceeds its retention limit.");
+
+        _processedActivityIds.Clear();
+        _processedActivityOrder.Clear();
+        foreach (var fingerprint in snapshot.ActivityFingerprints)
+        {
+            EnsureValidFingerprint(fingerprint);
+            if (!_processedActivityIds.Add(fingerprint))
+                throw new InvalidOperationException("The Teams processed activity snapshot contains a duplicate entry.");
+
+            _processedActivityOrder.Enqueue(fingerprint);
+        }
+    }
+
+    private void SaveSnapshotWhenDue()
+    {
+        if (!IsRecovering && LastSequenceNr > 0 && LastSequenceNr % SnapshotInterval == 0)
+            SaveSnapshot(new DurableActivityDispatchSnapshot(_processedActivityOrder.ToArray()));
+    }
+
+    private static void DiscardDeferredOutput(SessionOutput _)
+        => ChannelTelemetry.For(ChannelType.Teams).RecordExtra("personal_output_deferred");
+
+    private static void EnsureValidFingerprint(string fingerprint)
+    {
+        if (fingerprint.Length != 64 || fingerprint.Any(static character =>
+                !char.IsAsciiLetterOrDigit(character) || !char.IsAsciiHexDigit(character)))
+        {
+            throw new InvalidOperationException("The Teams processed activity state contains an invalid fingerprint.");
+        }
     }
 
     private sealed record DispatchReservedActivity(
         TeamsInboundActivity Activity,
+        string ActivityFingerprint,
         IActorRef ReplyTo,
         CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
 
@@ -460,4 +527,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private sealed record ReinitializePipeline : INoSerializationVerificationNeeded;
 
+}
+
+internal static class ActivityFingerprint
+{
+    public static string Create(string activityId) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(activityId)));
 }

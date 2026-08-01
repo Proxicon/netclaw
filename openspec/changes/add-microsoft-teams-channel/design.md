@@ -143,7 +143,12 @@ retried. After a process crash that occurs after the reservation commits but
 before the pipeline accepts the input, recovery suppresses the retry; this is a
 documented at-most-once local-admission trade-off, not an exactly-once external
 or model-execution claim. The persisted reservation and release records use
-new Netclaw protobuf types and do not contain Microsoft SDK types.
+new Netclaw protobuf types and do not contain Microsoft SDK types. They store
+only fixed activity fingerprints. Ordered snapshots compact the journal after
+snapshot success and retain at most 1,024 fingerprints. Older binaries do not
+recognize the new durable manifests. They must not run against PR 3 Teams
+binding state. Disabling `Teams.Enabled` is safe operational rollback. It does
+not establish binary rollback compatibility for stored PR 3 binding state.
 
 PR 3 uses `TeamsSessionIdentifierCodec` as the sole personal session builder;
 actor names URI-escape the resulting canonical ID. Bindings may passivate and
