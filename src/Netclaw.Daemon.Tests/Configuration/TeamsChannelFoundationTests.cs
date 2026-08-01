@@ -576,7 +576,124 @@ public sealed class TeamsChannelFoundationTests
         }
     }
 
-    private static TeamsInboundActivity CreateInboundActivity()
+    [Fact]
+    public void Translator_rejects_each_required_message_boundary_without_synthesizing_identifiers()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-07-01T12:00:00Z"));
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "tenant" },
+            clock);
+        var activity = CreateSdkMessage();
+
+        Assert.Equal("missing_conversation_id", translator.Translate(new MessageActivity("text")
+        {
+            Id = "activity", From = new TeamsAccount { Id = "sender" }, Conversation = new TeamsConversation { Id = "", Type = TeamsConversationType.Personal }
+        }, "tenant").ReasonCode);
+        Assert.Equal("missing_activity_id", translator.Translate(new MessageActivity("text")
+        {
+            From = new TeamsAccount { Id = "sender" }, Conversation = activity.Conversation
+        }, "tenant").ReasonCode);
+        Assert.Equal("missing_message_text", translator.Translate(new MessageActivity("")
+        {
+            Id = "activity", From = new TeamsAccount { Id = "sender" }, Conversation = activity.Conversation
+        }, "tenant").ReasonCode);
+        Assert.Equal("missing_sender_id", translator.Translate(new MessageActivity("text")
+        {
+            Id = "activity", Conversation = activity.Conversation
+        }, "tenant").ReasonCode);
+
+        var accepted = translator.Translate(activity, "tenant");
+        Assert.Equal(TeamsTranslationDisposition.Accepted, accepted.Disposition);
+        Assert.Equal(clock.GetUtcNow(), accepted.Activity!.Trust.ReceivedAtUtc);
+        Assert.Null(accepted.Activity.Trust.PlatformTimestampUtc);
+        Assert.Equal("activity", accepted.Activity.Trust.ActivityId);
+        Assert.Equal("conversation", accepted.Activity.Trust.ConversationId);
+    }
+
+    [Fact]
+    public void Translator_preserves_only_the_platform_timestamp_and_rejects_pending_activity_kinds()
+    {
+        var receivedAt = DateTimeOffset.Parse("2026-07-01T12:00:00Z");
+        var clock = new FakeTimeProvider(receivedAt);
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, clock);
+        var activity = CreateSdkMessage();
+        activity.Timestamp = DateTimeOffset.Parse("2026-06-30T12:00:00+02:00").DateTime;
+
+        var accepted = translator.Translate(activity, "tenant");
+        Assert.Equal(receivedAt, accepted.Activity!.Trust.ReceivedAtUtc);
+        Assert.Equal(new DateTimeOffset(activity.Timestamp.Value.ToUniversalTime()), accepted.Activity.Trust.PlatformTimestampUtc);
+        Assert.Equal("channel_root_mapping_pending_tenant_evidence", translator.Translate(CreateSdkMessage(TeamsConversationType.Channel), "tenant").ReasonCode);
+        Assert.Equal("activity_update_pending_persisted_mapping", translator.Translate(new MessageUpdateActivity(), "tenant").ReasonCode);
+        Assert.Equal("activity_delete_pending_persisted_mapping", translator.Translate(new MessageDeleteActivity(), "tenant").ReasonCode);
+        Assert.Equal(TeamsTranslationDisposition.Ignored, translator.Translate(new ConversationUpdateActivity(), "tenant").Disposition);
+        Assert.Equal(TeamsIngressActivityKind.Unknown, translator.Translate(new TypingActivity(), "tenant").ActivityKind);
+    }
+
+    [Fact]
+    public async Task Ingress_actor_retains_tenant_and_conversation_isolation_and_evicts_deterministically()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var actorSystem = ActorSystem.Create($"teams-ingress-capacity-{Guid.NewGuid():N}");
+        try
+        {
+            var sink = new RecordingIngressSink();
+            var actor = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(sink, clock)));
+            for (var index = 0; index < TeamsIngressActor.DuplicateCapacity; index++)
+                Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, CreateInboundActivity(activityId: $"activity-{index}"))).Disposition);
+
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, CreateInboundActivity(activityId: "activity-1024"))).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, CreateInboundActivity(activityId: "activity-0"))).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Duplicate, (await RouteAsync(actor, CreateInboundActivity(activityId: "activity-1024"))).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, CreateInboundActivity(tenantId: "other-tenant", activityId: "activity-1024"))).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, CreateInboundActivity(conversationId: "other-conversation", activityId: "activity-1024"))).Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    [Fact]
+    public async Task Ingress_actor_expires_accepted_entries_and_never_caches_failure_or_cancellation()
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var actorSystem = ActorSystem.Create($"teams-ingress-expiry-{Guid.NewGuid():N}");
+        try
+        {
+            var sink = new SequencedIngressSink(TeamsIngressSinkResult.Unavailable, TeamsIngressSinkResult.Accepted, TeamsIngressSinkResult.Accepted);
+            var actor = actorSystem.ActorOf(Props.Create(() => new TeamsIngressActor(sink, clock)));
+            var activity = CreateInboundActivity();
+            Assert.Equal(TeamsIngressRouteDisposition.Unavailable, (await RouteAsync(actor, activity)).Disposition);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, activity)).Disposition);
+            clock.Advance(TeamsIngressActor.DuplicateRetention);
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await RouteAsync(actor, activity)).Disposition);
+
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            Assert.Equal(TeamsIngressRouteDisposition.Cancelled, (await actor.Ask<TeamsIngressRouteResult>(
+                new TeamsIngressReceived(CreateInboundActivity(activityId: "cancelled"), cancellation.Token),
+                TestContext.Current.CancellationToken)).Disposition);
+        }
+        finally
+        {
+            await actorSystem.Terminate();
+        }
+    }
+
+    private static async Task<TeamsIngressRouteResult> RouteAsync(IActorRef actor, TeamsInboundActivity activity)
+        => await actor.Ask<TeamsIngressRouteResult>(
+            new TeamsIngressReceived(activity, TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+    private static MessageActivity CreateSdkMessage(TeamsConversationType? type = null)
+        => new("hello")
+        {
+            Id = "activity",
+            From = new TeamsAccount { Id = "sender" },
+            Conversation = new TeamsConversation { Id = "conversation", TenantId = "tenant", Type = type ?? TeamsConversationType.Personal }
+        };
+
+    private static TeamsInboundActivity CreateInboundActivity(string tenantId = "tenant", string conversationId = "conversation", string activityId = "activity")
         => new(
             new TeamsIngressTrustContext(
                 TrustAudience.Public,
@@ -584,10 +701,10 @@ public sealed class TeamsChannelFoundationTests
                 TrustBoundary.Public,
                 new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
                 "sender",
-                "tenant",
-                "conversation",
+                tenantId,
+                conversationId,
                 TeamsConversationScope.Personal,
-                "activity",
+                activityId,
                 DateTimeOffset.UnixEpoch),
             "hello");
 
