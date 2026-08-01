@@ -689,6 +689,8 @@ public sealed class TeamsChannelFoundationTests
     [Fact]
     public async Task Ingress_host_maps_an_ask_timeout_to_unavailable()
     {
+        var telemetry = ChannelTelemetry.For(ChannelType.Teams);
+        var initial = telemetry.GetSnapshot();
         var actorSystem = ActorSystem.Create($"teams-ingress-timeout-{Guid.NewGuid():N}");
         try
         {
@@ -709,6 +711,8 @@ public sealed class TeamsChannelFoundationTests
         {
             await actorSystem.Terminate();
         }
+
+        Assert.Equal(initial.EventsRouted, telemetry.GetSnapshot().EventsRouted);
     }
 
     [Fact]
