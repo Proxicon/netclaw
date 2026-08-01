@@ -4,7 +4,6 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Akka.Actor;
-using Akka.DependencyInjection;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Channels.Telemetry;
@@ -31,8 +30,10 @@ internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : 
     public Task StartAsync(CancellationToken cancellationToken)
     {
         var actorSystem = serviceProvider.GetRequiredService<ActorSystem>();
+        var conversationSink = serviceProvider.GetRequiredService<ITeamsConversationIngressSink>();
+        var timeProvider = serviceProvider.GetRequiredService<TimeProvider>();
         _actor = actorSystem.ActorOf(
-            DependencyResolver.For(actorSystem).Props<TeamsIngressActor>(),
+            Props.Create(() => new TeamsIngressActor(conversationSink, timeProvider)),
             "teams-ingress");
         return Task.CompletedTask;
     }
