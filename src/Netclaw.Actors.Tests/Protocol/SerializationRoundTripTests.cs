@@ -553,6 +553,16 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void Durable_activity_dispatch_records_round_trip()
+    {
+        var reserved = new DurableActivityDispatchReserved("activity-1", "activity-0");
+        var released = new DurableActivityDispatchReleased("activity-1");
+
+        Assert.Equal(reserved, RoundTrip(reserved));
+        Assert.Equal(released, RoundTrip(released));
+    }
+
+    [Fact]
     public void Unknown_manifest_throws_on_deserialize()
     {
         var serializer = new Serialization.NetclawProtobufSerializer((Akka.Actor.ExtendedActorSystem)Sys);

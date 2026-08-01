@@ -327,6 +327,17 @@ message PendingApprovalPromptClearedProto {
   string call_id = 1;
 }
 
+// ── Durable channel activity dispatch ──
+
+message DurableActivityDispatchReservedProto {
+  string activity_id = 1;
+  optional string evicted_activity_id = 2;
+}
+
+message DurableActivityDispatchReleasedProto {
+  string activity_id = 1;
+}
+
 // ── Memory observer events ──
 
 // Journaled by SessionMemoryObserverActor when a distillation completes.

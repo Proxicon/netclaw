@@ -45,6 +45,8 @@ internal static class NetclawProtoMapper
         CursorAdvanced v => ToProto(v),
         PendingApprovalPromptTracked v => ToProto(v),
         PendingApprovalPromptCleared v => ToProto(v),
+        DurableActivityDispatchReserved v => ToProto(v),
+        DurableActivityDispatchReleased v => ToProto(v),
         MemoriesDistilledV2 v => ToProto(v),
         _ => throw new ArgumentException($"No proto mapping for {obj.GetType().FullName}")
     };
@@ -776,6 +778,29 @@ internal static class NetclawProtoMapper
     {
         CallId = proto.CallId
     };
+
+    internal static Proto.DurableActivityDispatchReservedProto ToProto(DurableActivityDispatchReserved evt)
+    {
+        var proto = new Proto.DurableActivityDispatchReservedProto
+        {
+            ActivityId = evt.ActivityId
+        };
+        if (evt.EvictedActivityId is not null)
+            proto.EvictedActivityId = evt.EvictedActivityId;
+        return proto;
+    }
+
+    internal static DurableActivityDispatchReserved FromProto(Proto.DurableActivityDispatchReservedProto proto) => new(
+        proto.ActivityId,
+        proto.HasEvictedActivityId ? proto.EvictedActivityId : null);
+
+    internal static Proto.DurableActivityDispatchReleasedProto ToProto(DurableActivityDispatchReleased evt) => new()
+    {
+        ActivityId = evt.ActivityId
+    };
+
+    internal static DurableActivityDispatchReleased FromProto(Proto.DurableActivityDispatchReleasedProto proto) => new(
+        proto.ActivityId);
 
     // ── MemoriesDistilledV2 / ProposedMemoryContext ──
 

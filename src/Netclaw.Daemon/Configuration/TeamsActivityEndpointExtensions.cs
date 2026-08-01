@@ -40,7 +40,7 @@ internal static class TeamsActivityEndpointExtensions
                 options.TenantId!));
         builder.AddTeams(appBuilder, routing: false);
         builder.Services.AddSingleton<TeamsSdkActivityTranslator>();
-        builder.Services.AddSingleton<ITeamsConversationIngressSink, DeferredTeamsConversationIngressSink>();
+        builder.Services.AddSingleton<ITeamsConversationIngressSink, TeamsActorConversationIngressSink>();
         builder.Services.AddSingleton<TeamsIngressActorHost>();
         builder.Services.AddSingleton<IHostedService>(serviceProvider =>
             serviceProvider.GetRequiredService<TeamsIngressActorHost>());
