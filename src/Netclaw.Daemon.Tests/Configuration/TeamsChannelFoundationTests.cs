@@ -558,7 +558,10 @@ public sealed class TeamsChannelFoundationTests
         var actorSystem = ActorSystem.Create($"teams-ingress-host-{Guid.NewGuid():N}");
         try
         {
-            var host = new TeamsIngressActorHost(actorSystem);
+            var services = new ServiceCollection();
+            services.AddSingleton(actorSystem);
+            using var provider = services.BuildServiceProvider();
+            var host = new TeamsIngressActorHost(provider);
 
             var beforeStart = await host.SubmitAsync(CreateInboundActivity(), TestContext.Current.CancellationToken);
             await host.StopAsync(TestContext.Current.CancellationToken);
