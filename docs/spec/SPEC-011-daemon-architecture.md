@@ -95,6 +95,20 @@ Both binaries reference these class libraries:
   `ModelSelection`, `NetclawPaths`. Used by the CLI for config file operations
   and by the daemon for runtime configuration.
 
+### Tool Execution Scope
+
+The daemon admits each tool batch with an immutable run scope containing its
+session binding, audience and trust boundary, delivery metadata, project and
+working-directory context, model modalities, and output budget. Tool
+implementations receive a required invocation view of that scope; there is no
+context-free production dispatch path.
+
+Each invocation owns its output collection and the pipeline owns its mutable
+approval-attempt state. Parallel calls may share the immutable admitted scope,
+but never mutable output or approval state. MCP remains the executable's only
+extension boundary and receives the same required invocation context without
+changing its request or response schema.
+
 ## SignalR Hub Contract
 
 The SignalR hub at `/hub/session` is the primary API between clients and the
@@ -211,7 +225,8 @@ The daemon installs process-level exception handlers at startup for:
 - `AppDomain.CurrentDomain.UnhandledException`
 - `TaskScheduler.UnobservedTaskException`
 
-On either path, Netclaw writes a crash log under `~/.netclaw/logs/crash-*.log`
+On either path, Netclaw writes a crash log under `<NETCLAW_HOME>/logs/crash-*.log`;
+`NETCLAW_HOME` defaults to `~/.netclaw`
 with process diagnostics and the latest known session/turn context. When DI is
 available, the daemon also emits an operational alert with type
 `daemon.crashing` (category `DaemonCrashed`) so configured webhook targets can

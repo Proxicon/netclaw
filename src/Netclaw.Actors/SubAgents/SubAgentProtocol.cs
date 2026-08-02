@@ -6,6 +6,7 @@
 using System.Threading.Channels;
 using Akka.Actor;
 using Microsoft.Extensions.AI;
+using Netclaw.Actors.Sessions;
 using Netclaw.Configuration;
 using Netclaw.Tools;
 
@@ -43,7 +44,7 @@ public sealed record SubAgentDefinition
     public string? ProjectInstructions { get; init; }
 
     /// <summary>
-    /// Embedded AGENTS.md operating rules inherited from the parent session's trust audience.
+    /// Embedded operating core and deployment playbook inherited from the parent session's trust audience.
     /// Provides sub-agents with the same safety, grounding, and policy constraints as main agents.
     /// </summary>
     public string? OperatingRules { get; init; }
@@ -67,6 +68,13 @@ public static class SubAgentProtocol
 /// </summary>
 public sealed record RunSubAgent : ISubAgentCommand
 {
+    /// <summary>
+    /// Framework-owned authority and read-only working snapshot forked from
+    /// the parent invocation. The child receives no reference to parent
+    /// activity state and allocates its own output and file-activity trackers.
+    /// </summary>
+    public required ChildRunScope Scope { get; init; }
+
     /// <summary>The task for the subagent to perform (becomes part of the user message).</summary>
     public required string Task { get; init; }
 
@@ -111,62 +119,19 @@ public sealed record RunSubAgent : ISubAgentCommand
     public CancellationToken Cancellation { get; init; }
 
     /// <summary>
-    /// Optional execution scope ID used for session-scoped tool routing.
-    /// When omitted, the subagent runtime assigns a unique transient scope.
-    /// </summary>
-    public string? SessionScopeId { get; init; }
-
-    /// <summary>
-    /// Trust audience inherited from the spawning session. A parsed
-    /// <see cref="TrustAudience"/> — the sub-agent actor rejects a spawn with no
-    /// audience rather than defaulting it.
-    /// </summary>
-    public TrustAudience? Audience { get; init; }
-
-    public TrustBoundary? Boundary { get; init; }
-
-    public string? ChannelType { get; init; }
-
-    public ChannelDeliveryTargetInfo? DefaultDeliveryTarget { get; init; }
-
-    public ChannelDeliveryTargetInfo? RequestedDeliveryTarget { get; init; }
-
-    /// <summary>
-    /// Input modalities supported by the model selected for this sub-agent run.
-    /// Tools use this to decide whether model-visible media handoff is allowed.
-    /// </summary>
-    public ModelModality ModelInputModalities { get; init; } = ModelModality.Text;
-
-    /// <summary>
-    /// Parent session's session directory snapshot when the subagent was spawned.
-    /// </summary>
-    public string? ParentSessionDirectory { get; init; }
-
-    /// <summary>
-    /// Parent session's project directory snapshot when the subagent was spawned.
-    /// </summary>
-    public string? ParentProjectDirectory { get; init; }
-
-    /// <summary>
-    /// Snapshot of the parent's <c>ToolExecutionContext.ResolveShellCwd(null)</c>
-    /// at spawn time. Seeds the child's <c>InheritedCwd</c>. Null when the
-    /// parent itself had no resolvable cwd.
-    /// </summary>
-    public string? ParentCwd { get; init; }
-
-    /// <summary>
-    /// Parent session's approval bridge. When provided, the sub-agent can route
-    /// approval requests back to the interactive user instead of auto-denying.
-    /// </summary>
-    public IParentApprovalBridge? ApprovalBridge { get; init; }
-
-    /// <summary>
     /// Optional sink for liveness/progress activity emitted while the sub-agent
     /// runs. Streaming <c>spawn_agent</c> calls provide this so the parent's
     /// per-call watchdog sees a long-but-healthy run as alive. Non-streaming
     /// callers leave it null because no parent stream is observing activity.
     /// </summary>
     public ChannelWriter<ToolActivityUpdate>? ActivitySink { get; init; }
+}
+
+public sealed record ChildRunScope
+{
+    public required SubAgentScopeId ScopeId { get; init; }
+    public required ToolRunScope Authority { get; init; }
+    public required WorkingContextSnapshot InitialWorkingSnapshot { get; init; }
 }
 
 // ===== Responses =====
@@ -176,8 +141,10 @@ public sealed record RunSubAgent : ISubAgentCommand
 /// </summary>
 public sealed record SubAgentResult : ISubAgentResponse
 {
+    public required ChildRunCompletion Completion { get; init; }
+
     /// <summary>Whether the subagent completed successfully.</summary>
-    public required bool Success { get; init; }
+    public bool Success => Completion.Success;
 
     /// <summary>The subagent's final text output (or error message on failure).</summary>
     public required string Output { get; init; }
@@ -186,10 +153,10 @@ public sealed record SubAgentResult : ISubAgentResponse
     public required AgentName AgentName { get; init; }
 
     /// <summary>Terminal outcome of the run, separate from the legacy success flag.</summary>
-    public SubAgentRunOutcome Outcome { get; init; } = SubAgentRunOutcome.Completed;
+    public SubAgentRunOutcome Outcome => Completion.Outcome;
 
     /// <summary>Machine-readable reason when <see cref="Outcome"/> is not completed.</summary>
-    public SubAgentOutcomeReason? OutcomeReason { get; init; }
+    public SubAgentOutcomeReason? OutcomeReason => Completion.Reason;
 
     /// <summary>Spawner-generated run id used to correlate logs and notifications.</summary>
     public SubAgentRunId? RunId { get; init; }
@@ -206,5 +173,8 @@ public sealed record SubAgentResult : ISubAgentResponse
     /// Total number of structured findings returned before parent-session review.
     /// </summary>
     public int FindingsCount { get; init; }
+
+    /// <summary>Structured, run-scoped file and Git context returned to the parent.</summary>
+    public WorkingContextDelta? WorkingContext => Completion.Delta;
 }
 }

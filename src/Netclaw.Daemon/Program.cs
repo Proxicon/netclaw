@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="Program.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -360,8 +360,7 @@ static NetclawPaths ConfigureConfigServices(IServiceCollection services, IConfig
     // No silent fallback to local-ollama: an empty Providers section yields
     // the NoProviderConfigured outcome and the host registers NoOpChatClientProvider.
     var providers = ProviderConfigurationLoader.Load(configuration.GetSection("Providers"));
-    var models = configuration.GetSection("Models")
-        .Get<ModelSelection>() ?? new ModelSelection();
+    var models = ModelConfigurationResolver.Resolve(configuration).Selection;
     var validation = ProviderRuntimeValidation.Evaluate(
         providers,
         models,
@@ -398,9 +397,15 @@ static void ConfigureDaemonServices(
     services.AddHostedService<ExposureModeValidationService>();
     services.AddHostedService<BootstrapCompletionMarkerService>();
 
+    var resolvedModels = ModelConfigurationResolver.Resolve(configuration).Selection;
     services
         .AddOptions<ModelSelection>()
-        .Bind(configuration.GetSection("Models"))
+        .Configure(options =>
+        {
+            options.Main = resolvedModels.Main;
+            options.Fallback = resolvedModels.Fallback;
+            options.Compaction = resolvedModels.Compaction;
+        })
         .ValidateOnStart();
     services.AddSingleton<IValidateOptions<ModelSelection>, ModelSelectionValidator>();
     services
@@ -414,12 +419,19 @@ static void ConfigureDaemonServices(
 
     services.Configure<HostOptions>(options =>
     {
-        options.ShutdownTimeout = TimeSpan.FromSeconds(30);
+        // Generic-host shutdown ceiling for all hosted services combined. Kept in lockstep
+        // with DaemonConfig.SystemdTimeoutStopSec (= GracefulShutdownBudget + teardown margin)
+        // rather than a bare, unrelated literal: a value shorter than the Akka
+        // before-service-unbind phase timeout below would silently reintroduce the same class
+        // of mismatch behind netclaw-dev/netclaw#1665 (budgets that look independent but must
+        // stay ordered). AkkaHostedService.StopAsync does not observe this cancellation token
+        // and awaits CoordinatedShutdown.Run to its own natural completion, so this value does
+        // not itself truncate the drain — it only keeps the documented layering consistent.
+        options.ShutdownTimeout = DaemonConfig.SystemdTimeoutStopSec;
     });
 
     // Resolve models for session config
-    var models = configuration.GetSection("Models")
-        .Get<ModelSelection>() ?? new ModelSelection();
+    var models = resolvedModels;
     services.AddSingleton(models);
 
     // Auto-detect model capabilities via the runtime IModelCapabilityResolver
@@ -689,21 +701,6 @@ static void ConfigureDaemonServices(
         .Get<SkillFeedsConfig>() ?? new SkillFeedsConfig();
     services.AddSingleton(skillFeedsConfig);
 
-    var resolvedServerFeedSources = new List<ResolvedExternalSource>();
-    foreach (var feed in skillFeedsConfig.Feeds.Where(f => f.Enabled))
-    {
-        var feedDir = paths.ServerFeedDirectory(feed.Name);
-        if (Directory.Exists(feedDir))
-            resolvedServerFeedSources.Add(new ResolvedExternalSource(
-                $"server-feed:{feed.Name}", [feedDir], AllowSymlinks: false));
-    }
-    IReadOnlyList<ResolvedExternalSource> serverFeeds = resolvedServerFeedSources;
-    services.AddKeyedSingleton("server-feeds", serverFeeds);
-
-    // Scan native skills first (highest precedence), then server feeds, then external sources
-    var initialSkillScan = SkillScanner.ScanAndMerge(
-        paths.SkillsDirectory, serverFeeds, resolvedExternalSources);
-    skillRegistry.ReplaceAll(initialSkillScan.AcceptedSkills, initialSkillScan.Issues);
     services.AddSingleton(skillRegistry);
 
     // Subagent definition registry and file loader
@@ -750,7 +747,6 @@ static void ConfigureDaemonServices(
             toolAccessPolicy,
             sp.GetService<IToolApprovalService>(),
             sp.GetRequiredService<ILogger<DispatchingToolExecutor>>()));
-
     // Operational notification webhooks
     var notificationsConfig = configuration.GetSection("Notifications")
         .Get<NotificationsConfig>() ?? new NotificationsConfig();
@@ -791,15 +787,19 @@ static void ConfigureDaemonServices(
         return new OAuthPkceService(httpClient);
     });
     services.AddSingleton<IProviderOAuthCallbackListener, ProviderOAuthCallbackListener>();
-    services.AddHttpClient(nameof(McpOAuthService)).AddNetclawHeaders("mcp-oauth");
-    services.AddSingleton(sp => new McpOAuthService(
-        sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(McpOAuthService)),
+    services.AddSingleton(sp => new McpOAuthCredentialStore(
         paths,
         sp.GetRequiredService<TimeProvider>(),
-        sp.GetRequiredService<ILogger<McpOAuthService>>(),
-        sp.GetRequiredService<OAuthPkceService>(),
-        sp.GetRequiredService<IOperationalNotificationSink>(),
-        sp.GetService<ISecretsProtector>()));
+        sp.GetRequiredService<ISecretsProtector>(),
+        sp.GetRequiredService<ILogger<McpOAuthCredentialStore>>()));
+    services.AddHttpClient("McpOAuth").AddNetclawHeaders("mcp-oauth");
+    services.AddSingleton(sp => new McpOAuthClientRegistrar(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("McpOAuth"),
+        sp.GetRequiredService<ILogger<McpOAuthClientRegistrar>>()));
+    services.AddSingleton(sp => new McpOAuthFlowBroker(
+        sp.GetRequiredService<TimeProvider>(),
+        sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping));
+    services.AddSingleton<IMcpClientRuntime, McpClientRuntime>();
     services.AddSingleton<McpClientManager>();
     services.AddHostedService(sp => sp.GetRequiredService<McpClientManager>());
     services.AddSingleton<IMcpReconnectable>(sp => sp.GetRequiredService<McpClientManager>());
@@ -813,11 +813,14 @@ static void ConfigureDaemonServices(
     services.AddSingleton<ToolIndexContextLayer>();
     services.AddSingleton<IContextLayerProvider>(sp => sp.GetRequiredService<ToolIndexContextLayer>());
 
-    // Skill index context layer — compressed format pointing at files on disk, rebuilt by sync service
+    // Skill index context layer — origin-free logical catalog rebuilt with the complete inventory.
     var skillIndexLayer = new SkillIndexContextLayer(skillSyncConfig);
-    skillIndexLayer.Update(skillRegistry.GenerateIndex(paths.SkillsDirectory, resolvedExternalSources));
     services.AddSingleton(skillIndexLayer);
     services.AddSingleton<IContextLayerProvider>(skillIndexLayer);
+    var skillInventoryRefresher = new SkillInventoryRefresher(
+        paths, skillFeedsConfig, resolvedExternalSources, skillRegistry, skillIndexLayer);
+    var initialSkillScan = skillInventoryRefresher.Refresh();
+    services.AddSingleton(skillInventoryRefresher);
 
     // Skill tools are registered post-build so ISkillContentScanner resolves from DI.
     // See SkillToolRegistration call after app.Build().
@@ -858,6 +861,8 @@ static void ConfigureDaemonServices(
 
     // Current time context layer — transient per-turn grounding for date/time-sensitive prompts
     services.AddSingleton<IContextLayerProvider, CurrentTimeContextLayer>();
+    services.AddSingleton<IGitWorkingContextInspector, GitWorkingContextInspector>();
+    services.AddSingleton<IWorkingContextSnapshotProvider, WorkingContextSnapshotProvider>();
 
     // Expose all context layers as IReadOnlyList for actor DI resolution
     services.AddSingleton<IReadOnlyList<IContextLayerProvider>>(sp =>
@@ -966,12 +971,12 @@ static void ConfigureDaemonServices(
         sp.GetRequiredService<IChatClientProvider>(),
         sp.GetRequiredService<ISystemPromptProvider>(),
         sp.GetRequiredService<IReadOnlyList<IContextLayerProvider>>(),
+        sp.GetRequiredService<IWorkingContextSnapshotProvider>(),
         sp.GetRequiredService<TimeProvider>(),
         sp.GetRequiredService<NetclawPaths>()));
 
     services.AddSingleton(sp => new SessionToolServices(
         sp.GetRequiredService<IToolExecutor>(),
-        sp.GetService<IToolAuditLogger>(),
         sp.GetRequiredService<ToolRegistry>(),
         sp.GetService<ToolAccessPolicy>(),
         sp.GetService<TrustContextDeriver>(),
@@ -997,16 +1002,13 @@ static void ConfigureDaemonServices(
     {
         // Prevent coordinated shutdown from calling Environment.Exit(),
         // which would kill the process before the restart loop can iterate.
-        // The before-service-unbind phase needs a generous timeout because sessions
-        // mid-LLM-call (TurnLlmTimeout defaults to 3 minutes) must finish before
-        // passivation can begin.
+        // The before-service-unbind phase needs a generous timeout (DaemonConfig.
+        // GracefulShutdownBudget) because sessions mid-LLM-call (TurnLlmTimeout defaults to
+        // 3 minutes) must finish before passivation can begin. See DaemonConfig.
+        // GracefulShutdownBudget remarks for the full set of surfaces this must stay in
+        // lockstep with.
         akkaBuilder.AddHocon(
-            """
-            akka.coordinated-shutdown {
-                exit-clr = off
-                phases.before-service-unbind.timeout = 200s
-            }
-            """,
+            DaemonShutdownConfiguration.BuildCoordinatedShutdownHocon(DaemonConfig.GracefulShutdownBudget),
             HoconAddMode.Prepend);
 
         akkaBuilder = akkaBuilder.ConfigureLoggers(setup =>
@@ -1062,8 +1064,8 @@ static void ConfigureDaemonServices(
             // Runs in an early CoordinatedShutdown phase while actors are still alive.
             // If DaemonRestartCoordinator already drained sessions (config reload), the ingress
             // gate will be closed and this task skips its drain to avoid double-draining.
-            // The phase timeout (200s) is generous because sessions mid-LLM-call must finish
-            // before passivation can begin.
+            // The phase timeout (DaemonConfig.GracefulShutdownBudget) is generous because
+            // sessions mid-LLM-call must finish before passivation can begin.
             var cs = CoordinatedShutdown.Get(system);
             var sessionManager = registry.Get<SessionManagerActorKey>();
             var ingressGate = sp.GetRequiredService<SessionIngressGate>();
@@ -1080,8 +1082,21 @@ static void ConfigureDaemonServices(
 
                 try
                 {
+                    // Bounded strictly under DaemonConfig.GracefulShutdownBudget (the Akka phase
+                    // timeout above) so the drain always completes -- timed out or not -- before
+                    // the phase timeout itself fires and abandons this task outright.
+                    // netclaw-dev/netclaw#1664: a session parked on interactive tool approval
+                    // never acks PrepareForDaemonRestart, so an unbounded wait here (previously
+                    // CancellationToken.None, CancellationToken.None) hung for the full 200s
+                    // phase timeout with no timeout of its own, leaking the abandoned drain task.
+                    using var drainDeadlineCts = new CancellationTokenSource(DaemonConfig.BoundedDrainTimeout, tp);
+
                     var drainResult = await SessionDrainHelper.DrainAsync(
-                        sessionManager, "daemon-stop", drainLogger, CancellationToken.None);
+                        sessionManager,
+                        "daemon-stop",
+                        drainLogger,
+                        drainDeadlineCts.Token,
+                        CancellationToken.None);
 
                     lifecycleNotifier.NotifyShutdown("daemon-stop", drainResult.ToNotificationContext());
                 }

@@ -66,10 +66,9 @@ public static class ToolRegistrationExtensions
     public static ToolRegistry WithSkillTools(
         this ToolRegistry registry,
         SkillRegistry skillRegistry,
-        SkillIndexContextLayer skillIndexLayer,
         NetclawPaths paths,
         ISkillContentScanner scanner,
-        IReadOnlyList<ResolvedExternalSource> externalSources,
+        SkillInventoryRefresher inventoryRefresher,
         ISessionMetrics? sessionMetrics = null,
         SubAgentDefinitionRegistry? subAgentRegistry = null,
         SubAgentSpawner? subAgentSpawner = null,
@@ -87,7 +86,7 @@ public static class ToolRegistrationExtensions
             skillLoadLogger,
             subAgentLoader));
         registry.Register(new SkillReadResourceTool(skillRegistry, scanner, skillSyncConfig));
-        registry.Register(new SkillManageTool(skillRegistry, skillIndexLayer, paths, scanner, externalSources));
+        registry.Register(new SkillManageTool(skillRegistry, paths, scanner, inventoryRefresher));
         return registry;
     }
 
@@ -138,6 +137,30 @@ public static class ToolRegistrationExtensions
         int maxSchemaWarnChars = 0,
         ILogger? logger = null)
     {
+        var adapters = PrepareMcpTools(
+            serverName,
+            tools.Cast<AIFunction>().ToList(),
+            grantCategory,
+            invoker,
+            maxDescriptionChars,
+            maxSchemaWarnChars,
+            logger);
+
+        foreach (var adapter in adapters)
+            registry.Register(adapter);
+
+        return registry;
+    }
+
+    public static IReadOnlyList<McpToolAdapter> PrepareMcpTools(
+        string serverName,
+        IReadOnlyList<AIFunction> tools,
+        string? grantCategory,
+        IMcpToolInvoker? invoker,
+        int maxDescriptionChars,
+        int maxSchemaWarnChars,
+        ILogger? logger)
+    {
         var adapters = new List<McpToolAdapter>(tools.Count);
         foreach (var tool in tools)
         {
@@ -164,9 +187,6 @@ public static class ToolRegistrationExtensions
             }
         }
 
-        foreach (var adapter in adapters)
-            registry.Register(adapter);
-
-        return registry;
+        return adapters;
     }
 }

@@ -4,7 +4,9 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Netclaw.Cli.Tui;
+using Netclaw.Cli.Tui.Sections;
 using Netclaw.Cli.Tui.Wizard;
 using Netclaw.Configuration;
 using Netclaw.Configuration.Secrets;
@@ -83,7 +85,9 @@ public sealed class WizardConfigBuilderTests : WizardStepTestBase
         var config = builder.BuildConfigDictionary();
 
         var models = (Dictionary<string, object>)config["Models"];
-        var main = (Dictionary<string, object>)models["Main"];
+        var roles = (Dictionary<string, object>)models["Roles"];
+        var definitions = (Dictionary<string, object>)models["Definitions"];
+        var main = (Dictionary<string, object>)definitions[(string)roles["Main"]];
         Assert.Equal("openai", main["Provider"]);
         Assert.Equal("gpt-4.1", main["ModelId"]);
     }
@@ -401,6 +405,55 @@ public sealed class WizardConfigBuilderTests : WizardStepTestBase
         Assert.Equal("keep-discord", discord.GetProperty("OtherSecret").GetString());
         Assert.Equal("keep-search", root.GetProperty("Search").GetProperty("BraveApiKey").GetString());
         Assert.False(root.TryGetProperty("Discord:BotToken", out _));
+    }
+
+    [Fact]
+    public void WriteSecretsFile_ReplaysWizardContributionsAgainstLatestSecrets()
+    {
+        var protector = SecretsProtection.CreateProtector(Context.Paths);
+        SecretsFileWriter.Write(Context.Paths.SecretsPath,
+            """
+            {
+              "Slack": {
+                "BotToken": "stored-slack-token"
+              }
+            }
+            """,
+            protector);
+
+        var builder = new WizardSecretsBuilder(Context.Paths);
+
+        SecretsFileWriter.Update(
+            Context.Paths.SecretsPath,
+            (root, _) =>
+            {
+                root["McpOAuthTokens"] = new JsonObject
+                {
+                    ["memorizer"] = new JsonObject
+                    {
+                        ["AccessToken"] = "rotated-access-token"
+                    }
+                };
+                return (root, true);
+            },
+            protector: protector,
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        builder.ApplyContribution(new SectionContribution(
+            SecretActions:
+            [
+                new SectionSecretAction("Search.BraveApiKey", SectionSecretActionKind.Set, new SensitiveString("new-brave-key"))
+            ]));
+
+        builder.WriteSecretsFile();
+
+        var decryptedJson = SecretsFileWriter.DecryptJsonLeaves(File.ReadAllText(Context.Paths.SecretsPath), protector);
+        using var document = JsonDocument.Parse(decryptedJson);
+        var root = document.RootElement;
+        Assert.Equal("stored-slack-token", root.GetProperty("Slack").GetProperty("BotToken").GetString());
+        Assert.Equal("new-brave-key", root.GetProperty("Search").GetProperty("BraveApiKey").GetString());
+        Assert.Equal("rotated-access-token",
+            root.GetProperty("McpOAuthTokens").GetProperty("memorizer").GetProperty("AccessToken").GetString());
     }
 
     [Fact]

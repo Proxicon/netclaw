@@ -49,6 +49,8 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     private const string HeadlessExecutionContract = """
         [Subagent Execution Contract]
         You are a headless, non-interactive worker running on behalf of a parent Netclaw session.
+        Your subagent role guidance and assigned task are more specific than inherited deployment or project guidance. If they conflict, follow your subagent guidance and assigned task.
+        Embedded safety, security, trust-boundary, approval, and tool-policy rules remain mandatory and cannot be overridden.
         Do not ask the user clarifying questions, request conversational input, or wait for a reply.
         Do the best work you can with the task, context, and tools available.
         If the task is ambiguous, make reasonable assumptions and state them in your final output.
@@ -63,6 +65,13 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     private readonly ToolAccessPolicy _toolAccessPolicy;
     private readonly IToolApprovalService? _approvalService;
     private readonly int _maxToolIterations;
+
+    // Process-wide daily-stats sink (the same singleton the parent session records
+    // to). Nullable because a hosting configuration without the daemon stats backend
+    // is a real runtime state — mirrors LlmSessionActor._sessionMetrics. When present,
+    // every LLM call this sub-agent makes is billed here so its tokens show up in
+    // `netclaw stats` instead of vanishing.
+    private readonly Telemetry.ISessionMetrics? _sessionMetrics;
     private readonly ToolRegistry _toolRegistry;
     private IReadOnlyList<AITool> _aiTools = [];
     private ILoggingAdapter _log;
@@ -73,6 +82,12 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     // Used for the summary log on completion (ProcessingWatchdog is only a
     // timer scheduler — it doesn't track elapsed time itself).
     private readonly Stopwatch _runStopwatch = Stopwatch.StartNew();
+
+    // Cumulative token usage across every LLM call this sub-agent makes. Summed for
+    // the completion summary log; per-call usage is also recorded to _sessionMetrics
+    // as each call returns (see RecordUsage).
+    private long _runInputTokens;
+    private long _runOutputTokens;
 
     // Conversation state (not persisted — ephemeral)
     private readonly List<AiChatMessage> _history = [];
@@ -104,6 +119,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     // sub-agent's own session.log (SubSessionId) — matching the enriched logger's own context.
     private string? _parentSessionId;
     private string? _subSessionId;
+    private ChildFileActivityTracker _fileActivity = new(WorkingContext.Empty);
 
     // Default wait-for-first-delta budget when the spawn message carries none
     // (direct/test callers). Mirrors SessionConfig.PrefillTimeout so an unset
@@ -128,7 +144,10 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
     public ITimerScheduler Timers { get; set; } = null!;
     private CancellationTokenRegistration _externalCancellationRegistration;
-    private ToolExecutionContext _toolExecutionContext = ToolExecutionContext.Empty;
+    private ToolExecutionContext? _toolExecutionContext;
+    private ToolExecutionContext ToolExecutionContext
+        => _toolExecutionContext
+           ?? throw new InvalidOperationException("Sub-agent tool context is unavailable before a run is admitted.");
     private bool _malformedFinalOutputRepairAttempted;
     private SubAgentOutcomeReason? _forcedFinalOutcomeReason;
 
@@ -137,7 +156,8 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         IChatClient chatClient,
         ToolAccessPolicy? toolAccessPolicy = null,
         IToolApprovalService? approvalService = null,
-        int maxToolIterations = DefaultMaxToolIterations)
+        int maxToolIterations = DefaultMaxToolIterations,
+        Telemetry.ISessionMetrics? sessionMetrics = null)
     {
         if (maxToolIterations <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxToolIterations), maxToolIterations,
@@ -145,6 +165,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
         _definition = definition;
         _chatClient = chatClient;
+        _sessionMetrics = sessionMetrics;
         _toolAccessPolicy = toolAccessPolicy ?? new ToolAccessPolicy(
             new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed },
             new EffectivePolicyDefaults(
@@ -175,14 +196,16 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         IChatClient chatClient,
         ToolAccessPolicy? toolAccessPolicy = null,
         IToolApprovalService? approvalService = null,
-        int maxToolIterations = DefaultMaxToolIterations)
+        int maxToolIterations = DefaultMaxToolIterations,
+        Telemetry.ISessionMetrics? sessionMetrics = null)
     {
         return Props.Create(() => new SubAgentActor(
             definition,
             chatClient,
             toolAccessPolicy,
             approvalService,
-            maxToolIterations));
+            maxToolIterations,
+            sessionMetrics));
     }
 
     /// <summary>
@@ -201,11 +224,9 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             _completed = true;
             _replyTo.Tell(new SubAgentResult
             {
-                Success = false,
+                Completion = new ChildRunCompletion.Failed(SubAgentOutcomeReason.ActorStopped),
                 Output = "Subagent stopped before completion.",
                 AgentName = _definition.Name,
-                Outcome = SubAgentRunOutcome.Failed,
-                OutcomeReason = SubAgentOutcomeReason.ActorStopped,
                 Findings = [],
                 FindingsCount = 0
             });
@@ -222,43 +243,15 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         {
             _replyTo = Sender;
 
-            _approvalBridge = msg.ApprovalBridge;
-
-            var scopeId = !string.IsNullOrWhiteSpace(msg.SessionScopeId)
-                ? msg.SessionScopeId!
-                : $"subagent/{_definition.Name}/{Guid.NewGuid():N}";
-            // A sub-agent inherits the spawning session's audience. A spawn with no
-            // audience is a programming error — defaulting to Personal would
-            // silently grant the sub-agent broader trust than its parent. Fail the
-            // run immediately with a result so the caller fails fast, rather than
-            // throwing (which crashes the actor and makes the caller wait out the
-            // Ask timeout).
-            if (msg.Audience is not { } subAgentAudience)
-            {
-                _log.Error(
-                    "SubAgent [{AgentName}] spawn rejected: RunSubAgent carried no trust audience.",
-                    _definition.Name);
-                Complete(
-                    success: false,
-                    "Sub-agent spawn failed: no trust audience was provided. A sub-agent "
-                    + "must inherit the spawning session's audience.",
-                    SubAgentRunOutcome.Failed,
-                    SubAgentOutcomeReason.MissingAudience);
-                return;
-            }
-
-            _toolExecutionContext = new ToolExecutionContext(scopeId, msg.ParentSessionDirectory)
-            {
-                Audience = subAgentAudience,
-                InheritedCwd = msg.ParentCwd,
-            };
-            _toolExecutionContext.Boundary = msg.Boundary;
-            _toolExecutionContext.ChannelType = msg.ChannelType;
-            _toolExecutionContext.DefaultDeliveryTarget = msg.DefaultDeliveryTarget;
-            _toolExecutionContext.RequestedDeliveryTarget = msg.RequestedDeliveryTarget;
-            _toolExecutionContext.ModelInputModalities = msg.ModelInputModalities;
-            _toolExecutionContext.ProjectDirectory = msg.ParentProjectDirectory;
-            _toolExecutionContext.SupportsInteractiveApproval = _approvalBridge is not null;
+            _approvalBridge = msg.Scope.Authority.InteractiveApproval is InteractiveApprovalCapability.Available available
+                ? available.Bridge
+                : null;
+            var scopeId = msg.Scope.ScopeId.Value;
+            var subAgentAudience = msg.Scope.Authority.Audience;
+            _toolExecutionContext = new ToolExecutionContext(
+                msg.Scope.Authority,
+                ToolExecutionTimeout.Default);
+            _fileActivity = new ChildFileActivityTracker(msg.Scope.InitialWorkingSnapshot.WorkingContext);
             _aiTools = ResolveExposedAiTools();
             _executionCts = new CancellationTokenSource();
             _externalCts = new CancellationTokenSource();
@@ -301,7 +294,13 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             // If the caller supplied runtime context, prefix it onto the user message so the
             // system prompt stays reproducible across invocations.
             _history.Add(new AiChatMessage(Microsoft.Extensions.AI.ChatRole.System, BuildSystemPrompt(_definition)));
-            _history.Add(new AiChatMessage(Microsoft.Extensions.AI.ChatRole.User, BuildUserMessage(msg.RuntimeContext, msg.Task)));
+            _history.Add(new AiChatMessage(Microsoft.Extensions.AI.ChatRole.User,
+                BuildUserMessage(
+                    msg.RuntimeContext,
+                    subAgentAudience == TrustAudience.Public
+                        ? string.Empty
+                        : msg.Scope.InitialWorkingSnapshot.ToContextBlock(),
+                    msg.Task)));
 
             _log.Info("SubAgent [{AgentName}] starting (tools={ToolCount}, prefill={Prefill}, interDelta={InterDelta}, noProgress={NoProgress})",
                 _definition.Name, _aiTools.Count, _prefillBudget, _interDeltaBudget,
@@ -320,6 +319,14 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             // the synchronous processing that follows (tool dispatch or completion).
             RestartWatchdog(_interDeltaBudget);
             var response = msg.Response;
+
+            // Record this call's token usage before branching so EVERY call is billed —
+            // tool-call turns, retries, the forced-no-tools final turn, and repair turns
+            // all flow through here exactly once. Mirrors the main session, which records
+            // its own per-call usage; without this the sub-agent's tokens never reach the
+            // daily-stats pipeline and `netclaw stats` under-counts by the whole sub-run.
+            RecordUsage(response.Usage);
+
             var lastMessage = response.Messages[^1];
             var analysis = LlmResponseClassifier.Analyze(lastMessage);
 
@@ -432,6 +439,8 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             foreach (var result in msg.ToolResults)
             {
                 _history.Add(ChatMessageConverter.ToAiMessage(result));
+                if (result.ToolCallId is { } callId)
+                    _fileActivity.Complete(callId.Value, result.Content);
                 var preview = result.Content is { Length: > 200 }
                     ? result.Content[..200] + "..."
                     : result.Content ?? "(null)";
@@ -630,6 +639,24 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         });
     }
 
+    // Bill one LLM call's token usage to the shared daily-stats sink and accumulate
+    // the run totals for the completion summary log. We record at the source (here in
+    // the child) rather than propagating totals up to the parent: the parent's
+    // ISessionMetrics is the SAME process-wide singleton, so re-recording there would
+    // double-count, and folding sub-agent tokens into the parent's UsageOutput would
+    // corrupt its context-window percentage (the sub-agent has its own context window).
+    private void RecordUsage(UsageDetails? usage)
+    {
+        if (usage is null)
+            return;
+
+        var input = usage.InputTokenCount ?? 0;
+        var output = usage.OutputTokenCount ?? 0;
+        _runInputTokens += input;
+        _runOutputTokens += output;
+        _sessionMetrics?.RecordTokenUsage(input, output);
+    }
+
     private void HandleToolCalls(AiChatMessage assistantMessage, List<FunctionCallContent> toolCalls)
     {
         _turnState.ResetEmptyResponseGuards();
@@ -643,6 +670,9 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                 ? JsonSerializer.Serialize(toolCall.Arguments)
                 : null;
             _turnState.TrackToolCall(toolCall.Name, argsJson);
+            if (toolCall.CallId is { Length: > 0 } callId
+                && WorkingContextUpdater.TryExtractFilePath(argsJson, out var path))
+                _fileActivity.Begin(callId, toolCall.Name, path);
 
             // Log tool START event so tool execution spans are visible in Seq
             // (previously only tool results were logged, making it impossible to
@@ -665,7 +695,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         _ = ExecuteToolsAsync(
             executor,
             toolCalls,
-            _toolExecutionContext,
+            ToolExecutionContext,
             _executionCts?.Token ?? CancellationToken.None,
             _externalCts?.Token ?? CancellationToken.None,
             self,
@@ -714,7 +744,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     {
         var tools = _toolRegistry.GetAllRegistrations().Select(r => r.Tool);
         return _toolAccessPolicy
-            .FilterDiscoverableTools(tools, _toolExecutionContext)
+            .FilterDiscoverableTools(tools, ToolExecutionContext.Invocation)
             .Select(tool => tool.ToAITool())
             .ToList();
     }
@@ -752,28 +782,31 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         _log.Info("SubAgent [{AgentName}] completed (success={Success}, outcome={Outcome}, reason={Reason}, output={OutputLength} chars, iterations={Iterations})",
             _definition.Name, success, resolvedOutcome, outcomeReason?.Value ?? "-", output.Length, _turnState.ToolIterationCount);
 
-        // Log cumulative stats for observability — total LLM calls, tool usage, etc.
-        // This gives operators a single summary line for sub-agent duration analysis.
+        // Log cumulative stats for observability — total LLM calls, tool usage, tokens.
+        // This gives operators a single summary line for sub-agent cost/duration analysis.
+        // (success is already on the "completed" line above; omitted here to stay within
+        // ILoggingAdapter's 6-argument ceiling.)
         _log.Info(
-            "SubAgent [{AgentName}] summary: success={Success}, totalToolCalls={TotalToolCalls}, "
-            + "iterations={Iterations}, duration={Duration}s",
-            _definition.Name, success, _turnState.ToolCallCount,
+            "SubAgent [{AgentName}] summary: totalToolCalls={TotalToolCalls}, "
+            + "iterations={Iterations}, inputTokens={InputTokens}, outputTokens={OutputTokens}, "
+            + "duration={Duration}s",
+            _definition.Name, _turnState.ToolCallCount,
             _turnState.ToolIterationCount,
+            _runInputTokens, _runOutputTokens,
             _runStopwatch.Elapsed.TotalSeconds);
 
         var findings = success && _definition.EmitStructuredFindings
-            ? BuildFindings(output, _toolExecutionContext.SessionId, resolvedOutcome, outcomeReason)
+            ? BuildFindings(output, ToolExecutionContext.SessionId, resolvedOutcome, outcomeReason)
             : [];
 
+        var workingContextResult = BuildWorkingContextResult(success);
         _replyTo.Tell(new SubAgentResult
         {
-            Success = success,
+            Completion = ChildRunCompletion.FromReportedOutcome(resolvedOutcome, outcomeReason, workingContextResult),
             Output = output,
             AgentName = _definition.Name,
-            Outcome = resolvedOutcome,
-            OutcomeReason = outcomeReason,
             Findings = findings,
-            FindingsCount = findings.Count
+            FindingsCount = findings.Count,
         });
 
         Context.Stop(Self);
@@ -887,7 +920,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                       "Use the attached media along with the tool result to complete the delegated task.]",
             MediaReferences = mediaReferences
         };
-        _history.Add(ChatMessageConverter.ToAiMessage(message, _toolExecutionContext.SessionDirectory));
+        _history.Add(ChatMessageConverter.ToAiMessage(message, ToolExecutionContext.SessionDirectory));
     }
 
     /// <summary>
@@ -897,12 +930,23 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     /// When runtime context is null or whitespace, returns the raw task string for backward
     /// compatibility with the pre-Context protocol.
     /// </summary>
-    private static string BuildUserMessage(string? runtimeContext, string task)
+    private static string BuildUserMessage(string? runtimeContext, string workingContext, string task)
     {
-        if (string.IsNullOrWhiteSpace(runtimeContext))
+        var contextParts = new[] { runtimeContext?.Trim(), workingContext.Trim() }
+            .Where(part => !string.IsNullOrWhiteSpace(part));
+        var combinedContext = string.Join("\n\n", contextParts);
+        if (combinedContext.Length == 0)
             return task;
 
-        return $"Context:\n{runtimeContext.Trim()}\n\nTask:\n{task}";
+        return $"Context:\n{combinedContext}\n\nTask:\n{task}";
+    }
+
+    private WorkingContextDelta? BuildWorkingContextResult(bool success)
+    {
+        if (!success)
+            return null;
+
+        return _fileActivity.BuildResult();
     }
 
     private static string ExtractText(AiChatMessage message)
@@ -1093,22 +1137,19 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             var modelInputBudget = new ModelInputBatchBudget(ChannelAttachmentPolicy.DefaultMaxFileBytes);
             var tasks = toolCalls.Select(async tc =>
             {
-                var toolContext = CreatePerToolExecutionContext(executionContext);
-
                 // Same execution-preflight seam as the main pipeline: validate +
                 // extract in one step (the sub-agent previously skipped extraction
                 // entirely, silently dropping timeout hints). meta.Background and
                 // meta.Rationale are intentionally not consumed here — sub-agents
                 // have no background-job manager or audit logger; only the timeout
-                // hint maps onto the per-tool context via ApplyMeta.
+                // hint is materialized into the immutable per-tool context.
                 var interpretation = executor.InterpretToolCall(tc);
+                var toolContext = CreatePerToolExecutionContext(executionContext, interpretation.Meta);
                 if (interpretation.Rejection is { } rejection)
                     return BuildToolResult(tc, rejection.Message, toolContext, modelInputBudget);
 
                 var meta = interpretation.Meta;
                 var cleanedTc = interpretation.Cleaned;
-                toolContext.ApplyMeta(meta);
-
                 try
                 {
                     var result = await executor.ExecuteAsync(cleanedTc, toolContext, ct);
@@ -1161,11 +1202,8 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                         // approvals because the sub-agent's scope ID differs from the parent
                         // session's scope. Keep that retry-local so approve-once cannot bleed
                         // across parallel tool calls or later iterations.
-                        var retryContext = CreatePerToolExecutionContext(executionContext);
-                        retryContext.OneTimeApprovedToolName = tc.Name;
-                        retryContext.SetOneTimeApprovedPatterns(ctx.Patterns);
-                        retryContext.ApplyMeta(meta);
-
+                        var retryContext = CreatePerToolExecutionContext(executionContext, meta);
+                        retryContext.Approval.SeedOneTimeApproval(tc.Name, ctx.Patterns);
                         var result = await executor.ExecuteAsync(cleanedTc, retryContext, ct);
                         return BuildToolResult(cleanedTc, result, retryContext, modelInputBudget);
                     }
@@ -1216,23 +1254,15 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         }
     }
 
-    private static ToolExecutionContext CreatePerToolExecutionContext(ToolExecutionContext source)
-        => new(source.SessionId, source.SessionDirectory)
-        {
-            Audience = source.Audience,
-            Boundary = source.Boundary,
-            RequestedTimeoutSeconds = source.RequestedTimeoutSeconds,
-            ChannelType = source.ChannelType,
-            DefaultDeliveryTarget = source.DefaultDeliveryTarget,
-            RequestedDeliveryTarget = source.RequestedDeliveryTarget,
-            ModelInputModalities = source.ModelInputModalities,
-            ProjectDirectory = source.ProjectDirectory,
-            InheritedCwd = source.InheritedCwd,
-            SupportsInteractiveApproval = source.SupportsInteractiveApproval,
-            OnSubAgentActivity = source.OnSubAgentActivity,
-            SpawnChildActor = source.SpawnChildActor,
-            ApprovalBridge = source.ApprovalBridge
-        };
+    private static ToolExecutionContext CreatePerToolExecutionContext(
+        ToolExecutionContext source,
+        ToolCallMeta? meta)
+    {
+        var timeout = meta?.TimeoutHintSeconds is { } seconds
+            ? new ToolExecutionTimeout(TimeSpan.FromSeconds(seconds))
+            : source.ExecutionTimeout;
+        return new ToolExecutionContext(source.RunScope, timeout, source.Outputs.Fork());
+    }
 
     private static SubAgentToolCallResult BuildToolResult(
         FunctionCallContent toolCall,
@@ -1263,16 +1293,16 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         ToolExecutionContext toolContext,
         ModelInputBatchBudget modelInputBudget)
     {
-        if (toolContext.ModelInputFiles.Count == 0)
+        if (toolContext.Outputs.ModelInputFiles.Count == 0)
             return new ModelInputMaterializationResult([], 0);
 
         if (string.IsNullOrWhiteSpace(toolContext.SessionDirectory))
-            return new ModelInputMaterializationResult([], toolContext.ModelInputFiles.Count);
+            return new ModelInputMaterializationResult([], toolContext.Outputs.ModelInputFiles.Count);
 
         return SessionToolExecutionPipeline.MaterializeModelInputFiles(
             toolContext,
             toolContext.SessionDirectory,
-            logger: null,
+            NoLogger.Instance,
             modelInputBudget);
     }
 
@@ -1283,7 +1313,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     private static string BuildSystemPrompt(SubAgentDefinition definition)
     {
         // Assemble the identity stack that sub-agents inherit from the parent session:
-        // 1. Embedded AGENTS.md (operating rules, safety, grounding constraints)
+        // 1. Embedded operating core + deployment AGENTS.md mission playbook
         // 2. Project instructions (workspace/domain context from the parent's working directory)
         var basePrompt = SystemPromptAssembler.Assemble(
             agents: definition.OperatingRules,
@@ -1294,8 +1324,80 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             ? definition.SystemPrompt
             : string.Concat(basePrompt.TrimEnd(), "\n\n", definition.SystemPrompt);
 
-        // Append the headless execution contract — always at the bottom
+        // Append the headless execution and precedence contract — always at the bottom,
+        // after the specialized role prompt it protects from inherited mission conflicts.
         return string.Concat(rolePrompt.TrimEnd(), "\n\n", HeadlessExecutionContract);
+    }
+
+    private sealed class ChildFileActivityTracker
+    {
+        private readonly HashSet<string> _readFiles = new(StringComparer.Ordinal);
+        private readonly HashSet<string> _confirmedChangedFiles = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, PendingFileActivity> _pending = new(StringComparer.Ordinal);
+        private WorkingContext _workingContext;
+
+        public ChildFileActivityTracker(WorkingContext parentSnapshot)
+        {
+            _workingContext = parentSnapshot;
+        }
+
+        public void Begin(string callId, string toolName, string path)
+        {
+            var kind = toolName switch
+            {
+                "file_read" => FileActivityKind.Read,
+                "file_write" or "file_edit" => FileActivityKind.Changed,
+                _ => FileActivityKind.None
+            };
+            if (kind == FileActivityKind.None)
+                return;
+
+            var resolvedPath = Path.IsPathRooted(path) || string.IsNullOrWhiteSpace(_workingContext.ProjectDirectory)
+                ? path
+                : Path.GetFullPath(path, _workingContext.ProjectDirectory);
+            _pending[callId] = new PendingFileActivity(resolvedPath, kind);
+        }
+
+        public void Complete(string callId, string? result)
+        {
+            if (!_pending.Remove(callId, out var activity) || !Succeeded(activity.Kind, result))
+                return;
+
+            _workingContext = _workingContext.AddRecentFile(activity.Path);
+            if (activity.Kind == FileActivityKind.Read)
+                _readFiles.Add(activity.Path);
+            else
+                _confirmedChangedFiles.Add(activity.Path);
+        }
+
+        public WorkingContextDelta BuildResult() => new()
+        {
+            ProjectDirectory = _workingContext.ProjectDirectory,
+            ReadFiles = _readFiles.Order(StringComparer.Ordinal).ToArray(),
+            ConfirmedChangedFiles = _confirmedChangedFiles.Order(StringComparer.Ordinal).ToArray(),
+            ObservedChangedFiles = []
+        };
+
+        private static bool Succeeded(FileActivityKind kind, string? result)
+        {
+            if (string.IsNullOrWhiteSpace(result))
+                return false;
+
+            return kind == FileActivityKind.Changed
+                ? result.StartsWith("Successfully ", StringComparison.Ordinal)
+                : !result.StartsWith("Error:", StringComparison.Ordinal)
+                  && !result.StartsWith("Tool access denied:", StringComparison.Ordinal)
+                  && !result.Contains("requires approval", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private sealed record PendingFileActivity(string Path, FileActivityKind Kind);
+
+        private enum FileActivityKind
+        {
+            None,
+            Read,
+            Changed
+        }
     }
 
     private sealed class SubAgentCancelled

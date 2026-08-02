@@ -75,10 +75,7 @@ public sealed partial class SetReminderTool : NetclawTool<SetReminderTool.Params
         _resolversByTransport = resolvers;
     }
 
-    protected override Task<string> ExecuteAsync(Params args, CancellationToken ct)
-        => ExecuteAsync(args, ToolExecutionContext.Empty, ct);
-
-    protected override async Task<string> ExecuteAsync(Params args, ToolExecutionContext context, CancellationToken ct)
+    protected override async Task<string> ExecuteAsync(Params args, ToolInvocationContext context, CancellationToken ct)
     {
         if (!_schedulingConfig.Enabled)
             return "Error: Scheduling is disabled for this deployment.";
@@ -174,20 +171,13 @@ public sealed partial class SetReminderTool : NetclawTool<SetReminderTool.Params
                 {
                     var detail = resolution.ErrorMessage ?? "unresolvable target";
                     var hint = string.Equals(transport, "discord", StringComparison.OrdinalIgnoreCase)
-                        ? "Use channel:<channelId> or <#channelId>."
+                        ? "Use channel:<channelId>, <#channelId>, dm:<userId>, or <@userId>."
                         : "Use #channel, @user, or a valid channel ID.";
                     return $"Error: Could not resolve delivery_address '{rawDeliveryAddress}': {detail}. {hint}";
                 }
 
                 if (string.IsNullOrWhiteSpace(resolution.ResolvedId))
                     return $"Error: Could not resolve delivery_address '{rawDeliveryAddress}': resolver returned an empty canonical target ID.";
-
-                if (string.Equals(transport, "discord", StringComparison.OrdinalIgnoreCase)
-                    && resolution.Kind is not ReminderTargetKind.Channel)
-                {
-                    return "Error: Discord channel delivery currently supports guild text-channel targets only. "
-                           + "Use channel:<channelId> or <#channelId>; user and DM targets are not supported yet.";
-                }
 
                 delivery = new ReminderDelivery
                 {

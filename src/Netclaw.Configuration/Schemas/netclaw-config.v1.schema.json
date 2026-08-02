@@ -94,6 +94,47 @@
       },
       "additionalProperties": false
     },
+    "Teams": {
+      "type": "object",
+      "description": "Microsoft Teams channel settings. The integration is disabled by default. Team and channel allow-lists are fail closed when empty. ClientSecret belongs only in secrets.json or NETCLAW_Teams__ClientSecret and is intentionally excluded from this normal configuration schema.",
+      "properties": {
+        "Enabled": { "type": "boolean", "default": false },
+        "TenantId": { "type": ["string", "null"] },
+        "ClientId": { "type": ["string", "null"] },
+        "AuthenticationMode": {
+          "type": "string",
+          "enum": ["ClientSecret"],
+          "default": "ClientSecret"
+        },
+        "AllowDirectMessages": { "type": "boolean", "default": false },
+        "MentionOnly": { "type": "boolean", "default": true },
+        "AllowedTeamIds": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" }
+        },
+        "AllowedChannelIds": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" }
+        },
+        "AllowedUserIds": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" }
+        },
+        "ChannelAudiences": {
+          "type": "object",
+          "description": "Audience overrides keyed by canonical team/channel or team ID. Values are personal, team, or public.",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["personal", "team", "public"]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "Logging": {
       "type": "object",
       "properties": {
@@ -333,14 +374,40 @@
       "additionalProperties": true
     },
     "Models": {
-      "type": "object",
-      "description": "Model selection by role (Main, Fallback, Compaction).",
-      "properties": {
-        "Main": { "$ref": "#/$defs/ModelReference" },
-        "Fallback": { "$ref": "#/$defs/ModelReference" },
-        "Compaction": { "$ref": "#/$defs/ModelReference" }
-      },
-      "additionalProperties": false
+      "description": "Named model definitions and role assignments. The legacy inline role shape remains accepted for upgrades.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "Main": { "$ref": "#/$defs/ModelReference" },
+            "Fallback": { "$ref": "#/$defs/ModelReference" },
+            "Compaction": { "$ref": "#/$defs/ModelReference" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["Definitions", "Roles"],
+          "properties": {
+            "Definitions": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": { "$ref": "#/$defs/ModelReference" }
+            },
+            "Roles": {
+              "type": "object",
+              "required": ["Main"],
+              "properties": {
+                "Main": { "type": "string", "minLength": 1 },
+                "Fallback": { "type": ["string", "null"] },
+                "Compaction": { "type": ["string", "null"] }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     },
     "Memory": {
       "type": "object",
@@ -879,7 +946,7 @@
       "properties": {
         "Kind": {
           "type": "string",
-          "enum": ["Hmac", "HeaderSecret"],
+          "enum": ["Hmac", "HeaderSecret", "HmacTimestamped"],
           "default": "Hmac"
         },
         "HmacAlgorithm": {
@@ -904,8 +971,53 @@
         },
         "DeliveryIdHeaderName": {
           "type": ["string", "null"]
+        },
+        "ToleranceSeconds": {
+          "type": ["integer", "null"],
+          "default": 300
+        },
+        "TimestampField": {
+          "type": ["string", "null"],
+          "default": "t"
+        },
+        "SignatureField": {
+          "type": ["string", "null"],
+          "default": "v1"
+        },
+        "SignedPayloadSeparator": {
+          "type": ["string", "null"],
+          "default": "."
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "Kind": { "const": "HmacTimestamped" }
+            },
+            "required": ["Kind"]
+          },
+          "then": {
+            "properties": {
+              "ToleranceSeconds": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 3600
+              },
+              "TimestampField": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+              },
+              "SignatureField": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+              }
+            }
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "WebhookRoute": {

@@ -15,6 +15,7 @@
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="NSec.Cryptography" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
     <PackageReference Include="ModelContextProtocol.Core" />
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
@@ -26,6 +27,7 @@
     <ProjectReference Include="../Netclaw.Channels.Discord/Netclaw.Channels.Discord.csproj" />
     <ProjectReference Include="../Netclaw.Channels.Mattermost/Netclaw.Channels.Mattermost.csproj" />
     <ProjectReference Include="../Netclaw.Channels.Slack/Netclaw.Channels.Slack.csproj" />
+    <ProjectReference Include="../Netclaw.Channels.Teams/Netclaw.Channels.Teams.csproj" />
     <ProjectReference Include="../Netclaw.Configuration/Netclaw.Configuration.csproj" />
     <ProjectReference Include="../Netclaw.Daemon/Netclaw.Daemon.csproj" />
     <ProjectReference Include="../Netclaw.Providers/Netclaw.Providers.csproj" />

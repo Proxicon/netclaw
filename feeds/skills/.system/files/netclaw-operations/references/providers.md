@@ -27,6 +27,7 @@ and a `type` (well-known identifier). Manage them with `netclaw provider`:
 | `openrouter` | API key | `sk-or-...` |
 | `github-copilot` | OAuth device flow only | Requires active Copilot subscription on the GitHub account |
 | `veniceai` | API key | OpenAI-compatible at `https://api.venice.ai/api/v1`. Suppresses Venice's prepended system prompt by default; opt in via `VendorOptions.IncludeVeniceSystemPrompt = true` |
+| `deepseek` | API key | DeepSeek hosted API at `https://api.deepseek.com/v1`. Current model ids: `deepseek-v4-flash` and `deepseek-v4-pro` |
 
 Provider-specific behavior toggles belong under
 `Providers.<name>.VendorOptions`. Netclaw keeps that bag opaque at the core
@@ -35,18 +36,22 @@ options instead of adding provider-specific properties to `ProviderEntry`.
 
 ### Degraded mode: No-Op chat client
 
-When Netclaw starts without an explicitly configured main model/provider
-(no `Models:Main`, incomplete `Models:Main`, no `Providers`, or `Models:Main`
-points to a provider that is not configured), the daemon launches in
-**degraded mode** with a No-Op chat client. Bound defaults such as
-`local-ollama/qwen3:30b` do not count as operator configuration unless those
-fields are actually present in config. Every chat turn returns a fixed
-configuration banner beginning with `"No valid model configuration detected."`
-and listing recovery steps. If no provider is configured, send the operator
-through `netclaw init`; it configures both a provider and main model. If a
-provider already exists but the main model is missing or points to the wrong
-provider name, use `netclaw model`. Manual repair means editing `netclaw.json`
-/ `secrets.json` and restarting the daemon.
+When Netclaw starts without an explicitly configured main model/provider (no
+`Models` configuration, no `Providers`, or the selected definition points to a
+provider that is not configured), the daemon launches in **degraded mode** with
+a No-Op chat client. Bound defaults such as `local-ollama/qwen3:30b` do not
+count as operator configuration unless those fields are actually present in
+config. Every chat turn returns a fixed configuration banner beginning with
+`"No valid model configuration detected."` and listing recovery steps. If no
+provider is configured, send the operator through `netclaw init`; it configures
+both a provider and main model. If a provider already exists but the main model
+is missing or points to the wrong provider name, use `netclaw model`. Manual
+repair means editing `netclaw.json` / `secrets.json` and restarting the daemon.
+
+A role that names a definition absent from `Models.Definitions` is malformed
+configuration, not degraded mode. `netclaw model list` and `netclaw doctor`
+report the exact role and missing definition. Repair the role manually or use
+`netclaw model set`; `netclaw doctor --fix` does not guess a replacement.
 
 If the operator reports seeing that banner, do not troubleshoot model behavior;
 the daemon has no working provider. Direct them through the recovery steps and
@@ -77,6 +82,36 @@ Codex backend uses that value to gate newer model entries.
 When adding an OpenAI provider from the CLI, `netclaw provider add <name>
 openai` defaults to the ChatGPT OAuth device flow. Use `--auth api-key
 --api-key <key>` to force platform API-key auth instead.
+
+### Assigning models to roles and overriding metadata
+
+`netclaw model set <role> <provider> <model-id>` creates or reuses a named model
+definition and assigns it to a role (`main`, `fallback`, `compaction`). Definitions
+own provider/model identity and metadata, while roles only reference definitions.
+Switching away from a model and back therefore preserves its overrides. Two attributes can be overridden by the
+operator and are **operator-owned**: the context window and the input/output
+modalities. Provider discovery seeds a new definition but never changes an existing
+definition, including adding a property the definition deliberately omits.
+
+- `--context-window <tokens>` clamps the session budget and takes precedence
+  over provider-reported detection. Supplying it configures the model manually
+  and skips the metadata probe.
+- `--input-modalities <list>` / `--output-modalities <list>` override detected
+  modalities with a comma-separated list of named flags (`Text`, `Image`,
+  `Audio`, `Video`). These do **not** skip the probe — the model is still
+  validated and its context window discovered; the override just wins over the
+  discovered modalities.
+- `--clear-context-window` and `--clear-modalities` remove the respective
+  override so runtime capability detection resolves it again (use these after a
+  provider enlarges a model's window or fixes mis-reported modalities).
+
+To change a preserved value you must pass the corresponding flag (a plain
+re-set will not touch it). A legacy or hand-edited entry with an unreadable
+value does not block a re-set — `model set` migrates legacy inline roles to named
+definitions and repairs the selected entry while keeping the fields it can
+still read. `model list` reports an unparseable config instead of crashing.
+`netclaw doctor --fix` applies only repairs it can derive safely; it does not
+invent missing named definitions or role assignments.
 
 ### Adding GitHub Copilot
 
