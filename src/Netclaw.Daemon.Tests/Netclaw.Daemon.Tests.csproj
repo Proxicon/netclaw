@@ -22,6 +22,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="Fixtures/Teams/TenantEvidence/**/*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Netclaw.Actors/Netclaw.Actors.csproj" />
     <ProjectReference Include="../Netclaw.Channels/Netclaw.Channels.csproj" />
     <ProjectReference Include="../Netclaw.Channels.Discord/Netclaw.Channels.Discord.csproj" />
