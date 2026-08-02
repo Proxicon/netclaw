@@ -23,7 +23,16 @@ none. **Rollback:** discard this uncommitted OpenSpec change.
   Card action round-trip, proactive send, update semantics, and supported
   attachment authorization using a locally configured test application and
   public HTTPS endpoint. Record sanitized fixtures and all deviations in
-  design.md.
+  design.md. Evidence recorded 2026-08-02: authenticated personal ingress and
+  durable duplicate suppression; channel root/reply `;messageid=` mapping;
+  structured mention identity and span removal; update/delete identity;
+  Graph-free attachment rejection; SDK send, card action plus terminal response,
+  channel-thread proactive reply, and SDK create/update. Unsupported with
+  evidence: current file attachment shell requires Graph-backed retrieval.
+  Still unproven: personal SDK reply, personal proactive delivery, and a
+  structured bot-plus-user mention entity; therefore this task remains open.
+  Sanitized fixtures:
+  `src/Netclaw.Daemon.Tests/Fixtures/Teams/TenantEvidence/`.
 - [x] 0.3 Amend proposal, design, tasks, and capability specs for ownership,
   strict endpoint registration, ACL, secret protection, approval recovery,
   attachment/output gates, and classified proactive delivery.
