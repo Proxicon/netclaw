@@ -160,8 +160,8 @@ mapping. This ownership is required because an edit or delete arrives with an
 activity ID and must locate a root/session before a binding actor can be
 selected. `TeamsSessionBindingActor` is one actor per personal conversation or
 channel root thread. It persists processed activity IDs before pipeline
-dispatch, pending approval state/nonce/expiry, output/card locators, the
-approved outbound destination, and session-specific reminder idempotency state;
+dispatch, pending approval state/nonce/expiry, output/card locators, and
+session-specific reminder idempotency state;
 it alone drives `ISessionPipeline` and the Teams reply contracts.
 
 Alternative: call the pipeline directly from the HTTP handler. Rejected because
@@ -329,14 +329,20 @@ calls through a narrow operations seam.
 
 `TeamsOutputRenderer` preserves text and Unicode. It normalizes line endings
 only. Whitespace-only output has no delivery. The renderer measures the UTF-8
-JSON activity envelope, including a channel root reply ID, against an 80 KiB
-ceiling. It emits ordered chunks up to
-16 messages. It keeps all text. It rejects an oversized Markdown link if a
-safe split is not possible. The stable oversize reason is `output_too_large`.
+bytes of the Netclaw text activity envelope: `type`, `text`, `textFormat`, and
+an optional channel root `replyToId`. This is an application-payload
+approximation. It excludes the SDK request envelope, headers, and transport
+framing. The 80 KiB ceiling is an application admission guard, not a claim
+about final SDK serialization. Tenant validation remains the release gate. It
+emits ordered chunks up to 16 messages. It keeps all text. It rejects an
+oversized Markdown link if a safe split is not possible. The stable oversize
+reason is `output_too_large`.
 
 One processing message can be created. The first final chunk updates that
-message. If the update fails, the binding makes one normal final-reply attempt.
-It does not retry after any delivery failure. The reply client reports
+message. The binding retains its returned activity ID only when it meets the
+same 1 KiB identifier bound. If the update fails, the binding makes one normal
+final-reply attempt. It does not retry after any delivery failure. The reply
+client reports
 `Delivered`, `Updated`, `RejectedTooLarge`, `Unavailable`, `Cancelled`, or a
 safe failure result. It does not expose SDK exception data. Delivery telemetry
 records a success only after an SDK success result.

@@ -107,7 +107,7 @@ internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore c
 /// </summary>
 internal sealed class TeamsSdkConversationContextStore
 {
-    private readonly Dictionary<string, IContext<IActivity>> _contexts = new(StringComparer.Ordinal);
+    private readonly Dictionary<TeamsSdkContextKey, IContext<IActivity>> _contexts = [];
     private readonly object _gate = new();
 
     public void Capture(TeamsInboundActivity activity, IContext<IActivity> context)
@@ -120,16 +120,17 @@ internal sealed class TeamsSdkConversationContextStore
 
         lock (_gate)
         {
-            if (_contexts.Count >= 1_024 && !_contexts.ContainsKey(GetKey(destination)))
+            var key = TeamsSdkContextKey.Create(destination);
+            if (_contexts.Count >= 1_024 && !_contexts.ContainsKey(key))
                 _contexts.Remove(_contexts.Keys.First());
-            _contexts[GetKey(destination)] = context;
+            _contexts[key] = context;
         }
     }
 
     public bool TryGet(TeamsOutboundDestination destination, out IContext<IActivity> context)
     {
         lock (_gate)
-            return _contexts.TryGetValue(GetKey(destination), out context!);
+            return _contexts.TryGetValue(TeamsSdkContextKey.Create(destination), out context!);
     }
 
     private static bool TryCreateDestination(TeamsInboundActivity activity, out TeamsOutboundDestination destination)
@@ -154,11 +155,23 @@ internal sealed class TeamsSdkConversationContextStore
         }
     }
 
-    private static string GetKey(TeamsOutboundDestination destination) =>
-        string.Concat(destination.TenantId, "\n", destination.ConversationId, "\n", destination.Scope, "\n", destination.RootActivityId);
-
     private static bool MatchesActivity(TeamsInboundActivity activity, IActivity sdkActivity) =>
         string.Equals(activity.Trust.ActivityId, sdkActivity.Id, StringComparison.Ordinal)
         && string.Equals(activity.Trust.ConversationId, sdkActivity.Conversation?.Id, StringComparison.Ordinal)
         && string.Equals(activity.Reply?.ServiceUrl, sdkActivity.ServiceUrl, StringComparison.Ordinal);
+
+    private sealed record TeamsSdkContextKey(
+        string TenantId,
+        string ConversationId,
+        TeamsConversationScope Scope,
+        string? RootActivityId,
+        string ServiceUrl)
+    {
+        public static TeamsSdkContextKey Create(TeamsOutboundDestination destination) => new(
+            destination.TenantId,
+            destination.ConversationId,
+            destination.Scope,
+            destination.RootActivityId,
+            destination.ServiceUrl);
+    }
 }

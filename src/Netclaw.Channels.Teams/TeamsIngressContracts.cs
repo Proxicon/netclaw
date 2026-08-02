@@ -274,7 +274,7 @@ public sealed record TeamsOutboundDestination
 
     internal static bool IsValidServiceUrl(string? value)
         => !string.IsNullOrWhiteSpace(value)
-           && value.Length <= MaxServiceUrlLength
+           && Encoding.UTF8.GetByteCount(value) <= MaxServiceUrlLength
            && Uri.TryCreate(value, UriKind.Absolute, out var uri)
            && uri.Scheme == Uri.UriSchemeHttps
            && string.IsNullOrEmpty(uri.UserInfo)
@@ -316,8 +316,13 @@ public sealed record TeamsOutboundMessage
     {
         Destination = destination ?? throw new ArgumentNullException(nameof(destination));
         Text = string.IsNullOrWhiteSpace(text) ? throw new ArgumentException("Text is required.", nameof(text)) : text;
-        ReplyToActivityId = replyToActivityId;
-        UpdateActivityId = updateActivityId;
+        ReplyToActivityId = RequireOptionalIdentifier(replyToActivityId, nameof(replyToActivityId));
+        UpdateActivityId = RequireOptionalIdentifier(updateActivityId, nameof(updateActivityId));
+        if (Destination.Scope == TeamsConversationScope.Channel
+            && !string.Equals(ReplyToActivityId, Destination.RootActivityId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Channel output must target the canonical root activity.", nameof(replyToActivityId));
+        }
         IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? throw new ArgumentException("Idempotency key is required.", nameof(idempotencyKey)) : idempotencyKey;
         CorrelationId = string.IsNullOrWhiteSpace(correlationId) ? throw new ArgumentException("Correlation ID is required.", nameof(correlationId)) : correlationId;
         Attachments = attachments.IsDefault ? [] : attachments;
@@ -336,4 +341,16 @@ public sealed record TeamsOutboundMessage
     public string CorrelationId { get; }
 
     public ImmutableArray<TeamsAttachmentMetadata> Attachments { get; }
+
+    private static string? RequireOptionalIdentifier(string? value, string parameterName)
+    {
+        if (value is not null
+            && (string.IsNullOrWhiteSpace(value)
+                || Encoding.UTF8.GetByteCount(value) > TeamsSessionIdentifierCodec.MaxRawIdentifierBytes))
+        {
+            throw new ArgumentException("An optional identifier must be bounded when present.", parameterName);
+        }
+
+        return value;
+    }
 }

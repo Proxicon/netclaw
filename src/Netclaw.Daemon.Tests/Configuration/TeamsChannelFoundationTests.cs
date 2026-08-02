@@ -372,11 +372,52 @@ public sealed class TeamsChannelFoundationTests
         Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
             "tenant",
             "conversation",
+            TeamsConversationScope.Personal,
+            "https://service.invalid/" + new string('x', TeamsOutboundDestination.MaxServiceUrlLength),
+            userId: "user"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
             TeamsConversationScope.Channel,
             "https://service.invalid/",
             "root",
             "team"));
         Assert.Throws<ArgumentOutOfRangeException>(() => new TeamsAttachmentMetadata("file.txt", null, -1));
+    }
+
+    [Fact]
+    public void Channel_output_message_requires_its_canonical_root_and_bounded_activity_ids()
+    {
+        var destination = new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
+            TeamsConversationScope.Channel,
+            "https://service.invalid/",
+            "root",
+            "team",
+            "channel");
+
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundMessage(
+            destination,
+            "reply",
+            "idempotency",
+            "correlation"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundMessage(
+            destination,
+            "reply",
+            "idempotency",
+            "correlation",
+            "other-root"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundMessage(
+            destination,
+            "reply",
+            "idempotency",
+            "correlation",
+            "root",
+            new string('x', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1)));
+
+        var message = new TeamsOutboundMessage(destination, "reply", "idempotency", "correlation", "root");
+        Assert.Equal("root", message.ReplyToActivityId);
     }
 
     [Fact]
@@ -436,6 +477,41 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal(exactText + "y", string.Concat(overflow.Chunks));
         Assert.All(overflow.Chunks, chunk =>
             Assert.InRange(TeamsOutputRenderer.GetSerializedPayloadBytes(chunk, rootActivityId), 1, TeamsOutputRenderer.MaxSerializedPayloadBytes));
+    }
+
+    [Fact]
+    public void Output_renderer_has_a_deterministic_multibyte_unicode_boundary()
+    {
+        var renderer = new TeamsOutputRenderer();
+        const string emoji = "\U0001f9ea";
+        var envelopeBytes = TeamsOutputRenderer.GetSerializedPayloadBytes(string.Empty);
+        var emojiBytes = TeamsOutputRenderer.GetSerializedPayloadBytes(emoji) - envelopeBytes;
+        var emojiCount = (TeamsOutputRenderer.MaxSerializedPayloadBytes - envelopeBytes) / emojiBytes;
+        var remainingAsciiBytes = TeamsOutputRenderer.MaxSerializedPayloadBytes - envelopeBytes - (emojiCount * emojiBytes);
+        var exactText = new string('x', remainingAsciiBytes) + string.Concat(Enumerable.Repeat(emoji, emojiCount));
+
+        var exact = renderer.Render(exactText);
+        var overflow = renderer.Render(exactText + emoji);
+
+        Assert.Equal(TeamsOutputRenderer.MaxSerializedPayloadBytes, TeamsOutputRenderer.GetSerializedPayloadBytes(exactText));
+        Assert.Equal(exactText, Assert.Single(exact.Chunks));
+        Assert.Equal(exactText + emoji, string.Concat(overflow.Chunks));
+        Assert.All(overflow.Chunks, chunk =>
+            Assert.InRange(TeamsOutputRenderer.GetSerializedPayloadBytes(chunk), 1, TeamsOutputRenderer.MaxSerializedPayloadBytes));
+    }
+
+    [Fact]
+    public void Output_renderer_does_not_split_a_zero_width_joiner_sequence()
+    {
+        var renderer = new TeamsOutputRenderer();
+        const string woman = "\U0001f469";
+        const string joinedEmoji = "\U0001f469\u200d\U0001f4bb";
+        var prefix = new string('x', TeamsOutputRenderer.MaxSerializedPayloadBytes - TeamsOutputRenderer.GetSerializedPayloadBytes(woman));
+
+        var output = renderer.Render(prefix + joinedEmoji);
+
+        Assert.Equal([prefix, joinedEmoji], output.Chunks);
+        Assert.Equal(prefix + joinedEmoji, string.Concat(output.Chunks));
     }
 
     [Fact]

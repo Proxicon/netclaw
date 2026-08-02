@@ -151,8 +151,29 @@ public sealed class TeamsOutputRenderer
             next++;
         }
 
-        while (next < value.Length && char.GetUnicodeCategory(value[next]) is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark or UnicodeCategory.EnclosingMark)
+        while (next < value.Length)
+        {
+            if (char.GetUnicodeCategory(value[next]) is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark or UnicodeCategory.EnclosingMark)
+            {
+                next++;
+                continue;
+            }
+
+            if (value[next] != '\u200D')
+                break;
+
             next++;
+            if (next >= value.Length)
+                break;
+
+            next++;
+            if (char.IsHighSurrogate(value[next - 1])
+                && next < value.Length
+                && char.IsLowSurrogate(value[next]))
+            {
+                next++;
+            }
+        }
 
         return next;
     }

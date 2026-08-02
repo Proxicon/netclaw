@@ -653,6 +653,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         if (_destination is null)
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("output_destination_unavailable");
+            RecordDeliveryOutcome(new TeamsDeliveryResult(TeamsDeliveryStatus.Unavailable, ReasonCode: "output_destination_unavailable"), 0);
             return;
         }
 
@@ -660,10 +661,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             if (_processingActivityId is null)
             {
-                var processing = await _dependencies.ReplyClient.DeliverAsync(
-                    CreateMessage(_destination, "Processing..."), CancellationToken.None);
+                var processing = await DeliverAsync(CreateMessage(_destination, "Processing..."));
                 if (processing.IsSuccess)
-                    _processingActivityId = processing.ActivityId;
+                    _processingActivityId = IsBoundedActivityId(processing.ActivityId)
+                        ? processing.ActivityId
+                        : null;
             }
             return;
         }
@@ -684,18 +686,15 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         for (var index = 0; index < rendered.Chunks.Count; index++)
         {
             var processingActivityId = index == 0 ? _processingActivityId : null;
-            var result = await _dependencies.ReplyClient.DeliverAsync(
-                CreateMessage(_destination, rendered.Chunks[index], processingActivityId),
-                CancellationToken.None);
+            var result = await DeliverAsync(
+                CreateMessage(_destination, rendered.Chunks[index], processingActivityId));
 
             // The update is a presentation optimization. A failed update gets
             // one normal reply attempt for this final output and no retry loop.
             if (processingActivityId is not null && !result.IsSuccess)
             {
                 _processingActivityId = null;
-                result = await _dependencies.ReplyClient.DeliverAsync(
-                    CreateMessage(_destination, rendered.Chunks[index]),
-                    CancellationToken.None);
+                result = await DeliverAsync(CreateMessage(_destination, rendered.Chunks[index]));
             }
 
             if (!result.IsSuccess)
@@ -710,6 +709,49 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             _processingActivityId = null;
         }
     }
+
+    private async Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message)
+    {
+        var startedAt = _dependencies.TimeProvider.GetTimestamp();
+        TeamsDeliveryResult result;
+        try
+        {
+            result = await _dependencies.ReplyClient.DeliverAsync(message, CancellationToken.None);
+        }
+        catch (OperationCanceledException)
+        {
+            result = new TeamsDeliveryResult(TeamsDeliveryStatus.Cancelled, ReasonCode: "cancelled");
+        }
+        catch (Exception)
+        {
+            result = new TeamsDeliveryResult(TeamsDeliveryStatus.Failed, ReasonCode: "reply_client_failed");
+        }
+
+        RecordDeliveryOutcome(result, _dependencies.TimeProvider.GetElapsedTime(startedAt).TotalMilliseconds);
+        return result;
+    }
+
+    private static void RecordDeliveryOutcome(TeamsDeliveryResult result, double durationMs)
+    {
+        var telemetry = ChannelTelemetry.For(ChannelType.Teams);
+        if (result.IsSuccess)
+        {
+            telemetry.RecordReplyPosted(durationMs);
+            return;
+        }
+
+        if (result.Status == TeamsDeliveryStatus.RejectedTooLarge)
+        {
+            telemetry.RecordReplyRejected(result.ReasonCode);
+            return;
+        }
+
+        telemetry.RecordReplyFailed(durationMs);
+    }
+
+    private static bool IsBoundedActivityId(string? value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && Encoding.UTF8.GetByteCount(value) <= TeamsSessionIdentifierCodec.MaxRawIdentifierBytes;
 
     private TeamsOutboundDestination CreateDestination(TeamsInboundActivity activity)
     {
@@ -760,7 +802,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private sealed record ReinitializePipeline : INoSerializationVerificationNeeded;
 
-    private sealed record BindingOutput(SessionOutput Output) : INoSerializationVerificationNeeded;
+    internal sealed record BindingOutput(SessionOutput Output) : INoSerializationVerificationNeeded;
 
 }
 
