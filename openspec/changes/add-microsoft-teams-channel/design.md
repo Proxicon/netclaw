@@ -71,6 +71,71 @@ message update semantics, and attachment download authorization remain
 tenant-backed smoke gates. They cannot be claimed from a local process without
 an Entra app registration, Teams installation, and public HTTPS tunnel.
 
+#### Phase 0.2 tenant transport evidence record (2026-08-02)
+
+The opt-in tenant spike used a locally configured test application and public
+HTTPS endpoint. Repository fixtures under
+`src/Netclaw.Daemon.Tests/Fixtures/Teams/TenantEvidence/` are sanitized,
+synthetic structural records of the observed boundary. They contain no real
+tenant, application, user, team, channel, conversation, activity, endpoint,
+filename, payload, token, credential, header, cookie, signature, or
+authenticated URL from the test environment.
+
+The following observations are proven by the sanitized capture and are locked
+down by offline fixture tests:
+
+- Authenticated personal messages matched the configured tenant and reached the
+  PR 3 durable binding path. A repeated accepted personal activity did not add a
+  second durable binding event.
+- A channel root and each reply in its thread supplied the same canonical root
+  identity as the `;messageid=` suffix of `conversation.id`; the suffix value
+  matched the root activity ID. A second root supplied a different conversation
+  and root identity. Ordinary channel messages had no `replyToId`, so PR 4 must
+  fail closed when the suffix is absent or malformed rather than infer a root
+  from `replyToId`.
+- Bot mentions are structured `mention` entities. A qualifying entity's
+  `mentioned.id` matched both `recipient.id` and `28:` plus the configured bot
+  ID. PR 4 must select and remove only matching entity text spans, never replace
+  a display name. Single and double-bot mention shapes were observed. The
+  attempted bot-plus-user probe supplied a bot entity but the user token as
+  literal text, so a structured user-mention entity remains unproven; literal
+  non-bot text is preserved by the fixture parser.
+- Channel `messageUpdate` and `messageDelete` retained the original activity ID
+  and thread conversation identity. The delete carried no message text or
+  mention entities. PR 4's activity-to-root index must resolve these operations
+  from durable identity, not their content.
+- Channel uploads exposed only a `text/html` attachment shell without a name,
+  safe direct URL, or usable file metadata at the SDK boundary. The attachment
+  remains `graph_backed_attachment_unsupported`; no Graph fallback or permission
+  is approved.
+- Teams SDK plain reply delivery worked in the originating thread. The earlier
+  non-SDK connector/test-harness path did not prove production delivery.
+- Teams SDK Adaptive Card delivery and authenticated `Action.Execute` invokes
+  worked. Every observed action received one terminal SDK response in the same
+  thread. A later diagnostic sequence displayed two cards and both actions
+  completed; this is recorded as a diagnostic artifact, not a duplicate-delivery
+  defect because causality was not established.
+- A detached app-level channel-thread proactive reply delivered once after its
+  triggering request completed. The required non-secret destination comprises
+  tenant, channel-thread conversation, root activity ID, and SDK-managed
+  application routing. This proves channel-thread proactive delivery only.
+- A bot-authored SDK message was created and then updated in place using the
+  destination conversation plus the created activity ID. The transport needs
+  those identities and the authenticated SDK request context; it persists no
+  access token.
+
+The tenant spike did **not** prove personal reply delivery or personal proactive
+delivery. PR 3 deliberately has no Teams outbound delivery, and no further
+interactive probe is justified after the temporary diagnostics were removed.
+These remain explicit Phase 0.2 gaps.
+
+For future output work, Microsoft documents an approximate 100 KB bot message
+limit, recommends keeping messages within 80 KB, and reports HTTP 413 with
+`MessageSizeTooBig` for an oversized message. PR 5 must enforce a serialized
+payload ceiling at or below 80 KB, including card payload overhead; this is
+documentation-backed guidance, not a universal maximum independently discovered
+by the tenant test. See [Format your bot messages](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/format-your-bot-messages).
+
 Foundation work permitted from the completed offline evidence is limited to the
 `Netclaw.Channels.Teams` project, central package pinning, solution/project
 references, `ChannelType.Teams` and exhaustive switch updates, disabled
