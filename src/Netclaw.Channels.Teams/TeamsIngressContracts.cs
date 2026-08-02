@@ -9,6 +9,47 @@ using Netclaw.Configuration;
 
 namespace Netclaw.Channels.Teams;
 
+public enum TeamsIngressActivityKind
+{
+    Unknown,
+    Message,
+    ConversationUpdate,
+    MessageUpdate,
+    MessageDelete
+}
+
+public enum TeamsTranslationDisposition
+{
+    Accepted,
+    Ignored,
+    RejectedMalformed,
+    RejectedUnsupportedScope,
+    RejectedPendingTenantEvidence
+}
+
+/// <summary>
+/// SDK-free translation outcome. Reason codes are stable diagnostics only and
+/// must never contain activity content, tokens, or platform identifiers.
+/// </summary>
+public sealed record TeamsTranslationResult(
+    TeamsTranslationDisposition Disposition,
+    string ReasonCode,
+    TeamsIngressActivityKind ActivityKind,
+    TeamsInboundActivity? Activity = null)
+{
+    public static TeamsTranslationResult Accepted(TeamsInboundActivity activity)
+        => new(TeamsTranslationDisposition.Accepted, "accepted", TeamsIngressActivityKind.Message, activity);
+
+    public static TeamsTranslationResult Ignored(TeamsIngressActivityKind kind, string reasonCode)
+        => new(TeamsTranslationDisposition.Ignored, reasonCode, kind);
+
+    public static TeamsTranslationResult Rejected(
+        TeamsTranslationDisposition disposition,
+        TeamsIngressActivityKind kind,
+        string reasonCode)
+        => new(disposition, reasonCode, kind);
+}
+
 /// <summary>
 /// Immutable, SDK-free trust context that the future Teams translator supplies
 /// only after its authenticated HTTP boundary has validated required identity.
@@ -25,7 +66,8 @@ public sealed record TeamsIngressTrustContext
         string conversationId,
         TeamsConversationScope scope,
         string activityId,
-        DateTimeOffset receivedAtUtc)
+        DateTimeOffset receivedAtUtc,
+        DateTimeOffset? platformTimestampUtc = null)
     {
         Audience = ValidateEnum(audience, nameof(audience));
         Principal = ValidateEnum(principal, nameof(principal));
@@ -41,6 +83,7 @@ public sealed record TeamsIngressTrustContext
         ReceivedAtUtc = receivedAtUtc == default
             ? throw new ArgumentException("Received timestamp is required.", nameof(receivedAtUtc))
             : receivedAtUtc;
+        PlatformTimestampUtc = platformTimestampUtc;
     }
 
     public TrustAudience Audience { get; }
@@ -62,6 +105,12 @@ public sealed record TeamsIngressTrustContext
     public string ActivityId { get; }
 
     public DateTimeOffset ReceivedAtUtc { get; }
+
+    /// <summary>
+    /// Optional Teams-supplied event time. Receipt time remains local so the
+    /// SDK payload cannot influence daemon ordering or retention decisions.
+    /// </summary>
+    public DateTimeOffset? PlatformTimestampUtc { get; }
 
     private static T ValidateEnum<T>(T value, string parameterName)
         where T : struct, Enum
