@@ -28,6 +28,12 @@ public enum TeamsTranslationDisposition
 }
 
 /// <summary>
+/// SDK-free structured mention data. The transport boundary preserves the
+/// literal entity text so policy can remove only verified bot spans.
+/// </summary>
+public sealed record TeamsMention(string Type, string MentionedId, string Text);
+
+/// <summary>
 /// SDK-free translation outcome. Reason codes are stable diagnostics only and
 /// must never contain activity content, tokens, or platform identifiers.
 /// </summary>
@@ -38,7 +44,7 @@ public sealed record TeamsTranslationResult(
     TeamsInboundActivity? Activity = null)
 {
     public static TeamsTranslationResult Accepted(TeamsInboundActivity activity)
-        => new(TeamsTranslationDisposition.Accepted, "accepted", TeamsIngressActivityKind.Message, activity);
+        => new(TeamsTranslationDisposition.Accepted, "accepted", activity.Kind, activity);
 
     public static TeamsTranslationResult Ignored(TeamsIngressActivityKind kind, string reasonCode)
         => new(TeamsTranslationDisposition.Ignored, reasonCode, kind);
@@ -165,13 +171,25 @@ public sealed record TeamsInboundActivity
         string text,
         TeamsReplyMetadata? reply = null,
         bool isMentioned = false,
-        ImmutableArray<TeamsAttachmentMetadata> attachments = default)
+        ImmutableArray<TeamsAttachmentMetadata> attachments = default,
+        TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message,
+        string? teamId = null,
+        string? channelId = null,
+        ImmutableArray<TeamsMention> mentions = default)
     {
         Trust = trust ?? throw new ArgumentNullException(nameof(trust));
         Text = text ?? throw new ArgumentNullException(nameof(text));
         Reply = reply;
         IsMentioned = isMentioned;
         Attachments = attachments.IsDefault ? [] : attachments;
+        Kind = kind is TeamsIngressActivityKind.Message
+            or TeamsIngressActivityKind.MessageUpdate
+            or TeamsIngressActivityKind.MessageDelete
+            ? kind
+            : throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported Teams ingress activity kind.");
+        TeamId = teamId;
+        ChannelId = channelId;
+        Mentions = mentions.IsDefault ? [] : mentions;
     }
 
     public TeamsIngressTrustContext Trust { get; }
@@ -183,6 +201,14 @@ public sealed record TeamsInboundActivity
     public bool IsMentioned { get; }
 
     public ImmutableArray<TeamsAttachmentMetadata> Attachments { get; }
+
+    public TeamsIngressActivityKind Kind { get; }
+
+    public string? TeamId { get; }
+
+    public string? ChannelId { get; }
+
+    public ImmutableArray<TeamsMention> Mentions { get; }
 }
 
 /// <summary>

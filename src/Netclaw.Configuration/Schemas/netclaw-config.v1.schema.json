@@ -101,6 +101,7 @@
         "Enabled": { "type": "boolean", "default": false },
         "TenantId": { "type": ["string", "null"] },
         "ClientId": { "type": ["string", "null"] },
+        "BotId": { "type": ["string", "null"] },
         "AuthenticationMode": {
           "type": "string",
           "enum": ["ClientSecret"],

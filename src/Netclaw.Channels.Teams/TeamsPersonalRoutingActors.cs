@@ -40,6 +40,7 @@ public enum TeamsBindingRouteDisposition
 {
     Accepted,
     Duplicate,
+    Ignored,
     Denied,
     Unavailable,
     Failed,
@@ -56,6 +57,9 @@ public static class TeamsActorNames
 {
     public static string Conversation(SessionId sessionId) =>
         "teams-conversation-" + Uri.EscapeDataString(sessionId.Value);
+
+    public static string ChannelConversation(SessionId sessionId) =>
+        "teams-channel-conversation-" + Uri.EscapeDataString(sessionId.Value);
 
     public static string Binding(SessionId sessionId) =>
         "teams-binding-" + Uri.EscapeDataString(sessionId.Value);
@@ -92,22 +96,44 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         if (cancellationToken.IsCancellationRequested)
             return TeamsIngressSinkResult.Cancelled;
 
-        if (activity.Trust.Scope != TeamsConversationScope.Personal)
-            return TeamsIngressSinkResult.Unavailable;
-
         if (!TeamsSessionIdentifierCodec.TryCreatePersonal(
                 activity.Trust.TenantId,
                 activity.Trust.ConversationId,
-                out var sessionId,
+                out var conversationId,
                 out _))
         {
             return TeamsIngressSinkResult.Denied;
         }
 
-        if (!TeamsPersonalAclPolicy.Evaluate(activity, _options).IsAllowed)
-            return TeamsIngressSinkResult.Denied;
+        if (activity.Trust.Scope == TeamsConversationScope.Personal)
+        {
+            if (!TeamsPersonalAclPolicy.Evaluate(activity, _options).IsAllowed)
+                return TeamsIngressSinkResult.Denied;
 
-        var conversation = GetOrCreateConversation(sessionId, new TeamsConversationDependencies(
+            return await RoutePersonalAsync(activity, conversationId, cancellationToken);
+        }
+
+        if (activity.Trust.Scope != TeamsConversationScope.Channel)
+            return TeamsIngressSinkResult.Unavailable;
+
+        if (activity.Kind == TeamsIngressActivityKind.Message)
+        {
+            var policy = TeamsChannelAclPolicy.Evaluate(activity, _options);
+            if (policy.Disposition == TeamsChannelPolicyDisposition.Ignored)
+                return TeamsIngressSinkResult.Ignored;
+            if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed)
+                return TeamsIngressSinkResult.Denied;
+        }
+
+        return await RouteChannelAsync(activity, conversationId, cancellationToken);
+    }
+
+    private async ValueTask<TeamsIngressSinkResult> RoutePersonalAsync(
+        TeamsInboundActivity activity,
+        SessionId sessionId,
+        CancellationToken cancellationToken)
+    {
+        var conversation = GetOrCreatePersonalConversation(sessionId, new TeamsConversationDependencies(
             _options,
             _serviceProvider.GetRequiredService<ISessionPipeline>(),
             _serviceProvider.GetRequiredService<TimeProvider>()));
@@ -142,7 +168,48 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         }
     }
 
-    private IActorRef GetOrCreateConversation(
+    private async ValueTask<TeamsIngressSinkResult> RouteChannelAsync(
+        TeamsInboundActivity activity,
+        SessionId conversationId,
+        CancellationToken cancellationToken)
+    {
+        var conversation = GetOrCreateChannelConversation(conversationId, new TeamsConversationDependencies(
+            _options,
+            _serviceProvider.GetRequiredService<ISessionPipeline>(),
+            _serviceProvider.GetRequiredService<TimeProvider>()));
+        try
+        {
+            var result = await conversation.Ask<TeamsBindingRouteResult>(
+                new TeamsConversationIngress(activity, cancellationToken),
+                RouteTimeout,
+                cancellationToken);
+            return result.Disposition switch
+            {
+                TeamsBindingRouteDisposition.Accepted => TeamsIngressSinkResult.Accepted,
+                TeamsBindingRouteDisposition.Duplicate => TeamsIngressSinkResult.Duplicate,
+                TeamsBindingRouteDisposition.Ignored => TeamsIngressSinkResult.Ignored,
+                TeamsBindingRouteDisposition.Denied => TeamsIngressSinkResult.Denied,
+                TeamsBindingRouteDisposition.Unavailable => TeamsIngressSinkResult.Unavailable,
+                TeamsBindingRouteDisposition.Cancelled => TeamsIngressSinkResult.Cancelled,
+                TeamsBindingRouteDisposition.Failed => TeamsIngressSinkResult.Failed,
+                _ => throw new ArgumentOutOfRangeException()
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return TeamsIngressSinkResult.Cancelled;
+        }
+        catch (AskTimeoutException)
+        {
+            return TeamsIngressSinkResult.Unavailable;
+        }
+        catch (Exception)
+        {
+            return TeamsIngressSinkResult.Failed;
+        }
+    }
+
+    private IActorRef GetOrCreatePersonalConversation(
         SessionId sessionId,
         TeamsConversationDependencies dependencies)
     {
@@ -152,9 +219,27 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
                 return existing;
 
             var actor = _actorSystem.ActorOf(
-                TeamsConversationActor.CreateProps(sessionId, dependencies),
+                TeamsPersonalConversationActor.CreateProps(sessionId, dependencies),
                 TeamsActorNames.Conversation(sessionId));
             _conversations.Add(sessionId.Value, actor);
+            return actor;
+        }
+    }
+
+    private IActorRef GetOrCreateChannelConversation(
+        SessionId conversationId,
+        TeamsConversationDependencies dependencies)
+    {
+        lock (_creationLock)
+        {
+            var key = "channel:" + conversationId.Value;
+            if (_conversations.TryGetValue(key, out var existing))
+                return existing;
+
+            var actor = _actorSystem.ActorOf(
+                TeamsConversationActor.CreateProps(conversationId, dependencies),
+                TeamsActorNames.ChannelConversation(conversationId));
+            _conversations.Add(key, actor);
             return actor;
         }
     }
@@ -164,7 +249,7 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
 /// Owns deterministic binding-child lookup for one canonical Teams personal
 /// conversation. It owns no pipeline work and no durable duplicate state.
 /// </summary>
-public sealed class TeamsConversationActor : ReceiveActor
+public sealed class TeamsPersonalConversationActor : ReceiveActor
 {
     private static readonly TimeSpan BindingRouteTimeout = TimeSpan.FromSeconds(10);
 
@@ -172,7 +257,7 @@ public sealed class TeamsConversationActor : ReceiveActor
     private readonly TeamsConversationDependencies _dependencies;
     private readonly ILoggingAdapter _log;
 
-    public TeamsConversationActor(SessionId sessionId, TeamsConversationDependencies dependencies)
+    public TeamsPersonalConversationActor(SessionId sessionId, TeamsConversationDependencies dependencies)
     {
         _sessionId = sessionId;
         _dependencies = dependencies ?? throw new ArgumentNullException(nameof(dependencies));
@@ -182,7 +267,7 @@ public sealed class TeamsConversationActor : ReceiveActor
     }
 
     public static Props CreateProps(SessionId sessionId, TeamsConversationDependencies dependencies) =>
-        Props.Create(() => new TeamsConversationActor(sessionId, dependencies));
+        Props.Create(() => new TeamsPersonalConversationActor(sessionId, dependencies));
 
     private async Task HandleIngressAsync(TeamsConversationIngress ingress)
     {
@@ -301,7 +386,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     }
 
     public override string PersistenceId =>
-        "teams-personal-binding-" + Uri.EscapeDataString(_sessionId.Value);
+        (TeamsSessionIdentifierCodec.TryParse(_sessionId, out var identifier, out _)
+         && identifier.Scope == TeamsConversationScope.Channel
+            ? "teams-channel-binding-"
+            : "teams-personal-binding-") + Uri.EscapeDataString(_sessionId.Value);
 
     public static Props CreateProps(SessionId sessionId, TeamsConversationDependencies dependencies) =>
         Props.Create(() => new TeamsSessionBindingActor(sessionId, dependencies));
@@ -321,20 +409,15 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
         }
 
-        if (ingress.Activity.Trust.Scope != TeamsConversationScope.Personal
-            || !TeamsSessionIdentifierCodec.TryCreatePersonal(
-                ingress.Activity.Trust.TenantId,
-                ingress.Activity.Trust.ConversationId,
-                out var expectedSessionId,
-                out _)
+        if (!TryGetExpectedSessionId(ingress.Activity, out var expectedSessionId)
             || expectedSessionId != _sessionId)
         {
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Unavailable));
             return;
         }
 
-        var acl = TeamsPersonalAclPolicy.Evaluate(ingress.Activity, _dependencies.Options);
-        if (!acl.IsAllowed)
+        var acl = EvaluateAcl(ingress.Activity);
+        if (acl is null)
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_acl_denied");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Denied));
@@ -426,23 +509,68 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             cancellationToken);
     }
 
-    private static ChannelInput BuildChannelInput(TeamsInboundActivity activity) => new()
+    private ChannelInput BuildChannelInput(TeamsInboundActivity activity)
     {
+        var acl = EvaluateAcl(activity) ?? throw new InvalidOperationException("The Teams activity is not authorized for dispatch.");
+        var sourceScope = activity.Trust.Scope == TeamsConversationScope.Personal
+            ? "teams-personal"
+            : "teams-channel";
+        var boundary = activity.Trust.Scope == TeamsConversationScope.Personal
+            ? TrustBoundary.Personal
+            : TrustBoundary.Public;
+        return new ChannelInput
+        {
         SenderId = new SenderId(activity.Trust.SenderId),
         ChannelId = activity.Trust.ConversationId,
         MessageId = activity.Trust.ActivityId,
-        Audience = TrustAudience.Personal,
-        Boundary = TrustBoundary.Personal,
-        Principal = PrincipalClassification.TrustedInternal,
-        Provenance = new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community)
-        {
-            SourceKind = new SourceKind("teams"),
-            SourceScope = new SourceScope("teams-personal")
-        },
+        Audience = acl.Audience,
+        Boundary = boundary,
+        Principal = acl.Principal,
+        Provenance = acl.Provenance with { SourceScope = new SourceScope(sourceScope) },
         Contents = [new TextContent(activity.Text)],
         ReceivedAt = activity.Trust.ReceivedAtUtc,
         ExecutableText = activity.Text
-    };
+        };
+    }
+
+    private bool TryGetExpectedSessionId(TeamsInboundActivity activity, out SessionId sessionId)
+    {
+        if (activity.Trust.Scope == TeamsConversationScope.Personal)
+        {
+            return TeamsSessionIdentifierCodec.TryCreatePersonal(
+                activity.Trust.TenantId,
+                activity.Trust.ConversationId,
+                out sessionId,
+                out _);
+        }
+
+        if (activity.Trust.Scope == TeamsConversationScope.Channel
+            && activity.Reply?.RootActivityId is { } rootActivityId)
+        {
+            return TeamsSessionIdentifierCodec.TryCreateChannel(
+                activity.Trust.TenantId,
+                activity.Trust.ConversationId,
+                rootActivityId,
+                out sessionId,
+                out _);
+        }
+
+        sessionId = default;
+        return false;
+    }
+
+    private ChannelAclDecision? EvaluateAcl(TeamsInboundActivity activity)
+    {
+        if (activity.Trust.Scope == TeamsConversationScope.Personal)
+        {
+            var personal = TeamsPersonalAclPolicy.Evaluate(activity, _dependencies.Options);
+            return personal.IsAllowed ? personal : null;
+        }
+
+        var channel = TeamsChannelAclPolicy.Evaluate(activity, _dependencies.Options);
+        return channel.Disposition == TeamsChannelPolicyDisposition.Allowed ? channel.Acl : null;
+    }
+
 
     private void ApplyReserved(DurableActivityDispatchReserved reserved)
     {
