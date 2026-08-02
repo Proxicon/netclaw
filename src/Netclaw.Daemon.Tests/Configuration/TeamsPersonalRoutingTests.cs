@@ -13,6 +13,7 @@ using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Sessions;
 using Netclaw.Channels.Teams;
+using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
@@ -406,6 +407,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             TeamsBindingRouteDisposition.Accepted,
             (await RouteAsync(actor, CreateActivity("activity-output", "tenant-a", "conversation-output"))).Disposition);
         var subscriber = ReceiveOutputSubscriber();
+        var telemetryBefore = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
         subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
 
         await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
@@ -415,6 +417,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         Assert.Equal("conversation-output", message.Destination.ConversationId);
         Assert.Equal("user-a", message.Destination.UserId);
         Assert.Equal("final reply", message.Text);
+        Assert.Equal(telemetryBefore.RepliesPosted + 1, ChannelTelemetry.For(ChannelType.Teams).GetSnapshot().RepliesPosted);
     }
 
     [Fact]
@@ -452,6 +455,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         {
             Assert.Equal(TeamsConversationScope.Channel, message.Destination.Scope);
             Assert.Equal("root-a", message.Destination.RootActivityId);
+            Assert.Equal("root-a", message.ReplyToActivityId);
             Assert.Equal("team-a", message.Destination.TeamId);
             Assert.Equal("channel-a", message.Destination.ChannelId);
         });
@@ -463,6 +467,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         secondSubscriber.Tell(new TextOutput("second root result") { SessionId = CreateChannelSessionId(secondConversationId, "root-b") });
         await AwaitAssertAsync(() => Assert.Equal(3, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal("root-b", replyClient.Messages[2].Destination.RootActivityId);
+        Assert.Equal("root-b", replyClient.Messages[2].ReplyToActivityId);
     }
 
     [Fact]
@@ -482,6 +487,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             TeamsBindingRouteDisposition.Accepted,
             (await RouteAsync(actor, CreateActivity("activity-processing", "tenant-a", "conversation-processing"))).Disposition);
         var subscriber = ReceiveOutputSubscriber();
+        var telemetryBefore = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
         subscriber.Tell(new TextOutput("  \r\n") { SessionId = sessionId });
         await AwaitAssertAsync(() => Assert.Empty(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
 
@@ -494,6 +500,72 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         Assert.Equal("processing", replyClient.Messages[1].UpdateActivityId);
         Assert.Null(replyClient.Messages[2].UpdateActivityId);
         Assert.Equal("final reply", replyClient.Messages[2].Text);
+        var telemetryAfter = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
+        Assert.Equal(telemetryBefore.RepliesPosted + 2, telemetryAfter.RepliesPosted);
+        Assert.Equal(telemetryBefore.RepliesFailed + 1, telemetryAfter.RepliesFailed);
+    }
+
+    [Fact]
+    public async Task Processing_delivery_never_retains_an_unbounded_activity_id()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient(
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, new string('p', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1)),
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
+        var sessionId = CreateSessionId("tenant-a", "conversation-processing-bound");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-processing-bound", "tenant-a", "conversation-processing-bound"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(new ProcessingStateOutput(true) { SessionId = sessionId });
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
+        await AwaitAssertAsync(() => Assert.Equal(2, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Null(replyClient.Messages[1].UpdateActivityId);
+    }
+
+    [Fact]
+    public async Task Recovered_binding_reports_an_unavailable_destination_without_a_delivery_attempt()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-output-recovered");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient)));
+        var telemetryBefore = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
+
+        actor.Tell(new TeamsSessionBindingActor.BindingOutput(
+            new TextOutput("late output") { SessionId = sessionId }));
+
+        await AwaitAssertAsync(
+            () => Assert.Equal(telemetryBefore.RepliesFailed + 1, ChannelTelemetry.For(ChannelType.Teams).GetSnapshot().RepliesFailed),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Empty(replyClient.Messages);
+    }
+
+    [Fact]
+    public async Task Final_delivery_failure_makes_no_retry_attempt()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient(new TeamsDeliveryResult(TeamsDeliveryStatus.Unavailable));
+        var sessionId = CreateSessionId("tenant-a", "conversation-output-failed");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-output-failed", "tenant-a", "conversation-output-failed"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
+
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
     }
 
     [Fact]
