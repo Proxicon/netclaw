@@ -123,6 +123,41 @@ letting it redefine local receipt ordering. The translator's public/untrusted
 trust context is provisional transport authentication only; PR 3/4 must derive
 a final ACL/audience context before any pipeline dispatch.
 
+#### PR 3 personal-binding durability record (2026-08-01)
+
+PR 3 enables only personal activities. `TeamsIngressActor` delegates to the
+real conversation sink only after transport validation. The sink and
+`TeamsConversationActor` reject every non-personal activity before actor
+creation, and final personal ACL evaluation is default-deny: direct messages
+must be enabled, the configured tenant must match ordinally, and the sender
+must exactly match a non-empty `AllowedUserIds` entry. The binding derives the
+pipeline `ChannelInput` as `Personal` / `Personal` /
+`TrustedInternal` with verified Teams provenance; the provisional PR 2 public
+transport classification never reaches the session.
+
+`TeamsSessionBindingActor` is the sole durable processed-activity owner. Its
+retention is 1,024 IDs per canonical personal session and evicts the oldest ID
+first. It persists a reservation before queue admission. A live pipeline write
+failure or caller cancellation persists a release, so that activity can be
+retried. After a process crash that occurs after the reservation commits but
+before the pipeline accepts the input, recovery suppresses the retry; this is a
+documented at-most-once local-admission trade-off, not an exactly-once external
+or model-execution claim. The persisted reservation and release records use
+new Netclaw protobuf types and do not contain Microsoft SDK types. They store
+only fixed activity fingerprints. Ordered snapshots compact the journal after
+snapshot success and retain at most 1,024 fingerprints. Older binaries do not
+recognize the new durable manifests. They must not run against PR 3 Teams
+binding state. Disabling `Teams.Enabled` is safe operational rollback. It does
+not establish binary rollback compatibility for stored PR 3 binding state.
+
+PR 3 uses `TeamsSessionIdentifierCodec` as the sole personal session builder;
+actor names URI-escape the resulting canonical ID. Bindings may passivate and
+recover their durable state. The cached conversation parent remains live so its
+name remains a reliable owner for binding-child recreation. Pipeline options
+use `OutputFilter.None` and no default delivery target: no Teams reply,
+renderer, destination, card, attachment, or proactive operation is introduced
+in this PR.
+
 ### Preserve the two-segment session grammar
 
 Existing reminder routing parses session IDs as `{channelPart}/{threadPart}` in

@@ -7,6 +7,8 @@ using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Serialization;
 using Google.Protobuf;
+using System.Security.Cryptography;
+using System.Text;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Jobs;
@@ -550,6 +552,54 @@ public sealed class SerializationRoundTripTests : TestKit
         Assert.Null(result.ToolName);
         Assert.Null(result.DisplayText);
         Assert.Equal(original.PromptId, result.PromptId);
+    }
+
+    [Fact]
+    public void Durable_activity_dispatch_records_round_trip()
+    {
+        const string fingerprint = "F046E9C6D25D3B4CBE37DEEF6320CA470BA62B2799457CF16B8C1C541E2666F1";
+        const string evictedFingerprint = "E17729265FA2A3B1D16EC816E9BBA31B9FCDE6E919C50C1E7C4425F0A3B37807";
+        var reserved = new DurableActivityDispatchReserved(fingerprint, evictedFingerprint);
+        var released = new DurableActivityDispatchReleased(fingerprint);
+
+        Assert.Equal(reserved, RoundTrip(reserved));
+        Assert.Equal(released, RoundTrip(released));
+    }
+
+    [Fact]
+    public void Durable_activity_dispatch_snapshot_round_trips_empty_one_and_maximum_state()
+    {
+        var empty = RoundTrip(new DurableActivityDispatchSnapshot([]));
+        var one = new DurableActivityDispatchSnapshot(["F046E9C6D25D3B4CBE37DEEF6320CA470BA62B2799457CF16B8C1C541E2666F1"]);
+        var recoveredOne = RoundTrip(one);
+        var maximum = Enumerable.Range(0, 1_024)
+            .Select(static index => $"{index:X64}")
+            .ToArray();
+        var recoveredMaximum = RoundTrip(new DurableActivityDispatchSnapshot(maximum));
+
+        Assert.Empty(empty.ActivityFingerprints);
+        Assert.Equal(one.ActivityFingerprints, recoveredOne.ActivityFingerprints);
+        Assert.Equal(maximum, recoveredMaximum.ActivityFingerprints);
+    }
+
+    [Fact]
+    public void Durable_activity_dispatch_default_payloads_deserialize_without_raw_activity_content()
+    {
+        const string activityId = "opaque-活動-id";
+        var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(activityId)));
+        var serialized = Serialize(new DurableActivityDispatchReserved(fingerprint, null));
+        var serializer = new Serialization.NetclawProtobufSerializer((Akka.Actor.ExtendedActorSystem)Sys);
+
+        var reserved = Assert.IsType<DurableActivityDispatchReserved>(serializer.FromBinary([], "dadr-v1"));
+        var snapshot = Assert.IsType<DurableActivityDispatchSnapshot>(serializer.FromBinary([], "dads-v1"));
+        var snapshotWithUnknownField = Assert.IsType<DurableActivityDispatchSnapshot>(
+            serializer.FromBinary([0x10, 0x01], "dads-v1"));
+
+        Assert.Empty(reserved.ActivityFingerprint);
+        Assert.Null(reserved.EvictedActivityFingerprint);
+        Assert.Empty(snapshot.ActivityFingerprints);
+        Assert.Empty(snapshotWithUnknownField.ActivityFingerprints);
+        Assert.DoesNotContain(activityId, Encoding.UTF8.GetString(serialized), StringComparison.Ordinal);
     }
 
     [Fact]

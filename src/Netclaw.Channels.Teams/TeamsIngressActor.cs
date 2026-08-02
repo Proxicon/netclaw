@@ -10,9 +10,8 @@ using Netclaw.Channels.Telemetry;
 namespace Netclaw.Channels.Teams;
 
 /// <summary>
-/// The PR 2 boundary for canonical Teams conversation-child routing. PR 3
-/// replaces the deferred implementation with the durable conversation actor;
-/// this interface deliberately has no session-pipeline dependency.
+/// The boundary for canonical Teams conversation-child routing. It deliberately
+/// exposes no session-pipeline dependency to the ingress fast path.
 /// </summary>
 public interface ITeamsConversationIngressSink
 {
@@ -22,6 +21,10 @@ public interface ITeamsConversationIngressSink
 public enum TeamsIngressSinkResult
 {
     Accepted,
+    Duplicate,
+    Denied,
+    Cancelled,
+    Failed,
     Unavailable
 }
 
@@ -31,6 +34,7 @@ public enum TeamsIngressRouteDisposition
 {
     Routed,
     Duplicate,
+    Denied,
     Cancelled,
     Unavailable,
     RouteFailed
@@ -40,8 +44,8 @@ public sealed record TeamsIngressRouteResult(TeamsIngressRouteDisposition Dispos
 
 /// <summary>
 /// Process-local routing and duplicate fast path only. Durable deduplication
-/// belongs to the future session-binding actor, and activity/root lookup
-/// belongs to the future conversation actor.
+/// belongs to the session-binding actor, and conversation lookup belongs to
+/// the conversation actor.
 /// </summary>
 public sealed class TeamsIngressActor : ReceiveActor
 {
@@ -86,6 +90,33 @@ public sealed class TeamsIngressActor : ReceiveActor
         try
         {
             var sinkResult = await _conversationSink.RouteAsync(received.Activity, received.CancellationToken);
+            if (sinkResult == TeamsIngressSinkResult.Duplicate)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("durable_activity_duplicate");
+                Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Duplicate));
+                return;
+            }
+
+            if (sinkResult == TeamsIngressSinkResult.Denied)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_acl_denied");
+                Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Denied));
+                return;
+            }
+
+            if (sinkResult == TeamsIngressSinkResult.Cancelled)
+            {
+                Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Cancelled));
+                return;
+            }
+
+            if (sinkResult == TeamsIngressSinkResult.Failed)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("conversation_boundary_failed");
+                Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.RouteFailed));
+                return;
+            }
+
             if (sinkResult != TeamsIngressSinkResult.Accepted)
             {
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("conversation_boundary_unavailable");
