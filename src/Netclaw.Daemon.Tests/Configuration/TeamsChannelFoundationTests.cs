@@ -33,6 +33,8 @@ using Netclaw.Daemon.Configuration;
 using Netclaw.Daemon.Security;
 using Xunit;
 using TeamsAccount = Microsoft.Teams.Api.Account;
+using TeamsAttachment = Microsoft.Teams.Api.Attachment;
+using TeamsContentType = Microsoft.Teams.Api.ContentType;
 using TeamsChannel = Microsoft.Teams.Api.Channel;
 using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
 using TeamsConversation = Microsoft.Teams.Api.Conversation;
@@ -1011,6 +1013,43 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal("root", result.Activity.Reply!.RootActivityId);
         Assert.Equal("team", result.Activity.TeamId);
         Assert.Equal("channel", result.Activity.ChannelId);
+    }
+
+    [Fact]
+    public void Translator_rejects_graph_backed_attachment_shells_before_channel_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Attachments = [new TeamsAttachment { ContentType = TeamsContentType.Html }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
+    }
+
+    [Fact]
+    public void Translator_does_not_treat_a_malformed_mention_entity_as_a_bot_mention()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Text = "literal bot text";
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "bot"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.False(result.Activity!.IsMentioned);
+        Assert.Equal("literal bot text", result.Activity.Text);
     }
 
     [Fact]

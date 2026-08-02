@@ -280,6 +280,42 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
     }
 
     [Fact]
+    public async Task Channel_activity_mapping_rehydrates_after_conversation_actor_restart()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var dependencies = new TeamsConversationDependencies(
+            new TeamsChannelOptions
+            {
+                TenantId = "tenant-a",
+                MentionOnly = true,
+                AllowedTeamIds = ["team-a"],
+                AllowedChannelIds = ["channel-a"]
+            },
+            pipeline,
+            TimeProvider.System);
+        const string conversationId = "conversation-recovery;messageid=root-a";
+        var parentId = CreateSessionId("tenant-a", conversationId);
+        var root = CreateChannelActivity("root-a", conversationId);
+        var first = Sys.ActorOf(TeamsConversationActor.CreateProps(parentId, dependencies), "teams-channel-recovery-first");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(first, root)).Disposition);
+        ReceiveDispatchedMessage();
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = Sys.ActorOf(TeamsConversationActor.CreateProps(parentId, dependencies), "teams-channel-recovery-second");
+        var update = CreateChannelActivity("root-a", conversationId, TeamsIngressActivityKind.MessageUpdate);
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(recovered, update)).Disposition);
+    }
+
+    [Fact]
     public async Task Concurrent_personal_ingress_resolves_one_conversation_and_binding()
     {
         var pipeline = CreatePipeline(TestActor);
@@ -418,6 +454,12 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         IActorRef actor,
         TeamsInboundActivity activity) => actor.Ask<TeamsBindingRouteResult>(
         new TeamsBindingIngress(activity, TestContext.Current.CancellationToken),
+        TestContext.Current.CancellationToken);
+
+    private static Task<TeamsBindingRouteResult> RouteConversationAsync(
+        IActorRef actor,
+        TeamsInboundActivity activity) => actor.Ask<TeamsBindingRouteResult>(
+        new TeamsConversationIngress(activity, TestContext.Current.CancellationToken),
         TestContext.Current.CancellationToken);
 
     private SendUserMessage ReceiveDispatchedMessage()

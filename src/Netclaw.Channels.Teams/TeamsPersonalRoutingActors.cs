@@ -116,14 +116,11 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         if (activity.Trust.Scope != TeamsConversationScope.Channel)
             return TeamsIngressSinkResult.Unavailable;
 
-        if (activity.Kind == TeamsIngressActivityKind.Message)
-        {
-            var policy = TeamsChannelAclPolicy.Evaluate(activity, _options);
-            if (policy.Disposition == TeamsChannelPolicyDisposition.Ignored)
-                return TeamsIngressSinkResult.Ignored;
-            if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed)
-                return TeamsIngressSinkResult.Denied;
-        }
+        var policy = TeamsChannelAclPolicy.Evaluate(activity, _options);
+        if (policy.Disposition == TeamsChannelPolicyDisposition.Ignored)
+            return TeamsIngressSinkResult.Ignored;
+        if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed)
+            return TeamsIngressSinkResult.Denied;
 
         return await RouteChannelAsync(activity, conversationId, cancellationToken);
     }
@@ -343,6 +340,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private readonly TeamsConversationDependencies _dependencies;
     private readonly SessionPipelineHandle _pipelineHandle;
     private readonly ILoggingAdapter _log;
+    private readonly bool _isChannelBinding;
     private readonly HashSet<string> _processedActivityIds = new(StringComparer.Ordinal);
     private readonly Queue<string> _processedActivityOrder = new();
 
@@ -351,7 +349,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         _sessionId = sessionId;
         _dependencies = dependencies ?? throw new ArgumentNullException(nameof(dependencies));
         _log = Context.GetLogger().WithContext("Adapter", "teams");
-        _pipelineHandle = new SessionPipelineHandle(_dependencies.Pipeline, _log, "teams-personal");
+        _isChannelBinding = TeamsSessionIdentifierCodec.TryParse(_sessionId, out var identifier, out _)
+                            && identifier.Scope == TeamsConversationScope.Channel;
+        _pipelineHandle = new SessionPipelineHandle(
+            _dependencies.Pipeline,
+            _log,
+            _isChannelBinding ? "teams-channel" : "teams-personal");
 
         Recover<DurableActivityDispatchReserved>(ApplyReserved);
         Recover<DurableActivityDispatchReleased>(ApplyReleased);
@@ -373,8 +376,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         CommandAsync<ReinitializePipeline>(async _ =>
         {
             await _pipelineHandle.ReinitializeAsync(
-                "Teams personal pipeline output terminated",
-                () => ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_pipeline_reinitialize_failed"));
+                _isChannelBinding ? "Teams channel pipeline output terminated" : "Teams personal pipeline output terminated",
+                () => ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(
+                    _isChannelBinding ? "channel_pipeline_reinitialize_failed" : "personal_pipeline_reinitialize_failed"));
         });
         Command<SaveSnapshotSuccess>(saved =>
         {
@@ -419,7 +423,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         var acl = EvaluateAcl(ingress.Activity);
         if (acl is null)
         {
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_acl_denied");
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(
+                _isChannelBinding ? "channel_acl_denied" : "personal_acl_denied");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Denied));
             return;
         }
@@ -456,7 +461,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             var writer = await EnsurePipelineAsync(dispatch.CancellationToken);
             await writer.WriteAsync(BuildChannelInput(dispatch.Activity), dispatch.CancellationToken);
             ChannelTelemetry.For(ChannelType.Teams).RecordMessageEnqueued();
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventRouted("personal_binding");
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventRouted(
+                _isChannelBinding ? "channel_binding" : "personal_binding");
             dispatch.ReplyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Accepted));
         }
         catch (OperationCanceledException) when (dispatch.CancellationToken.IsCancellationRequested)

@@ -17,6 +17,7 @@ public sealed class TeamsChannelRoutingPolicyTests
     [InlineData("conversation;messageid=")]
     [InlineData("conversation;messageid=root;other=value")]
     [InlineData("conversation;messageid=root;messageid=other")]
+    [InlineData("conversation;messageid=rootmessageid=other")]
     public void Channel_root_parser_rejects_unproven_or_ambiguous_shapes(string conversationId)
     {
         Assert.False(TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(conversationId, out _));
@@ -36,6 +37,20 @@ public sealed class TeamsChannelRoutingPolicyTests
         var conversationId = "conversation;messageid=" + new string('a', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1);
 
         Assert.False(TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(conversationId, out _));
+    }
+
+    [Fact]
+    public void Mention_removal_preserves_literal_text_for_a_malformed_entity_span()
+    {
+        var text = "bot says hello";
+
+        var normalized = TeamsTenantEvidenceMappings.RemoveQualifiedBotMentions(
+            text,
+            [new TeamsMentionEvidence("mention", "28:bot", "bot")],
+            "28:bot",
+            "bot");
+
+        Assert.Equal(text, normalized);
     }
 
     [Fact]
@@ -62,6 +77,14 @@ public sealed class TeamsChannelRoutingPolicyTests
         Assert.Equal(TeamsChannelPolicyDisposition.Ignored, TeamsChannelAclPolicy.Evaluate(unmentioned, AllowedOptions()).Disposition);
         Assert.Equal(TeamsChannelPolicyDisposition.Allowed, TeamsChannelAclPolicy.Evaluate(
             unmentioned, CreateOptions(mentionOnly: false)).Disposition);
+    }
+
+    [Fact]
+    public void Channel_mutations_require_the_same_identity_acl_as_messages()
+    {
+        var update = CreateActivity(teamId: "team-other", kind: TeamsIngressActivityKind.MessageUpdate);
+
+        Assert.Equal(TeamsChannelPolicyDisposition.Denied, TeamsChannelAclPolicy.Evaluate(update, AllowedOptions()).Disposition);
     }
 
     [Fact]
@@ -96,7 +119,8 @@ public sealed class TeamsChannelRoutingPolicyTests
     private static TeamsInboundActivity CreateActivity(
         string teamId = "team-a",
         string channelId = "channel-a",
-        bool isMentioned = true) => new(
+        bool isMentioned = true,
+        TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message) => new(
         new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
@@ -111,6 +135,7 @@ public sealed class TeamsChannelRoutingPolicyTests
         "prompt",
         new TeamsReplyMetadata(null, "root-a"),
         isMentioned,
+        kind: kind,
         teamId: teamId,
         channelId: channelId);
 }

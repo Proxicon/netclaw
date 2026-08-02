@@ -101,7 +101,7 @@ public sealed class TeamsIngressActor : ReceiveActor
 
             if (sinkResult == TeamsIngressSinkResult.Denied)
             {
-                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_acl_denied");
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("teams_acl_denied");
                 Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Denied));
                 return;
             }

@@ -76,12 +76,6 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
             return;
         }
 
-        if (ingress.Activity.Kind is TeamsIngressActivityKind.MessageUpdate or TeamsIngressActivityKind.MessageDelete)
-        {
-            HandleMutation(ingress.Activity, replyTo);
-            return;
-        }
-
         var policy = TeamsChannelAclPolicy.Evaluate(ingress.Activity, _dependencies.Options);
         if (policy.Disposition == TeamsChannelPolicyDisposition.Ignored)
         {
@@ -94,6 +88,12 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(policy.ReasonCode);
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Denied));
+            return;
+        }
+
+        if (ingress.Activity.Kind is TeamsIngressActivityKind.MessageUpdate or TeamsIngressActivityKind.MessageDelete)
+        {
+            HandleMutation(ingress.Activity, replyTo);
             return;
         }
 
@@ -144,7 +144,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
     private void HandleMutation(TeamsInboundActivity activity, IActorRef replyTo)
     {
         var fingerprint = ActivityFingerprint.Create(activity.Trust.ActivityId);
-        if (!_activitySessions.ContainsKey(fingerprint))
+        if (!_activitySessions.TryGetValue(fingerprint, out _))
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("unknown_activity_mapping");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Ignored));
