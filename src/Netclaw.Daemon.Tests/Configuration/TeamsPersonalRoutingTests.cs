@@ -208,6 +208,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         };
         var services = new ServiceCollection();
         services.AddSingleton<ISessionPipeline>(pipeline);
+        services.AddSingleton<ITeamsReplyClient, TestTeamsReplyClient>();
+        services.AddSingleton<TeamsOutputRenderer>();
         services.AddSingleton<TimeProvider>(TimeProvider.System);
         using var provider = services.BuildServiceProvider();
         var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
@@ -260,6 +262,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         };
         var services = new ServiceCollection();
         services.AddSingleton<ISessionPipeline>(pipeline);
+        services.AddSingleton<ITeamsReplyClient, TestTeamsReplyClient>();
+        services.AddSingleton<TeamsOutputRenderer>();
         services.AddSingleton<TimeProvider>(TimeProvider.System);
         using var provider = services.BuildServiceProvider();
         var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
@@ -292,6 +296,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
                 AllowedChannelIds = ["channel-a"]
             },
             pipeline,
+            new TestTeamsReplyClient(),
+            new TeamsOutputRenderer(),
             TimeProvider.System);
         const string conversationId = "conversation-recovery;messageid=root-a";
         var parentId = CreateSessionId("tenant-a", conversationId);
@@ -327,6 +333,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         };
         var services = new ServiceCollection();
         services.AddSingleton<ISessionPipeline>(pipeline);
+        services.AddSingleton<ITeamsReplyClient, TestTeamsReplyClient>();
+        services.AddSingleton<TeamsOutputRenderer>();
         services.AddSingleton<TimeProvider>(TimeProvider.System);
         using var provider = services.BuildServiceProvider();
         var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
@@ -384,6 +392,139 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         ReceiveDispatchedMessage();
     }
 
+    [Fact]
+    public async Task Personal_output_posts_one_reply_to_the_verified_personal_destination()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-output");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-output", "tenant-a", "conversation-output"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
+
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var message = Assert.Single(replyClient.Messages);
+        Assert.Equal(TeamsConversationScope.Personal, message.Destination.Scope);
+        Assert.Equal("tenant-a", message.Destination.TenantId);
+        Assert.Equal("conversation-output", message.Destination.ConversationId);
+        Assert.Equal("user-a", message.Destination.UserId);
+        Assert.Equal("final reply", message.Text);
+    }
+
+    [Fact]
+    public async Task Channel_output_for_a_root_and_reply_uses_the_same_canonical_thread_destination()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            MentionOnly = true,
+            AllowedTeamIds = ["team-a"],
+            AllowedChannelIds = ["channel-a"]
+        };
+        var dependencies = new TeamsConversationDependencies(
+            options,
+            pipeline,
+            replyClient,
+            new TeamsOutputRenderer(),
+            TimeProvider.System);
+        const string conversationId = "conversation-output;messageid=root-a";
+        var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(CreateSessionId("tenant-a", conversationId), dependencies));
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteConversationAsync(parent, CreateChannelActivity("root-a", conversationId))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(new TextOutput("root result") { SessionId = CreateChannelSessionId(conversationId) });
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteConversationAsync(parent, CreateChannelActivity("reply-a", conversationId))).Disposition);
+        var replySubscriber = ReceiveNextOutputSubscriber();
+        replySubscriber.Tell(new TextOutput("reply result") { SessionId = CreateChannelSessionId(conversationId) });
+        await AwaitAssertAsync(() => Assert.Equal(2, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.All(replyClient.Messages, message =>
+        {
+            Assert.Equal(TeamsConversationScope.Channel, message.Destination.Scope);
+            Assert.Equal("root-a", message.Destination.RootActivityId);
+            Assert.Equal("team-a", message.Destination.TeamId);
+            Assert.Equal("channel-a", message.Destination.ChannelId);
+        });
+
+        const string secondConversationId = "conversation-output;messageid=root-b";
+        var secondParent = Sys.ActorOf(TeamsConversationActor.CreateProps(CreateSessionId("tenant-a", secondConversationId), dependencies));
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteConversationAsync(secondParent, CreateChannelActivity("root-b", secondConversationId, rootActivityId: "root-b"))).Disposition);
+        var secondSubscriber = ReceiveOutputSubscriber();
+        secondSubscriber.Tell(new TextOutput("second root result") { SessionId = CreateChannelSessionId(secondConversationId, "root-b") });
+        await AwaitAssertAsync(() => Assert.Equal(3, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("root-b", replyClient.Messages[2].Destination.RootActivityId);
+    }
+
+    [Fact]
+    public async Task Empty_output_does_not_call_the_reply_client_and_update_failure_gets_one_final_fallback()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient(
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "processing"),
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Failed),
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
+        var sessionId = CreateSessionId("tenant-a", "conversation-processing");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-processing", "tenant-a", "conversation-processing"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(new TextOutput("  \r\n") { SessionId = sessionId });
+        await AwaitAssertAsync(() => Assert.Empty(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+
+        subscriber.Tell(new ProcessingStateOutput(true) { SessionId = sessionId });
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
+        await AwaitAssertAsync(() => Assert.Equal(3, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Null(replyClient.Messages[0].UpdateActivityId);
+        Assert.Equal("processing", replyClient.Messages[1].UpdateActivityId);
+        Assert.Null(replyClient.Messages[2].UpdateActivityId);
+        Assert.Equal("final reply", replyClient.Messages[2].Text);
+    }
+
+    [Fact]
+    public async Task Binding_restart_does_not_leave_an_output_subscription_that_can_deliver_twice()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-output-restart");
+        var dependencies = CreateDependencies(pipeline, replyClient: replyClient);
+        var first = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-output-first");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity("activity-output-first", "tenant-a", "conversation-output-restart"))).Disposition);
+        var oldSubscriber = ReceiveOutputSubscriber();
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        oldSubscriber.Tell(new TextOutput("stale output") { SessionId = sessionId });
+        var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-output-second");
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(recovered, CreateActivity("activity-output-second", "tenant-a", "conversation-output-restart"))).Disposition);
+        var currentSubscriber = ReceiveOutputSubscriber();
+        currentSubscriber.Tell(new TextOutput("current output") { SessionId = sessionId });
+
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("current output", Assert.Single(replyClient.Messages).Text);
+    }
+
     private ISessionPipeline CreatePipeline(IActorRef sessionManager)
     {
         var registry = ActorRegistry.For(Sys);
@@ -398,7 +539,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         ISessionPipeline pipeline,
         bool allowDirectMessages = true,
         string[]? allowedUserIds = null,
-        string tenantId = "tenant-a") => new(
+        string tenantId = "tenant-a",
+        ITeamsReplyClient? replyClient = null) => new(
         new TeamsChannelOptions
         {
             TenantId = tenantId,
@@ -406,11 +548,40 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             AllowedUserIds = allowedUserIds ?? ["user-a"]
         },
         pipeline,
+        replyClient ?? new TestTeamsReplyClient(),
+        new TeamsOutputRenderer(),
         TimeProvider.System);
+
+    private sealed class TestTeamsReplyClient : ITeamsReplyClient
+    {
+        public Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "synthetic-activity"));
+    }
+
+    private sealed class RecordingTeamsReplyClient(params TeamsDeliveryResult[] results) : ITeamsReplyClient
+    {
+        private readonly Queue<TeamsDeliveryResult> _results = new(results);
+
+        public List<TeamsOutboundMessage> Messages { get; } = [];
+
+        public Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken = default)
+        {
+            Messages.Add(message);
+            return Task.FromResult(_results.Count == 0
+                ? new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "synthetic-activity")
+                : _results.Dequeue());
+        }
+    }
 
     private static SessionId CreateSessionId(string tenantId, string conversationId)
     {
         Assert.True(TeamsSessionIdentifierCodec.TryCreatePersonal(tenantId, conversationId, out var sessionId, out _));
+        return sessionId;
+    }
+
+    private static SessionId CreateChannelSessionId(string conversationId, string rootActivityId = "root-a")
+    {
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", conversationId, rootActivityId, out var sessionId, out _));
         return sessionId;
     }
 
@@ -426,12 +597,14 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             TeamsConversationScope.Personal,
             activityId,
             TimeProvider.System.GetUtcNow()),
-        "hello");
+        "hello",
+        new TeamsReplyMetadata(null, null, "https://service.invalid/"));
 
     private static TeamsInboundActivity CreateChannelActivity(
         string activityId,
         string conversationId,
-        TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message) => new(
+        TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message,
+        string rootActivityId = "root-a") => new(
         new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
@@ -444,7 +617,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             activityId,
             TimeProvider.System.GetUtcNow()),
         kind == TeamsIngressActivityKind.Message ? "hello" : string.Empty,
-        new TeamsReplyMetadata(null, "root-a"),
+        new TeamsReplyMetadata(null, rootActivityId, "https://service.invalid/"),
         isMentioned: true,
         kind: kind,
         teamId: "team-a",
@@ -467,6 +640,19 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
         ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
         return ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    private IActorRef ReceiveOutputSubscriber()
+    {
+        ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        return ReceiveNextOutputSubscriber();
+    }
+
+    private IActorRef ReceiveNextOutputSubscriber()
+    {
+        var subscription = ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        return subscription.Subscriber;
     }
 
     private sealed class DiscardActor : ReceiveActor

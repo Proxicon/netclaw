@@ -351,8 +351,118 @@ public sealed class TeamsChannelFoundationTests
         Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
             "tenant",
             " ",
-            TeamsConversationScope.Personal));
+            TeamsConversationScope.Personal,
+            "https://service.invalid/"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
+            TeamsConversationScope.Channel,
+            "https://service.invalid/"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
+            TeamsConversationScope.Personal,
+            "https://service.invalid/"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
+            TeamsConversationScope.Personal,
+            "http://service.invalid/",
+            userId: "user"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
+            TeamsConversationScope.Channel,
+            "https://service.invalid/",
+            "root",
+            "team"));
         Assert.Throws<ArgumentOutOfRangeException>(() => new TeamsAttachmentMetadata("file.txt", null, -1));
+    }
+
+    [Fact]
+    public void Output_renderer_normalizes_empty_text_and_preserves_unicode_chunks()
+    {
+        var renderer = new TeamsOutputRenderer();
+
+        Assert.Empty(renderer.Render(" \r\n ").Chunks);
+        var output = renderer.Render("one\r\ntwo \U0001f469\u200d\U0001f4bb");
+
+        var chunk = Assert.Single(output.Chunks);
+        Assert.Equal("one\ntwo \U0001f469\u200d\U0001f4bb", chunk);
+        Assert.False(output.IsRejectedTooLarge);
+    }
+
+    [Fact]
+    public void Output_renderer_rejects_content_that_exceeds_the_bounded_chunk_budget()
+    {
+        var renderer = new TeamsOutputRenderer();
+        var output = renderer.Render(new string('x', TeamsOutputRenderer.MaxSerializedPayloadBytes * (TeamsOutputRenderer.MaxChunkCount + 1)));
+
+        Assert.True(output.IsRejectedTooLarge);
+        Assert.Empty(output.Chunks);
+    }
+
+    [Fact]
+    public void Output_renderer_accepts_the_exact_payload_boundary_and_preserves_one_byte_overflow()
+    {
+        var renderer = new TeamsOutputRenderer();
+        var envelopeBytes = TeamsOutputRenderer.GetSerializedPayloadBytes(string.Empty);
+        var exactText = new string('x', TeamsOutputRenderer.MaxSerializedPayloadBytes - envelopeBytes);
+
+        var exact = renderer.Render(exactText);
+        var overflow = renderer.Render(exactText + "y");
+
+        Assert.Equal(TeamsOutputRenderer.MaxSerializedPayloadBytes, TeamsOutputRenderer.GetSerializedPayloadBytes(exactText));
+        Assert.Equal(exactText, Assert.Single(exact.Chunks));
+        Assert.False(exact.IsRejectedTooLarge);
+        Assert.Equal(exactText + "y", string.Concat(overflow.Chunks));
+        Assert.All(overflow.Chunks, chunk =>
+            Assert.InRange(TeamsOutputRenderer.GetSerializedPayloadBytes(chunk), 1, TeamsOutputRenderer.MaxSerializedPayloadBytes));
+    }
+
+    [Fact]
+    public void Output_renderer_counts_the_channel_root_reply_metadata()
+    {
+        var renderer = new TeamsOutputRenderer();
+        var rootActivityId = new string('r', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes);
+        var envelopeBytes = TeamsOutputRenderer.GetSerializedPayloadBytes(string.Empty, rootActivityId);
+        var exactText = new string('x', TeamsOutputRenderer.MaxSerializedPayloadBytes - envelopeBytes);
+
+        var exact = renderer.Render(exactText, rootActivityId);
+        var overflow = renderer.Render(exactText + "y", rootActivityId);
+
+        Assert.Equal(TeamsOutputRenderer.MaxSerializedPayloadBytes, TeamsOutputRenderer.GetSerializedPayloadBytes(exactText, rootActivityId));
+        Assert.Equal(exactText, Assert.Single(exact.Chunks));
+        Assert.Equal(exactText + "y", string.Concat(overflow.Chunks));
+        Assert.All(overflow.Chunks, chunk =>
+            Assert.InRange(TeamsOutputRenderer.GetSerializedPayloadBytes(chunk, rootActivityId), 1, TeamsOutputRenderer.MaxSerializedPayloadBytes));
+    }
+
+    [Fact]
+    public void Output_renderer_preserves_markdown_unicode_and_line_boundaries_when_chunking()
+    {
+        var renderer = new TeamsOutputRenderer();
+        var input = string.Join("\n", Enumerable.Repeat("[docs](https://example.invalid/path) \U0001f469\u200d\U0001f4bb", 4_000));
+
+        var output = renderer.Render(input);
+
+        Assert.False(output.IsRejectedTooLarge);
+        Assert.InRange(output.Chunks.Count, 2, TeamsOutputRenderer.MaxChunkCount);
+        Assert.Equal(input, string.Concat(output.Chunks));
+        Assert.All(output.Chunks, chunk =>
+            Assert.InRange(TeamsOutputRenderer.GetSerializedPayloadBytes(chunk), 1, TeamsOutputRenderer.MaxSerializedPayloadBytes));
+    }
+
+    [Fact]
+    public void Output_renderer_rejects_an_oversized_markdown_link_instead_of_corrupting_it()
+    {
+        var renderer = new TeamsOutputRenderer();
+        var input = "[label](https://example.invalid/" + new string('x', TeamsOutputRenderer.MaxSerializedPayloadBytes) + ")";
+
+        var output = renderer.Render(input);
+
+        Assert.True(output.IsRejectedTooLarge);
+        Assert.Empty(output.Chunks);
     }
 
     [Fact]
@@ -1120,6 +1230,7 @@ public sealed class TeamsChannelFoundationTests
         {
             Id = "activity",
             From = new TeamsAccount { Id = "sender" },
+            ServiceUrl = "https://service.invalid/",
             Conversation = new TeamsConversation { Id = "conversation", TenantId = "tenant", Type = type ?? TeamsConversationType.Personal }
         };
 

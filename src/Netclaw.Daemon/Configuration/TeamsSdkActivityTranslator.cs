@@ -110,7 +110,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return TeamsTranslationResult.Accepted(new TeamsInboundActivity(
             trust,
             text,
-            scope == TeamsConversationScope.Channel ? new TeamsReplyMetadata(activity.ReplyToId, rootActivityId) : null,
+            new TeamsReplyMetadata(activity.ReplyToId, rootActivityId, activity.ServiceUrl),
             mentioned,
             kind: TeamsIngressActivityKind.Message,
             teamId: activity.ChannelData?.Team?.Id,
@@ -133,7 +133,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return TeamsTranslationResult.Accepted(new TeamsInboundActivity(
             CreateTrust(activity, authenticatedTenantId!, scope),
             string.Empty,
-            new TeamsReplyMetadata(activity.ReplyToId, rootActivityId),
+            new TeamsReplyMetadata(activity.ReplyToId, rootActivityId, activity.ServiceUrl),
             kind: kind,
             teamId: activity.ChannelData?.Team?.Id,
             channelId: activity.ChannelData?.Channel?.Id));

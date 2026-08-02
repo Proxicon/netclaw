@@ -26,6 +26,8 @@ namespace Netclaw.Channels.Teams;
 public sealed record TeamsConversationDependencies(
     TeamsChannelOptions Options,
     ISessionPipeline Pipeline,
+    ITeamsReplyClient ReplyClient,
+    TeamsOutputRenderer OutputRenderer,
     TimeProvider TimeProvider);
 
 public sealed record TeamsConversationIngress(
@@ -133,6 +135,8 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         var conversation = GetOrCreatePersonalConversation(sessionId, new TeamsConversationDependencies(
             _options,
             _serviceProvider.GetRequiredService<ISessionPipeline>(),
+            _serviceProvider.GetRequiredService<ITeamsReplyClient>(),
+            _serviceProvider.GetRequiredService<TeamsOutputRenderer>(),
             _serviceProvider.GetRequiredService<TimeProvider>()));
         try
         {
@@ -173,6 +177,8 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         var conversation = GetOrCreateChannelConversation(conversationId, new TeamsConversationDependencies(
             _options,
             _serviceProvider.GetRequiredService<ISessionPipeline>(),
+            _serviceProvider.GetRequiredService<ITeamsReplyClient>(),
+            _serviceProvider.GetRequiredService<TeamsOutputRenderer>(),
             _serviceProvider.GetRequiredService<TimeProvider>()));
         try
         {
@@ -343,6 +349,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private readonly bool _isChannelBinding;
     private readonly HashSet<string> _processedActivityIds = new(StringComparer.Ordinal);
     private readonly Queue<string> _processedActivityOrder = new();
+    private TeamsOutboundDestination? _destination;
+    private string? _processingActivityId;
 
     public TeamsSessionBindingActor(SessionId sessionId, TeamsConversationDependencies dependencies)
     {
@@ -368,6 +376,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Command<ReceiveTimeout>(_ => Context.Stop(Self));
         Command<TeamsBindingIngress>(HandleIngress);
         CommandAsync<DispatchReservedActivity>(DispatchReservedActivityAsync);
+        CommandAsync<BindingOutput>(HandleOutputAsync);
         Command<OutputStreamTerminated>(terminated =>
         {
             if (terminated.Generation == _pipelineHandle.Generation)
@@ -458,6 +467,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     {
         try
         {
+            _destination = CreateDestination(dispatch.Activity);
             var writer = await EnsurePipelineAsync(dispatch.CancellationToken);
             await writer.WriteAsync(BuildChannelInput(dispatch.Activity), dispatch.CancellationToken);
             ChannelTelemetry.For(ChannelType.Teams).RecordMessageEnqueued();
@@ -502,16 +512,17 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         if (_pipelineHandle.InputQueue is { } writer)
             return writer;
 
+        var self = Self;
         return await _pipelineHandle.InitializeWithChannelAsync(
             Context,
             _sessionId,
             new SessionPipelineOptions
             {
                 ChannelType = ChannelType.Teams,
-                Filter = OutputFilter.None
+                Filter = OutputFilter.Text | OutputFilter.ProcessingState
             },
-            DiscardDeferredOutput,
-            (generation, cause) => Self.Tell(new OutputStreamTerminated(generation, cause)),
+            output => self.Tell(new BindingOutput(output)),
+            (generation, cause) => self.Tell(new OutputStreamTerminated(generation, cause)),
             cancellationToken);
     }
 
@@ -637,8 +648,96 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             SaveSnapshot(new DurableActivityDispatchSnapshot(_processedActivityOrder.ToArray()));
     }
 
-    private static void DiscardDeferredOutput(SessionOutput _)
-        => ChannelTelemetry.For(ChannelType.Teams).RecordExtra("personal_output_deferred");
+    private async Task HandleOutputAsync(BindingOutput received)
+    {
+        if (_destination is null)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("output_destination_unavailable");
+            return;
+        }
+
+        if (received.Output is ProcessingStateOutput { IsProcessing: true })
+        {
+            if (_processingActivityId is null)
+            {
+                var processing = await _dependencies.ReplyClient.DeliverAsync(
+                    CreateMessage(_destination, "Processing..."), CancellationToken.None);
+                if (processing.IsSuccess)
+                    _processingActivityId = processing.ActivityId;
+            }
+            return;
+        }
+
+        if (received.Output is not TextOutput text)
+            return;
+
+        var rendered = _dependencies.OutputRenderer.Render(
+            text.Text,
+            _destination.Scope == TeamsConversationScope.Channel ? _destination.RootActivityId : null);
+        if (rendered.Chunks.Count == 0)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
+                rendered.IsRejectedTooLarge ? "output_rejected_too_large" : "output_ignored_empty");
+            return;
+        }
+
+        for (var index = 0; index < rendered.Chunks.Count; index++)
+        {
+            var processingActivityId = index == 0 ? _processingActivityId : null;
+            var result = await _dependencies.ReplyClient.DeliverAsync(
+                CreateMessage(_destination, rendered.Chunks[index], processingActivityId),
+                CancellationToken.None);
+
+            // The update is a presentation optimization. A failed update gets
+            // one normal reply attempt for this final output and no retry loop.
+            if (processingActivityId is not null && !result.IsSuccess)
+            {
+                _processingActivityId = null;
+                result = await _dependencies.ReplyClient.DeliverAsync(
+                    CreateMessage(_destination, rendered.Chunks[index]),
+                    CancellationToken.None);
+            }
+
+            if (!result.IsSuccess)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(
+                    result.Status == TeamsDeliveryStatus.RejectedTooLarge
+                        ? "output_rejected_too_large"
+                        : "output_delivery_failed");
+                return;
+            }
+
+            _processingActivityId = null;
+        }
+    }
+
+    private TeamsOutboundDestination CreateDestination(TeamsInboundActivity activity)
+    {
+        var serviceUrl = activity.Reply?.ServiceUrl;
+        if (string.IsNullOrWhiteSpace(serviceUrl))
+            throw new InvalidOperationException("The Teams activity lacks an outbound service URL.");
+
+        return new TeamsOutboundDestination(
+            activity.Trust.TenantId,
+            activity.Trust.ConversationId,
+            activity.Trust.Scope,
+            serviceUrl,
+            activity.Trust.Scope == TeamsConversationScope.Channel ? activity.Reply?.RootActivityId : null,
+            activity.TeamId,
+            activity.ChannelId,
+            activity.Trust.Scope == TeamsConversationScope.Personal ? activity.Trust.SenderId : null);
+    }
+
+    private TeamsOutboundMessage CreateMessage(
+        TeamsOutboundDestination destination,
+        string text,
+        string? updateActivityId = null) => new(
+        destination,
+        text,
+        ActivityFingerprint.Create(_sessionId.Value + text),
+        ActivityFingerprint.Create(_sessionId.Value),
+        destination.Scope == TeamsConversationScope.Channel ? destination.RootActivityId : null,
+        updateActivityId);
 
     private static void EnsureValidFingerprint(string fingerprint)
     {
@@ -660,6 +759,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Exception? Cause) : INoSerializationVerificationNeeded;
 
     private sealed record ReinitializePipeline : INoSerializationVerificationNeeded;
+
+    private sealed record BindingOutput(SessionOutput Output) : INoSerializationVerificationNeeded;
 
 }
 
