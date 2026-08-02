@@ -49,6 +49,8 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
     private const string DurableActivityDispatchReservedManifest = "dadr-v1";
     private const string DurableActivityDispatchReleasedManifest = "dadl-v1";
     private const string DurableActivityDispatchSnapshotManifest = "dads-v1";
+    private const string DurableTeamsChannelActivityMappedManifest = "dtcam-v1";
+    private const string DurableTeamsChannelActivityIndexSnapshotManifest = "dtcais-v1";
 
     private static readonly FrozenDictionary<Type, string> TypeToManifest = new Dictionary<Type, string>
     {
@@ -80,6 +82,8 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
         [typeof(Channels.DurableActivityDispatchReserved)] = DurableActivityDispatchReservedManifest,
         [typeof(Channels.DurableActivityDispatchReleased)] = DurableActivityDispatchReleasedManifest,
         [typeof(Channels.DurableActivityDispatchSnapshot)] = DurableActivityDispatchSnapshotManifest,
+        [typeof(Channels.DurableTeamsChannelActivityMapped)] = DurableTeamsChannelActivityMappedManifest,
+        [typeof(Channels.DurableTeamsChannelActivityIndexSnapshot)] = DurableTeamsChannelActivityIndexSnapshotManifest,
     }.ToFrozenDictionary();
 
     public override int Identifier => 150;
@@ -162,6 +166,10 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
                 Proto.DurableActivityDispatchReleasedProto.Parser.ParseFrom(bytes)),
             DurableActivityDispatchSnapshotManifest => NetclawProtoMapper.FromProto(
                 Proto.DurableActivityDispatchSnapshotProto.Parser.ParseFrom(bytes)),
+            DurableTeamsChannelActivityMappedManifest => NetclawProtoMapper.FromProto(
+                Proto.DurableTeamsChannelActivityMappedProto.Parser.ParseFrom(bytes)),
+            DurableTeamsChannelActivityIndexSnapshotManifest => NetclawProtoMapper.FromProto(
+                Proto.DurableTeamsChannelActivityIndexSnapshotProto.Parser.ParseFrom(bytes)),
             _ => throw new ArgumentException(
                 $"Unknown manifest '{manifest}'. Add it to NetclawProtobufSerializer.")
         };

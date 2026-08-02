@@ -603,6 +603,21 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void Teams_channel_activity_index_records_round_trip_without_raw_activity_ids()
+    {
+        const string fingerprint = "F046E9C6D25D3B4CBE37DEEF6320CA470BA62B2799457CF16B8C1C541E2666F1";
+        var entry = new DurableTeamsChannelActivityMapped(
+            fingerprint,
+            "teams~dGVuYW50~channel~Y29udmVyc2F0aW9u/cm9vdA",
+            null);
+        var snapshot = new DurableTeamsChannelActivityIndexSnapshot([entry]);
+
+        Assert.Equal(entry, RoundTrip(entry));
+        Assert.Equal(snapshot.Entries, RoundTrip(snapshot).Entries);
+        Assert.DoesNotContain("root", Encoding.UTF8.GetString(Serialize(entry)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Unknown_manifest_throws_on_deserialize()
     {
         var serializer = new Serialization.NetclawProtobufSerializer((Akka.Actor.ExtendedActorSystem)Sys);

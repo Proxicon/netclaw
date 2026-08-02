@@ -240,11 +240,43 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
                 TimeProvider.System.GetUtcNow()),
             "hello");
 
-        Assert.Equal(TeamsIngressSinkResult.Unavailable, await sink.RouteAsync(channel, TestContext.Current.CancellationToken));
+        Assert.Equal(TeamsIngressSinkResult.Denied, await sink.RouteAsync(channel, TestContext.Current.CancellationToken));
         var blockedSession = CreateSessionId("tenant-a", "conversation-channel");
         await Assert.ThrowsAsync<ActorNotFoundException>(() =>
             Sys.ActorSelection($"/user/{TeamsActorNames.Conversation(blockedSession)}")
                 .ResolveOne(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task A_real_conversation_sink_routes_channel_roots_and_replies_and_indexes_mutations()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            MentionOnly = true,
+            AllowedTeamIds = ["team-a"],
+            AllowedChannelIds = ["channel-a"]
+        };
+        var services = new ServiceCollection();
+        services.AddSingleton<ISessionPipeline>(pipeline);
+        services.AddSingleton<TimeProvider>(TimeProvider.System);
+        using var provider = services.BuildServiceProvider();
+        var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
+        var root = CreateChannelActivity("root-a", "conversation-a;messageid=root-a");
+
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(root, TestContext.Current.CancellationToken));
+        var first = ReceiveDispatchedMessage();
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", root.Trust.ConversationId, "root-a", out var expected, out _));
+        Assert.Equal(expected, first.SessionId);
+
+        var reply = CreateChannelActivity("reply-a", "conversation-a;messageid=root-a");
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(reply, TestContext.Current.CancellationToken));
+
+        var update = CreateChannelActivity("root-a", "conversation-a;messageid=root-a", TeamsIngressActivityKind.MessageUpdate);
+        var unknownDelete = CreateChannelActivity("unknown", "conversation-a;messageid=root-a", TeamsIngressActivityKind.MessageDelete);
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(update, TestContext.Current.CancellationToken));
+        Assert.Equal(TeamsIngressSinkResult.Ignored, await sink.RouteAsync(unknownDelete, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -359,6 +391,28 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             activityId,
             TimeProvider.System.GetUtcNow()),
         "hello");
+
+    private static TeamsInboundActivity CreateChannelActivity(
+        string activityId,
+        string conversationId,
+        TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message) => new(
+        new TeamsIngressTrustContext(
+            TrustAudience.Public,
+            PrincipalClassification.UntrustedExternal,
+            TrustBoundary.Public,
+            new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+            "user-a",
+            "tenant-a",
+            conversationId,
+            TeamsConversationScope.Channel,
+            activityId,
+            TimeProvider.System.GetUtcNow()),
+        kind == TeamsIngressActivityKind.Message ? "hello" : string.Empty,
+        new TeamsReplyMetadata(null, "root-a"),
+        isMentioned: true,
+        kind: kind,
+        teamId: "team-a",
+        channelId: "channel-a");
 
     private static Task<TeamsBindingRouteResult> RouteAsync(
         IActorRef actor,

@@ -223,6 +223,27 @@ use `OutputFilter.None` and no default delivery target: no Teams reply,
 renderer, destination, card, attachment, or proactive operation is introduced
 in this PR.
 
+#### PR 4 channel routing record (2026-08-02)
+
+PR 4 consumes only the Phase 0.2 channel prerequisite subset. A channel root
+is parsed once from the bounded, unique `;messageid=` suffix of
+`conversation.id`; `replyToId` is never used as a fallback. The opaque suffix
+is the sole root thread key. A channel conversation actor owns a 1,024-entry,
+oldest-first persisted SHA-256 activity fingerprint index. The value is the
+canonical encoded Teams session ID, not a raw Teams identifier. This permits a
+known edit or delete to resolve safely without content routing or an LLM turn.
+
+Channel ACL is fail closed: a message requires configured tenant, nonempty
+allowed team and channel lists, exact team/channel matches, and an optional
+nonempty sender allow-list match. Mention-only messages without a qualified bot
+mention are ignored before binding creation. Structured mentions remove only
+the exact entity spans that match recipient ID and `28:` plus configured bot ID;
+display text and literal user-like text cannot grant or remove access. Audience
+overrides select `team/channel`, then `team`, then Public only after explicit
+access succeeds. PR 4 leaves all output, cards, attachments, Graph, and
+proactive behavior deferred. Personal reply and personal proactive transport
+evidence remain open Phase 0.2 gates for PR 5 and PR 8.
+
 ### Preserve the two-segment session grammar
 
 Existing reminder routing parses session IDs as `{channelPart}/{threadPart}` in

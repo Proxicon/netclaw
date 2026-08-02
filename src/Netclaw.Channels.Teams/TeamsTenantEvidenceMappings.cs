@@ -10,7 +10,7 @@ namespace Netclaw.Channels.Teams;
 /// are deliberately not connected to production channel routing; PR 4 owns
 /// the policy and durable activity-to-root index that will consume them.
 /// </summary>
-internal static class TeamsTenantEvidenceMappings
+public static class TeamsTenantEvidenceMappings
 {
     private const string ThreadMessageIdSeparator = ";messageid=";
 
@@ -25,7 +25,9 @@ internal static class TeamsTenantEvidenceMappings
             return false;
 
         var candidate = conversationId[(separatorIndex + ThreadMessageIdSeparator.Length)..];
-        if (string.IsNullOrWhiteSpace(candidate) || candidate.Contains(';', StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(candidate)
+            || candidate.Contains(';', StringComparison.Ordinal)
+            || !TeamsSessionIdentifierCodec.IsValidActivityIdentifier(candidate))
             return false;
 
         rootActivityId = candidate;
@@ -71,4 +73,4 @@ internal static class TeamsTenantEvidenceMappings
            && string.IsNullOrWhiteSpace(contentUrl);
 }
 
-internal sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);
+public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);
