@@ -26,6 +26,7 @@ public sealed record ContextAssemblyInput(
     string SessionsBasePath,
     bool FileReadGranted,
     AutomaticRecallResult? ActiveRecall,
+    string WorkingContextBlock,
     TrustAudience Audience = TrustAudience.Personal,
     string? SkillHint = null,
     // Maps canonical tool names (the form persisted in history) back
@@ -96,6 +97,8 @@ public static class SessionMessageAssembler
         "Your session working directory contains an `inbox/` subdirectory where user-uploaded files are placed.\n" +
         "Each attachment is announced in the inbound message as a single line of the form:\n" +
         "    [attachment] name=\"...\" mime=\"...\" size=... path=\"inbox/...\" inlined=\"true|false\" [note=\"...\"]\n" +
+        "The announced `path` is authoritative, relative to `session_dir`, and already includes any collision-safe filename change. " +
+        "Use `{session_dir}/{path}` when you need the absolute path on the host; do not search other session subdirectories for another copy.\n" +
         "When `inlined=\"true\"` you can see the file content natively in this turn.\n" +
         "When `inlined=\"false\"`:\n" +
         "  - If `note` begins with \"current model has no\": the file exists on disk but you cannot render it natively. " +
@@ -168,9 +171,7 @@ public static class SessionMessageAssembler
         }
         else
         {
-            var sessionBlock = $"[session]\nid: {input.SessionId.Value}"
-                + $"\nsession_dir: {sessionDir}"
-                + $"\nmedia_dir: {Path.Combine(sessionDir, SessionDirectoryHelper.MediaSubdirectory)}";
+            var sessionBlock = $"[session]\nid: {input.SessionId.Value}" + $"\nsession_dir: {sessionDir}";
             parts.Add(sessionBlock);
         }
 
@@ -219,8 +220,8 @@ public static class SessionMessageAssembler
 
         // Working context is suppressed for Public audience to avoid leaking
         // internal operational state (project paths, scratch notes, etc.).
-        if (!input.State.WorkingContext.IsEmpty && input.Audience != TrustAudience.Public)
-            parts.Add(input.State.WorkingContext.ToContextBlock());
+        if (!string.IsNullOrWhiteSpace(input.WorkingContextBlock) && input.Audience != TrustAudience.Public)
+            parts.Add(input.WorkingContextBlock);
 
         // Suppressed for Public audience, same as WorkingContext: the block
         // exposes internal operational state — commands, rationales, and the

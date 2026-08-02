@@ -1,0 +1,24 @@
+{
+  "configVersion": 1,
+  "Webhooks": {
+    "Enabled": true
+  },
+  "Tools": {
+    "AudienceProfiles": {
+      "Personal": {
+        "ReadFiles": {
+          "Mode": "All",
+          "Roots": []
+        },
+        "WriteFiles": {
+          "Mode": "All",
+          "Roots": []
+        },
+        "ApprovalPolicy": {
+          "DefaultMode": "Auto",
+          "ToolOverrides": {}
+        }
+      }
+    }
+  }
+}

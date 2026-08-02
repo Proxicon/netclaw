@@ -10,6 +10,7 @@ using Xunit;
 
 namespace Netclaw.Cli.Tests.Doctor;
 
+[Collection(Netclaw.Cli.Tests.LegacyModelEnvironmentCollection.Name)]
 public sealed class ConfigSchemaDoctorCheckTests
 {
     [Fact]
@@ -95,6 +96,62 @@ public sealed class ConfigSchemaDoctorCheckTests
         var result = await check.RunAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsPass_WhenTeamsConfigMatchesSchemaWithoutClientSecret()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": false,
+                "TenantId": "tenant-id",
+                "ClientId": "client-id",
+                "AuthenticationMode": "ClientSecret",
+                "AllowDirectMessages": false,
+                "MentionOnly": true,
+                "AllowedTeamIds": [],
+                "AllowedChannelIds": [],
+                "AllowedUserIds": [],
+                "ChannelAudiences": {}
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsError_WhenTeamsClientSecretIsPlacedInNormalConfiguration()
+    {
+        const string secret = "teams-pr1-synthetic-sentinel";
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            $$"""
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": false,
+                "ClientSecret": "{{secret}}"
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Error, result.Severity);
+        Assert.DoesNotContain(secret, result.Message, StringComparison.Ordinal);
     }
 
     [Fact]

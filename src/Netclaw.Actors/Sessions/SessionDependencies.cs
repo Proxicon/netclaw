@@ -20,6 +20,7 @@ public sealed record SessionServices(
     IChatClientProvider ClientProvider,
     ISystemPromptProvider PromptProvider,
     IReadOnlyList<IContextLayerProvider> ContextLayers,
+    IWorkingContextSnapshotProvider WorkingContextSnapshots,
     TimeProvider TimeProvider,
     NetclawPaths Paths);
 
@@ -28,7 +29,6 @@ public sealed record SessionServices(
 /// </summary>
 public sealed record SessionToolServices(
     IToolExecutor ToolExecutor,
-    IToolAuditLogger? AuditLogger,
     ToolRegistry ToolRegistry,
     ToolAccessPolicy? AccessPolicy,
     TrustContextDeriver? TrustDeriver,

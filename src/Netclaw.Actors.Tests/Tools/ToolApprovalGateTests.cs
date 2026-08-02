@@ -37,7 +37,8 @@ public sealed class ToolApprovalGateTests
     }
 
     private static ToolExecutionContext PersonalContext(bool supportsApproval = true, string sessionId = "signalr/thread-1") =>
-        new(sessionId, null) { Audience = TrustAudience.Personal, SupportsInteractiveApproval = supportsApproval };
+        TestToolExecutionContext.CreateBound(sessionId, null, new TestToolExecutionContextOptions
+        { Audience = TrustAudience.Personal, InteractiveApproval = TestToolExecutionContext.InteractiveApproval(supportsApproval) });
 
     private static INetclawTool ShellTool()
     {
@@ -367,6 +368,74 @@ public sealed class ToolApprovalGateTests
     }
 
     [Fact]
+    public void mcp_approval_context_displays_arguments_without_netclaw_meta_fields()
+    {
+        var approvalPolicy = new ToolApprovalConfig
+        {
+            DefaultMode = ToolApprovalMode.Auto,
+            McpServerDefaults = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                ["notion"] = ToolApprovalMode.Approval
+            }
+        };
+        var policy = CreateMcpApprovalPolicy(approvalPolicy);
+        var content = string.Join('\n', Enumerable.Repeat("large memory payload", 1_000));
+
+        var decision = policy.AuthorizeInvocation(
+            McpTool("notion", "create-pages"),
+            PersonalContext(),
+            new Dictionary<string, object?>
+            {
+                ["destination_path"] = "/Board/Quarterly Results",
+                ["content"] = content,
+                ["_rationale"] = "Create the requested report"
+            });
+
+        Assert.True(decision.NeedsApproval);
+        Assert.Contains("destination_path=\"/Board/Quarterly Results\"", decision.ApprovalContext!.DisplayText);
+        Assert.Contains($"content=({content.Length} chars, 1000 lines)", decision.ApprovalContext.DisplayText);
+        Assert.DoesNotContain("_rationale", decision.ApprovalContext.DisplayText);
+        Assert.DoesNotContain("Create the requested report", decision.ApprovalContext.DisplayText);
+        Assert.DoesNotContain(
+            decision.ApprovalContext.Options,
+            option => option.Key.Value == ApprovalOptionKeys.ApproveAlways);
+        Assert.Contains(
+            decision.ApprovalContext.Options,
+            option => option.Key.Value == ApprovalOptionKeys.ApproveEverywhere
+                      && option.Label == ApprovalOptionKeys.ApproveMcpToolLabel);
+        Assert.DoesNotContain(
+            decision.ApprovalContext.Options,
+            option => option.Label == ApprovalOptionKeys.ApproveEverywhereLabel);
+    }
+
+    [Fact]
+    public void mcp_declared_parameter_that_resembles_meta_remains_visible()
+    {
+        var approvalPolicy = new ToolApprovalConfig
+        {
+            DefaultMode = ToolApprovalMode.Auto,
+            McpServerDefaults = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                ["notion"] = ToolApprovalMode.Approval
+            }
+        };
+        var policy = CreateMcpApprovalPolicy(approvalPolicy);
+        var function = AIFunctionFactory.Create(
+            (string rationale) => rationale,
+            "create-pages",
+            "create-pages");
+        var tool = new McpToolAdapter(function, "notion", "create-pages");
+
+        var decision = policy.AuthorizeInvocation(
+            tool,
+            PersonalContext(),
+            new Dictionary<string, object?> { ["Rationale"] = "Customer-visible reason" });
+
+        Assert.True(decision.NeedsApproval);
+        Assert.Contains("Rationale=\"Customer-visible reason\"", decision.ApprovalContext!.DisplayText);
+    }
+
+    [Fact]
     public void mcp_exact_override_beats_server_default()
     {
         var approvalPolicy = new ToolApprovalConfig
@@ -518,6 +587,35 @@ public sealed class ToolApprovalGateTests
         // channel, so a non-interactive caller fails closed to requires-approval.
         Assert.True(decision.NeedsApproval);
         Assert.NotNull(decision.ApprovalContext);
+    }
+
+    [Fact]
+    public void Non_shell_tool_omits_directory_scoped_persistence_option()
+    {
+        var config = new ToolConfig();
+        config.AudienceProfiles.Personal.ApprovalPolicy = new ToolApprovalConfig
+        {
+            DefaultMode = ToolApprovalMode.Approval
+        };
+        var policy = new ToolAccessPolicy(
+            config,
+            new EffectivePolicyDefaults(
+                DeploymentPosture.Personal,
+                TrustAudience.Personal,
+                ShellExecutionMode.HostAllowed,
+                UsedStrictFallback: false));
+
+        var tool = new Netclaw.Actors.Tests.Memory.FakeNetclawTool("file_read", "content");
+        var decision = policy.AuthorizeInvocation(tool, PersonalContext());
+
+        Assert.True(decision.NeedsApproval);
+        Assert.DoesNotContain(
+            decision.ApprovalContext!.Options,
+            option => option.Key.Value == ApprovalOptionKeys.ApproveAlways);
+        Assert.Contains(
+            decision.ApprovalContext.Options,
+            option => option.Key.Value == ApprovalOptionKeys.ApproveEverywhere
+                      && option.Label == ApprovalOptionKeys.ApproveEverywhereLabel);
     }
 
     [Fact]
@@ -798,7 +896,7 @@ public sealed class ToolApprovalGateTests
 
         public FakeShellTrustZonePolicy(IReadOnlyList<string> roots) => _roots = roots;
 
-        public bool IsShellWritePathAuthorized(string fullPath, ToolExecutionContext context)
+        public bool IsShellWritePathAuthorized(string fullPath, ToolInvocationContext context)
             => PathUtility.IsWithinAnyRoot(fullPath, _roots);
     }
 

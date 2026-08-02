@@ -159,7 +159,30 @@ internal static class ConfigFileHelper
     /// Serialize a config dictionary and write it to disk, creating parent directories if needed.
     /// </summary>
     internal static void WriteConfigFile(string path, Dictionary<string, object> data)
-        => AtomicFile.WriteAllText(path, JsonSerializer.Serialize(data, JsonDefaults.ConfigFile));
+    {
+        PreserveLegacyModelsBackup(path, data);
+        AtomicFile.WriteAllText(path, JsonSerializer.Serialize(data, JsonDefaults.ConfigFile));
+    }
+
+    private static void PreserveLegacyModelsBackup(string path, Dictionary<string, object> data)
+    {
+        if (!File.Exists(path)
+            || GetSectionOrNull(data, "Models") is not { } newModels
+            || !newModels.ContainsKey("Definitions"))
+            return;
+
+        using var existing = JsonDocument.Parse(File.ReadAllText(path));
+        if (!existing.RootElement.TryGetProperty("Models", out var oldModels)
+            || oldModels.ValueKind != JsonValueKind.Object
+            || !oldModels.TryGetProperty("Main", out _))
+            return;
+
+        ModelEntryWriter.ThrowIfLegacyEnvironmentOverride();
+
+        var backupPath = path + ".legacy-models.bak";
+        if (!File.Exists(backupPath))
+            File.Copy(path, backupPath);
+    }
 
     /// <summary>
     /// Serialize and write secrets.json using hardened permissions and encryption-at-rest.
@@ -168,6 +191,51 @@ internal static class ConfigFileHelper
     {
         var protector = SecretsProtection.CreateProtector(paths);
         SecretsFileWriter.Write(paths.SecretsPath, data, options: JsonDefaults.Indented, protector: protector);
+    }
+
+    internal static void UpdateSecretsFile(
+        Configuration.NetclawPaths paths,
+        Func<Dictionary<string, object>, bool, bool> update,
+        ISecretsProtector? protector = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+
+        UpdateSecretsFile<object?>(
+            paths,
+            (secrets, fileExisted) => (update(secrets, fileExisted), null),
+            protector,
+            cancellationToken);
+    }
+
+    internal static TResult UpdateSecretsFile<TResult>(
+        Configuration.NetclawPaths paths,
+        Func<Dictionary<string, object>, bool, (bool Write, TResult Result)> update,
+        ISecretsProtector? protector = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+
+        var effectiveProtector = protector ?? SecretsProtection.CreateProtector(paths);
+        return SecretsFileWriter.Update(
+            paths.SecretsPath,
+            (root, fileExisted) =>
+            {
+                var secrets = JsonSerializer.Deserialize<Dictionary<string, object>>(
+                                  root.ToJsonString(JsonDefaults.ConfigFile),
+                                  JsonDefaults.ConfigRead)
+                              ?? [];
+                var outcome = update(secrets, fileExisted);
+                if (!outcome.Write)
+                    return (null, outcome.Result);
+
+                var updatedRoot = JsonSerializer.SerializeToNode(secrets, JsonDefaults.ConfigFile)?.AsObject()
+                                  ?? [];
+                return (updatedRoot, outcome.Result);
+            },
+            effectiveProtector,
+            JsonDefaults.Indented,
+            cancellationToken);
     }
 
     internal static bool PathPresent(Dictionary<string, object> root, string path)

@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="SlackFileFlowIntegrationTests.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -17,12 +17,12 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
-using Netclaw.Actors.Memory;
 using Netclaw.Actors.Sessions;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Tests.Channels.TestHelpers;
 using Netclaw.Actors.Tests.Hosting;
 using Netclaw.Actors.Tests.Sessions;
+using FakeChatClient = Netclaw.Tests.Utilities.FakeChatClient;
 using Netclaw.Channels.Slack;
 using Netclaw.Configuration;
 using Netclaw.Security;
@@ -46,7 +46,7 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
     private static readonly byte[] FakePngBytes = Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==");
 
-    private readonly ImageCapturingChatClient _chatClient = new();
+    private readonly FakeChatClient _chatClient = new();
     private readonly RecordingReplyClient _replyClient = new();
     private readonly FakeSlackFileHandler _httpHandler = new();
     private readonly NetclawPaths _paths = new(Path.Combine(
@@ -83,19 +83,7 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
         services.AddSingleton<IModelCapabilityResolver>(new ImageCapabilityResolver());
         services.AddSingleton<SessionPipeline>();
 
-        // Composite records for LlmSessionActor constructor
-        services.AddSingleton(sp => new SessionServices(
-            sp.GetRequiredService<IChatClientProvider>(),
-            sp.GetRequiredService<ISystemPromptProvider>(),
-            sp.GetService<IReadOnlyList<IContextLayerProvider>>() ?? Array.Empty<IContextLayerProvider>(),
-            sp.GetService<TimeProvider>() ?? TimeProvider.System,
-            sp.GetRequiredService<NetclawPaths>()));
-        services.AddSingleton(sp => new SessionMemoryServices(
-            sp.GetService<IMemoryExtractor>() ?? NullMemoryExtractor.Instance,
-            sp.GetService<IMemoryRecallCoordinator>() ?? NullMemoryRecallCoordinator.Instance,
-            sp.GetService<IMemoryCheckpointSink>() ?? NullMemoryCheckpointSink.Instance,
-            sp.GetService<SQLiteMemoryStore>()));
-        services.AddSingleton(new SessionObservability(null, null));
+        services.AddLlmSessionCompositeRecords();
     }
 
     // serialize-messages = on causes the Akka.Streams channel output pipeline to stop
@@ -176,7 +164,9 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
         Assert.Contains("files.slack.com", _httpHandler.LastRequestUri?.Host ?? "");
 
         // Verify: the chat client received image content
-        Assert.True(_chatClient.ReceivedImageContent,
+        Assert.True(
+            _chatClient.LastReceivedMessages is not null
+                && _chatClient.LastReceivedMessages.SelectMany(m => m.Contents).OfType<DataContent>().Any(),
             "Expected LLM to receive DataContent (image) in chat messages");
 
         // Verify: file was persisted to session media directory
@@ -256,7 +246,9 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
         }, duration: TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(_httpHandler.RequestCount > 0, "Expected file download request");
-        Assert.True(_chatClient.ReceivedImageContent,
+        Assert.True(
+            _chatClient.LastReceivedMessages is not null
+                && _chatClient.LastReceivedMessages.SelectMany(m => m.Contents).OfType<DataContent>().Any(),
             "Expected LLM to receive image content");
 
         var sessionId = new SessionId("C_TEST/2000.1");
@@ -329,7 +321,9 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
         }, duration: TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.True(_httpHandler.RequestCount > 0, "Expected file download request");
-        Assert.True(_chatClient.ReceivedImageContent,
+        Assert.True(
+            _chatClient.LastReceivedMessages is not null
+                && _chatClient.LastReceivedMessages.SelectMany(m => m.Contents).OfType<DataContent>().Any(),
             "Expected LLM to receive image content from file_share message");
 
         var sessionId = new SessionId("D2/3000.1");
@@ -519,7 +513,7 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
         await AwaitAssertAsync(() =>
         {
             Assert.Contains(_replyClient.PostedMessages,
-                message => message.Text.Contains("call #2", StringComparison.OrdinalIgnoreCase));
+                message => message.Text.Contains("Response #2", StringComparison.OrdinalIgnoreCase));
         }, duration: TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
     }
 
@@ -574,11 +568,11 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
         await AwaitAssertAsync(() =>
         {
             Assert.Contains(_replyClient.PostedMessages,
-                message => message.Text.Contains("call #2", StringComparison.OrdinalIgnoreCase));
+                message => message.Text.Contains("Response #2", StringComparison.OrdinalIgnoreCase));
         }, duration: TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.DoesNotContain(_replyClient.PostedMessages,
-            message => message.Text.Contains("call #1", StringComparison.OrdinalIgnoreCase));
+            message => message.Text.Contains("Response #1", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -1269,7 +1263,9 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
                 "Expected at least one Slack reply to be posted");
         }, duration: TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
-        Assert.True(_chatClient.ReceivedImageContent,
+        Assert.True(
+            _chatClient.LastReceivedMessages is not null
+                && _chatClient.LastReceivedMessages.SelectMany(m => m.Contents).OfType<DataContent>().Any(),
             "Expected LLM to receive DataContent (image) via real MagicByteContentScanner");
     }
 
@@ -1332,7 +1328,9 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
                 "Expected at least one Slack reply to be posted");
         }, duration: TimeSpan.FromSeconds(10), cancellationToken: TestContext.Current.CancellationToken);
 
-        Assert.False(_chatClient.ReceivedImageContent,
+        Assert.False(
+            _chatClient.LastReceivedMessages is not null
+                && _chatClient.LastReceivedMessages.SelectMany(m => m.Contents).OfType<DataContent>().Any(),
             "Expected LLM not to receive image when scanner fails");
 
         Assert.Contains(_replyClient.PostedMessages,
@@ -1527,65 +1525,6 @@ public sealed class SlackFileFlowIntegrationTests : TestKit
                 PromptInjectionRisk.High,
                 "Synthetic detector for integration testing."));
         }
-    }
-
-    /// <summary>
-    /// Chat client that tracks whether it received image content in messages.
-    /// </summary>
-    private sealed class ImageCapturingChatClient : IChatClient
-    {
-        private int _callCount;
-        public int CallCount => _callCount;
-        public volatile bool ReceivedImageContent;
-        public Exception? Failure { get; set; }
-
-        public Task<ChatResponse> GetResponseAsync(
-            IEnumerable<ChatMessage> messages,
-            ChatOptions? options = null,
-            CancellationToken cancellationToken = default)
-        {
-            Interlocked.Increment(ref _callCount);
-
-            if (Failure is not null)
-                throw Failure;
-
-            foreach (var msg in messages)
-            {
-                if (msg.Contents.OfType<DataContent>().Any())
-                    ReceivedImageContent = true;
-            }
-
-            var contents = new List<AIContent>
-            {
-                new TextContent($"[fake] I see your image (call #{_callCount})")
-            };
-            var response = new ChatResponse(new ChatMessage(
-                Microsoft.Extensions.AI.ChatRole.Assistant,
-                contents));
-            return Task.FromResult(response);
-        }
-
-        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
-            IEnumerable<ChatMessage> messages,
-            ChatOptions? options = null,
-            CancellationToken cancellationToken = default)
-            => CreateStreamingAsync(messages, options, cancellationToken);
-
-        private async IAsyncEnumerable<ChatResponseUpdate> CreateStreamingAsync(
-            IEnumerable<ChatMessage> messages,
-            ChatOptions? options,
-            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
-        {
-            var response = await GetResponseAsync(messages, options, cancellationToken);
-            foreach (var update in response.ToChatResponseUpdates())
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                yield return update;
-            }
-        }
-
-        public object? GetService(Type serviceType, object? serviceKey = null) => null;
-        public void Dispose() { }
     }
 
     /// <summary>

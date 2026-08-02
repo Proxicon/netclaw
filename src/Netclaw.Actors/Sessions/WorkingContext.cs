@@ -116,23 +116,9 @@ public sealed record WorkingContext : INetclawSerializableMessage
     /// emit a barren header.
     /// </summary>
     public string ToContextBlock()
-    {
-        if (IsEmpty)
-            return string.Empty;
-
-        var sb = new System.Text.StringBuilder();
-        sb.Append("[working-context]");
-
-        if (ProjectDirectory is not null)
-            sb.Append("\nproject_dir: ").Append(ProjectDirectory);
-
-        if (!RecentFiles.IsEmpty)
+        => new WorkingContextSnapshot
         {
-            sb.Append("\nrecent_files:");
-            foreach (var path in RecentFiles)
-                sb.Append("\n  - ").Append(path);
-        }
-
-        return sb.ToString();
-    }
+            WorkingContext = this,
+            Git = new GitWorkingContextInspection.Skipped()
+        }.ToContextBlock();
 }

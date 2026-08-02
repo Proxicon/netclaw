@@ -9,6 +9,34 @@ Keep it small. Keep it durable. Keep it routing-focused.
 - Default to smallest safe change that advances MVP.
 - Prefer explicit tradeoffs over hidden complexity.
 
+## Communication Standard
+
+Write all agent output in ASD-STE100 Simplified Technical English (STE). This
+applies to chat replies, commit messages, PR descriptions, code comments, docs,
+and spec text.
+
+Rules:
+
+- Give one sentence one idea. Keep an instruction to 20 words or fewer. Keep a
+  descriptive sentence to 25 words or fewer.
+- Use the active voice. Name the actor that does the action.
+- Use simple tenses: past, present, and future. Do not use perfect or
+  progressive tenses.
+- Do not use an `-ing` word as a noun or as an adjective. Use a noun or a
+  relative clause.
+- Keep the articles `a`, `an`, and `the`. Do not delete words to make a
+  sentence shorter.
+- Give one word one meaning. Do not use the same word as a noun and as a verb.
+- Keep a descriptive paragraph to six sentences or fewer.
+- Put complex information in a vertical list.
+- Put a warning or a caution before the step that it applies to.
+
+STE does not apply to code identifiers, file paths, log text, or quoted
+material. Keep those exact.
+
+STE does not override accuracy. If the approved vocabulary cannot state a
+technical fact correctly, state the fact correctly and keep the sentence short.
+
 ## Current Product Direction
 
 - Netclaw is an open-source, self-hosted autonomous operations agent built on Akka.Agents.
@@ -193,6 +221,8 @@ manifest or installer feed.
   to the primitive defeats the purpose. Use `.Value` for explicit access and
   explicit casts where truly needed. If a value object can silently become a
   string, it provides no more safety than a raw string.
+- **Never use the `global::` namespace qualifier in C# source.** Resolve name
+  collisions with an ordinary `using` directive or type alias instead.
 - **Optional/nullable parameters are rare by default — make dependencies
   required.** A constructor or method parameter should be optional (nullable or
   defaulted) only when its absence is a genuine, intended runtime state the
@@ -306,6 +336,11 @@ giving the model the right information). Only after ruling out both should you
 consider model capability as the cause.
 
 ## System Skills Sync Rule
+
+Runtime skill use is logical: call `skill_load` by canonical name and
+`skill_read_resource` for bundled files. Do not expose physical skill roots in
+prompt indexes or teach agents to derive `SKILL.md` paths. Direct filesystem
+inspection is reserved for explicit operator diagnostics.
 
 System skills in `feeds/skills/.system/files/` are the agent's operational
 guidance — they tell the running agent how to use features. When you change a

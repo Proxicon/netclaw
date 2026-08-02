@@ -7,6 +7,7 @@ using System.Collections.Immutable;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Sessions;
+using Netclaw.Tools;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
@@ -628,6 +629,51 @@ public class SessionStateTests
         var restored = SessionState.FromSnapshot(state.ToSnapshot());
 
         Assert.Empty(restored.ProcessedReminderIds);
+    }
+
+    [Fact]
+    public void Successful_subagent_merge_adds_only_confirmed_changed_files()
+    {
+        var child = new WorkingContextDelta
+        {
+            ReadFiles = ["src/ReadOnly.cs"],
+            ConfirmedChangedFiles = ["src/Changed.cs"],
+            ObservedChangedFiles = ["src/ObservedOnly.cs"]
+        };
+
+        var merged = LlmSessionActor.MergeSuccessfulSubAgentWorkingContext(
+            WorkingContext.Empty,
+            new ChildRunCompletion.Completed(child));
+
+        Assert.Equal(["src/Changed.cs"], merged.RecentFiles);
+    }
+
+    [Fact]
+    public void Failed_subagent_merge_does_not_change_parent_working_context()
+    {
+        var current = WorkingContext.Empty.AddRecentFile("src/Existing.cs");
+        var child = new WorkingContextDelta
+        {
+            ConfirmedChangedFiles = ["src/Denied.cs"]
+        };
+
+        var merged = LlmSessionActor.MergeSuccessfulSubAgentWorkingContext(
+            current,
+            new ChildRunCompletion.Failed(SubAgentOutcomeReason.ToolExecutionFailed));
+
+        Assert.Same(current, merged);
+    }
+
+    [Fact]
+    public void Cancelled_subagent_cannot_supply_parent_working_context_changes()
+    {
+        var current = WorkingContext.Empty.AddRecentFile("src/Existing.cs");
+
+        var merged = LlmSessionActor.MergeSuccessfulSubAgentWorkingContext(
+            current,
+            new ChildRunCompletion.Cancelled(SubAgentOutcomeReason.CancelledByParent));
+
+        Assert.Same(current, merged);
     }
 
     private static SessionState WithSystemPrompt(string content)
