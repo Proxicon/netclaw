@@ -66,6 +66,13 @@ public static class TeamsSessionIdentifierCodec
         out TeamsIdentifierValidationError error)
         => TryCreate(tenantId, TeamsConversationScope.Channel, conversationId, rootActivityId, out sessionId, out error);
 
+    /// <summary>
+    /// Validates an opaque activity ID before it is used for durable
+    /// idempotency. This applies the same resource limit as session IDs.
+    /// </summary>
+    public static bool IsValidActivityIdentifier(string? activityId) =>
+        TryValidateRaw(activityId, TeamsIdentifierValidationError.MissingActivityId, out _);
+
     public static bool TryParse(
         SessionId sessionId,
         out TeamsSessionIdentifier identifier,

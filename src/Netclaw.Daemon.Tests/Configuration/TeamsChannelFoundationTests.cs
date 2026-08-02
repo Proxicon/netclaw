@@ -37,6 +37,7 @@ using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
+[Collection("TeamsTelemetry")]
 public sealed class TeamsChannelFoundationTests
 {
     [Fact]
