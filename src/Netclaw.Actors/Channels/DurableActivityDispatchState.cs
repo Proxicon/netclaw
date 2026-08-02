@@ -27,3 +27,19 @@ public sealed record DurableActivityDispatchReleased(
 /// </summary>
 public sealed record DurableActivityDispatchSnapshot(
     IReadOnlyList<string> ActivityFingerprints) : INetclawSerializableMessage;
+
+/// <summary>
+/// Stores the Teams channel conversation owner's reversible routing target for
+/// a fixed activity fingerprint. Session IDs are canonical encoded values; raw
+/// Teams identifiers are never persisted by this index.
+/// </summary>
+public sealed record DurableTeamsChannelActivityMapped(
+    string ActivityFingerprint,
+    string SessionId,
+    string? EvictedActivityFingerprint) : INetclawSerializableMessage;
+
+/// <summary>
+/// Snapshot of the bounded Teams channel activity routing index.
+/// </summary>
+public sealed record DurableTeamsChannelActivityIndexSnapshot(
+    IReadOnlyList<DurableTeamsChannelActivityMapped> Entries) : INetclawSerializableMessage;

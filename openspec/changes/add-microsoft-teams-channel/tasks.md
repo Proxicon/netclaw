@@ -33,6 +33,11 @@ none. **Rollback:** discard this uncommitted OpenSpec change.
   structured bot-plus-user mention entity; therefore this task remains open.
   Sanitized fixtures:
   `src/Netclaw.Daemon.Tests/Fixtures/Teams/TenantEvidence/`.
+  PR 4 prerequisite subset is complete: canonical channel root/reply identity,
+  qualified bot mention identity/span shapes, update/delete identity, and
+  Graph-free attachment rejection. PR 5 still requires personal reply evidence;
+  PR 8 still requires personal proactive evidence. Structured non-bot mention
+  entities remain unproven and are not used to authorize bot mention removal.
 - [x] 0.3 Amend proposal, design, tasks, and capability specs for ownership,
   strict endpoint registration, ACL, secret protection, approval recovery,
   attachment/output gates, and classified proactive delivery.
@@ -103,9 +108,9 @@ durable edit/delete activity-root mapping. **Tenant prerequisite:** canonical
 root/reply derivation must be confirmed by 0.2 before final behavior ships.
 **Rollback:** retain personal-only support or disable Teams.
 
-- [ ] 4.1 Implement fail-closed Teams ACL/audience/mention policy and
+- [x] 4.1 Implement fail-closed Teams ACL/audience/mention policy and
   distinguish rejected from ignored outcomes.
-- [ ] 4.2 Implement conversation-owned bounded persisted activity-root/session
+- [x] 4.2 Implement conversation-owned bounded persisted activity-root/session
   index and edit/delete routing without LLM dispatch for unknown mappings.
 
 ## PR 5 — Safe reply rendering and bounded output

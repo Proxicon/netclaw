@@ -22,6 +22,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.Entities;
 using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels;
@@ -32,8 +33,13 @@ using Netclaw.Daemon.Configuration;
 using Netclaw.Daemon.Security;
 using Xunit;
 using TeamsAccount = Microsoft.Teams.Api.Account;
+using TeamsAttachment = Microsoft.Teams.Api.Attachment;
+using TeamsContentType = Microsoft.Teams.Api.ContentType;
+using TeamsChannel = Microsoft.Teams.Api.Channel;
+using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
 using TeamsConversation = Microsoft.Teams.Api.Conversation;
 using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
+using TeamsTeam = Microsoft.Teams.Api.Team;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -958,11 +964,92 @@ public sealed class TeamsChannelFoundationTests
         var accepted = translator.Translate(activity, "tenant");
         Assert.Equal(receivedAt, accepted.Activity!.Trust.ReceivedAtUtc);
         Assert.Equal(new DateTimeOffset(activity.Timestamp.Value.ToUniversalTime()), accepted.Activity.Trust.PlatformTimestampUtc);
-        Assert.Equal("channel_root_mapping_pending_tenant_evidence", translator.Translate(CreateSdkMessage(TeamsConversationType.Channel), "tenant").ReasonCode);
-        Assert.Equal("activity_update_pending_persisted_mapping", translator.Translate(new MessageUpdateActivity(), "tenant").ReasonCode);
-        Assert.Equal("activity_delete_pending_persisted_mapping", translator.Translate(new MessageDeleteActivity(), "tenant").ReasonCode);
+        Assert.Equal("invalid_channel_root_identity", translator.Translate(CreateSdkMessage(TeamsConversationType.Channel), "tenant").ReasonCode);
+        Assert.Equal("missing_conversation_id", translator.Translate(new MessageUpdateActivity(), "tenant").ReasonCode);
+        Assert.Equal("missing_conversation_id", translator.Translate(new MessageDeleteActivity(), "tenant").ReasonCode);
         Assert.Equal(TeamsTranslationDisposition.Ignored, translator.Translate(new ConversationUpdateActivity(), "tenant").Disposition);
         Assert.Equal(TeamsIngressActivityKind.Unknown, translator.Translate(new TypingActivity(), "tenant").ActivityKind);
+    }
+
+    [Fact]
+    public void Translator_maps_tenant_proven_channel_root_and_qualified_bot_mentions()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions
+        {
+            TenantId = "tenant",
+            BotId = "bot",
+            AllowedTeamIds = ["team"],
+            AllowedChannelIds = ["channel"]
+        }, TimeProvider.System);
+        var activity = new MessageActivity("<at>renamed bot</at> hello <at>renamed bot</at>")
+        {
+            Id = "root",
+            From = new TeamsAccount { Id = "sender" },
+            Recipient = new TeamsAccount { Id = "28:bot" },
+            Conversation = new TeamsConversation
+            {
+                Id = "conversation;messageid=root",
+                TenantId = "tenant",
+                Type = TeamsConversationType.Channel
+            },
+            ChannelData = new TeamsChannelData
+            {
+                Team = new TeamsTeam { Id = "team" },
+                Channel = new TeamsChannel { Id = "channel" }
+            },
+            Entities =
+            [
+                new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:bot" }, Text = "<at>renamed bot</at>" },
+                new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:bot" }, Text = "<at>renamed bot</at>" },
+                new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:user" }, Text = "<at>user</at>" }
+            ]
+        };
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.True(result.Activity!.IsMentioned);
+        Assert.Equal(" hello ", result.Activity.Text);
+        Assert.Equal("root", result.Activity.Reply!.RootActivityId);
+        Assert.Equal("team", result.Activity.TeamId);
+        Assert.Equal("channel", result.Activity.ChannelId);
+    }
+
+    [Fact]
+    public void Translator_rejects_graph_backed_attachment_shells_before_channel_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Attachments = [new TeamsAttachment { ContentType = TeamsContentType.Html }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
+    }
+
+    [Fact]
+    public void Translator_does_not_treat_a_malformed_mention_entity_as_a_bot_mention()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Text = "literal bot text";
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "bot"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.False(result.Activity!.IsMentioned);
+        Assert.Equal("literal bot text", result.Activity.Text);
     }
 
     [Fact]

@@ -342,6 +342,16 @@ message DurableActivityDispatchSnapshotProto {
   repeated string activity_fingerprints = 1;
 }
 
+message DurableTeamsChannelActivityMappedProto {
+  string activity_fingerprint = 1;
+  string session_id = 2;
+  optional string evicted_activity_fingerprint = 3;
+}
+
+message DurableTeamsChannelActivityIndexSnapshotProto {
+  repeated DurableTeamsChannelActivityMappedProto entries = 1;
+}
+
 // ── Memory observer events ──
 
 // Journaled by SessionMemoryObserverActor when a distillation completes.

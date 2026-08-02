@@ -27,6 +27,12 @@ public sealed class TeamsChannelOptions : IRemoteChatChannelOptions
 
     public string? ClientId { get; init; }
 
+    /// <summary>
+    /// The Teams bot registration ID used to qualify structured mention entities.
+    /// It is not an Entra client credential.
+    /// </summary>
+    public string? BotId { get; init; }
+
     public TeamsAuthenticationMode AuthenticationMode { get; init; } = TeamsAuthenticationMode.ClientSecret;
 
     [JsonIgnore]
