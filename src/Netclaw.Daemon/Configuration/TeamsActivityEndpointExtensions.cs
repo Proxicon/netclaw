@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Teams.Api.Activities;
 using Microsoft.Teams.Api.Auth;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Activities;
@@ -72,7 +73,9 @@ internal static class TeamsActivityEndpointExtensions
         teamsApp.OnActivity(async (context, cancellationToken) =>
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventReceived("activity");
-            var result = translator.Translate(context.Activity, context.TenantId);
+            var result = translator.Translate(
+                context.Activity,
+                ResolveTenantId(context.Activity, context.TenantId));
 
             if (result.Disposition == TeamsTranslationDisposition.Accepted)
             {
@@ -87,6 +90,24 @@ internal static class TeamsActivityEndpointExtensions
 
             await Task.CompletedTask;
         });
+    }
+
+    /// <summary>
+    /// Resolves the tenant asserted by the Teams SDK when it supplies one, with
+    /// the platform conversation tenant as the authenticated-activity fallback.
+    /// Bot Framework service JWTs do not carry a tenant claim for all valid
+    /// Teams deliveries. This runs only after <see cref="AspNetCorePlugin"/>
+    /// has authenticated the request; the translator then requires the resolved
+    /// tenant to match the operator-configured tenant and rejects a conflicting
+    /// conversation tenant.
+    /// </summary>
+    internal static string? ResolveTenantId(IActivity activity, string? sdkTenantId)
+    {
+        ArgumentNullException.ThrowIfNull(activity);
+
+        return string.IsNullOrWhiteSpace(sdkTenantId)
+            ? activity.Conversation?.TenantId
+            : sdkTenantId;
     }
 
     public static void MapTeamsActivityEndpoint(this WebApplication app)
