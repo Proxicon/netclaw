@@ -305,6 +305,45 @@ recovery policy for `DeliveryUnknown` is an explicit pre-implementation decision
 gate: it must be retry-with-operator-visibility or operator-review-only, never
 an implicit retry or false success claim.
 
+#### PR 5 output delivery record (2026-08-02)
+
+PR 5 adds non-streaming replies for accepted personal and channel sessions.
+`TeamsSessionBindingActor` owns one `SessionPipelineHandle` and one output
+subscriber. It disposes the input stream on stop. A new actor creates a new
+subscriber after recovery. The output callback captures the actor reference at
+initialization. It does not access an expired actor context.
+
+The binding holds the current destination only in runtime memory. It does not
+persist a service URL, an SDK object, a token, or a destination registry entry.
+The destination has a tenant, conversation, scope, HTTPS service URL, and
+scope-specific identity. Personal delivery requires a user ID. Channel delivery
+requires a team ID, channel ID, and canonical root ID. Each identity has the
+existing 1 KiB UTF-8 bound. The service URL has a 2 KiB bound and has no user
+info, query, or fragment.
+
+The daemon captures an SDK context only after accepted transport translation.
+The context store is bounded to 1,024 current destinations. It checks activity,
+conversation, and service URL equality before storage. The actor and all
+Netclaw contracts remain SDK-free. The daemon edge owns SDK send and update
+calls through a narrow operations seam.
+
+`TeamsOutputRenderer` preserves text and Unicode. It normalizes line endings
+only. Whitespace-only output has no delivery. The renderer measures the UTF-8
+JSON activity envelope, including a channel root reply ID, against an 80 KiB
+ceiling. It emits ordered chunks up to
+16 messages. It keeps all text. It rejects an oversized Markdown link if a
+safe split is not possible. The stable oversize reason is `output_too_large`.
+
+One processing message can be created. The first final chunk updates that
+message. If the update fails, the binding makes one normal final-reply attempt.
+It does not retry after any delivery failure. The reply client reports
+`Delivered`, `Updated`, `RejectedTooLarge`, `Unavailable`, `Cancelled`, or a
+safe failure result. It does not expose SDK exception data. Delivery telemetry
+records a success only after an SDK success result.
+
+PR 5 does not add personal proactive delivery. PR 8 owns persisted destination
+selection, proactive sends, and their durable delivery state.
+
 ### Keep credentials secret in every surface
 
 `ClientSecret` may participate in effective runtime binding for ClientSecret
