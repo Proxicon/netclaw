@@ -103,6 +103,26 @@ Alternative: call the pipeline directly from the HTTP handler. Rejected because
 it bypasses actor serialization, session ownership, passivation behavior, and
 the existing channel contract.
 
+#### PR 2 ingress correction record (2026-08-01)
+
+The authenticated tenant presented by the SDK is an explicit Netclaw boundary:
+it must be nonblank and ordinal-equal to configured `Teams:TenantId`; an
+optional activity conversation tenant must equal that authenticated tenant.
+Mismatches are rejected with safe reason codes before the ingress actor.
+
+PR 2's duplicate cache records an activity only after the next actor boundary
+reports acceptance. Failures, cancellations, and unavailable/deferred outcomes
+remain retryable; the cache is process-local and bounded, not durable.
+Until PR 3 supplies the conversation/binding owner, the deferred boundary
+reports unavailable and the connector remains degraded/not-ready. It does not
+claim successful routing or session dispatch.
+
+`ReceivedAtUtc` is daemon receipt time from `TimeProvider`. A separate optional
+SDK-free `PlatformTimestampUtc` preserves the platform event time without
+letting it redefine local receipt ordering. The translator's public/untrusted
+trust context is provisional transport authentication only; PR 3/4 must derive
+a final ACL/audience context before any pipeline dispatch.
+
 ### Preserve the two-segment session grammar
 
 Existing reminder routing parses session IDs as `{channelPart}/{threadPart}` in

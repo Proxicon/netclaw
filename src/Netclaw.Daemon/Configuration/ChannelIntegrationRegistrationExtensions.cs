@@ -281,14 +281,19 @@ public static class ChannelIntegrationRegistrationExtensions
     {
         var options = configuration.GetSection(nameof(ChannelType.Teams)).Get<TeamsChannelOptions>()
             ?? new TeamsChannelOptions();
-
-        services.AddSingleton(options);
-        services.AddChannelRegistry();
-        services.AddChannelDescriptorWithRuntimeSnapshot(ChannelDescriptor.CreateRemoteChat(
+        var registration = TeamsIngressRegistration.Evaluate(options);
+        var descriptor = ChannelDescriptor.CreateRemoteChat(
             ChannelType.Teams,
             "Teams",
             options.Enabled,
-            options.AllowDirectMessages));
+            options.AllowDirectMessages);
+
+        services.AddSingleton(options);
+        services.AddSingleton(registration);
+        services.AddChannelRegistry();
+        services.AddChannelDescriptor(descriptor);
+        services.AddSingleton<IChannelRuntimeSnapshotProvider>(
+            new TeamsChannelRuntimeSnapshotProvider(descriptor, registration));
     }
 
     private static string MattermostServerUrl(MattermostChannelOptions options)
