@@ -476,6 +476,28 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Tenant_resolver_prefers_the_sdk_authenticated_tenant()
+    {
+        var activity = CreateSdkMessage();
+        activity.Conversation!.TenantId = "activity-tenant";
+
+        var tenantId = TeamsActivityEndpointExtensions.ResolveTenantId(activity, "sdk-tenant");
+
+        Assert.Equal("sdk-tenant", tenantId);
+    }
+
+    [Fact]
+    public void Tenant_resolver_uses_the_platform_conversation_tenant_when_the_sdk_omits_one()
+    {
+        var activity = CreateSdkMessage();
+        activity.Conversation!.TenantId = "activity-tenant";
+
+        var tenantId = TeamsActivityEndpointExtensions.ResolveTenantId(activity, null);
+
+        Assert.Equal("activity-tenant", tenantId);
+    }
+
+    [Fact]
     public void Incomplete_configuration_never_maps_the_activity_route()
     {
         var builder = WebApplication.CreateBuilder();
