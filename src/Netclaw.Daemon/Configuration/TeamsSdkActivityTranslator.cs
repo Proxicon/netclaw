@@ -3,8 +3,10 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.Collections.Immutable;
 using Microsoft.Teams.Api;
 using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.Entities;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
@@ -23,12 +25,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
 
         return activity switch
         {
-            MessageUpdateActivity => TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence,
-                TeamsIngressActivityKind.MessageUpdate,
-                "activity_update_pending_persisted_mapping"),
-            MessageDeleteActivity => TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence,
-                TeamsIngressActivityKind.MessageDelete,
-                "activity_delete_pending_persisted_mapping"),
+            MessageUpdateActivity update => TranslateMutation(update, authenticatedTenantId, TeamsIngressActivityKind.MessageUpdate),
+            MessageDeleteActivity delete => TranslateMutation(delete, authenticatedTenantId, TeamsIngressActivityKind.MessageDelete),
             ConversationUpdateActivity => TeamsTranslationResult.Ignored(
                 TeamsIngressActivityKind.ConversationUpdate,
                 "conversation_update_recording_not_implemented"),
@@ -80,10 +78,68 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         if (scope is null)
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, TeamsIngressActivityKind.Message, "unsupported_conversation_scope");
 
-        if (scope == TeamsConversationScope.Channel)
-            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, TeamsIngressActivityKind.Message, "channel_root_mapping_pending_tenant_evidence");
+        // Attachment retrieval is deliberately deferred to PR 7. Do not let
+        // an attachment-bearing channel post reach the model as its caption.
+        if (scope == TeamsConversationScope.Channel && activity.Attachments is { Count: > 0 })
+        {
+            return TeamsTranslationResult.Rejected(
+                TeamsTranslationDisposition.RejectedMalformed,
+                TeamsIngressActivityKind.Message,
+                "graph_backed_attachment_unsupported");
+        }
 
-        var trust = new TeamsIngressTrustContext(
+        string? rootActivityId = null;
+        if (scope == TeamsConversationScope.Channel
+            && !TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(activity.Conversation.Id, out rootActivityId))
+        {
+            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "invalid_channel_root_identity");
+        }
+
+        var trust = CreateTrust(activity, authenticatedTenantId, scope.Value);
+        var mentions = TranslateMentions(activity.Entities);
+        var text = scope == TeamsConversationScope.Channel
+            ? TeamsTenantEvidenceMappings.RemoveQualifiedBotMentions(
+                activity.Text,
+                mentions.Select(mention => new TeamsMentionEvidence(mention.Type, mention.MentionedId, mention.Text)),
+                activity.Recipient?.Id ?? string.Empty,
+                options.BotId ?? string.Empty)
+            : activity.Text;
+        var mentioned = scope == TeamsConversationScope.Channel
+            && mentions.Any(mention => IsQualifiedBotMention(mention, activity.Recipient?.Id, options.BotId));
+
+        return TeamsTranslationResult.Accepted(new TeamsInboundActivity(
+            trust,
+            text,
+            scope == TeamsConversationScope.Channel ? new TeamsReplyMetadata(activity.ReplyToId, rootActivityId) : null,
+            mentioned,
+            kind: TeamsIngressActivityKind.Message,
+            teamId: activity.ChannelData?.Team?.Id,
+            channelId: activity.ChannelData?.Channel?.Id,
+            mentions: mentions));
+    }
+
+    private TeamsTranslationResult TranslateMutation(
+        IActivity activity,
+        string? authenticatedTenantId,
+        TeamsIngressActivityKind kind)
+    {
+        if (!TryValidateCommon(activity, authenticatedTenantId, kind, out var scope, out var failure))
+            return failure!;
+        if (scope != TeamsConversationScope.Channel)
+            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, kind, "unsupported_conversation_scope");
+        if (!TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(activity.Conversation!.Id, out var rootActivityId))
+            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "invalid_channel_root_identity");
+
+        return TeamsTranslationResult.Accepted(new TeamsInboundActivity(
+            CreateTrust(activity, authenticatedTenantId!, scope),
+            string.Empty,
+            new TeamsReplyMetadata(activity.ReplyToId, rootActivityId),
+            kind: kind,
+            teamId: activity.ChannelData?.Team?.Id,
+            channelId: activity.ChannelData?.Channel?.Id));
+    }
+
+    private TeamsIngressTrustContext CreateTrust(IActivity activity, string authenticatedTenantId, TeamsConversationScope scope) => new(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
             TrustBoundary.Public,
@@ -91,12 +147,75 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             activity.From.Id,
             authenticatedTenantId,
             activity.Conversation.Id,
-            scope.Value,
+            scope,
             activity.Id,
             timeProvider.GetUtcNow(),
             activity.Timestamp is { } timestamp ? new DateTimeOffset(timestamp.ToUniversalTime()) : null);
 
-        // Mention extraction is a PR 4 concern; false cannot grant a channel pass.
-        return TeamsTranslationResult.Accepted(new TeamsInboundActivity(trust, activity.Text, null, false));
+    private bool TryValidateCommon(
+        IActivity activity,
+        string? authenticatedTenantId,
+        TeamsIngressActivityKind kind,
+        out TeamsConversationScope scope,
+        out TeamsTranslationResult? failure)
+    {
+        scope = default;
+        failure = null;
+        if (string.IsNullOrWhiteSpace(authenticatedTenantId) || string.IsNullOrWhiteSpace(options.TenantId)
+            || !string.Equals(authenticatedTenantId, options.TenantId, StringComparison.Ordinal))
+        {
+            failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedPendingTenantEvidence, kind, "configured_tenant_mismatch");
+            return false;
+        }
+        if (activity.Conversation is null || string.IsNullOrWhiteSpace(activity.Conversation.Id))
+        {
+            failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "missing_conversation_id");
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(activity.Id))
+        {
+            failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "missing_activity_id");
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(activity.From?.Id))
+        {
+            failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "missing_sender_id");
+            return false;
+        }
+        if (!string.IsNullOrWhiteSpace(activity.Conversation.TenantId)
+            && !string.Equals(activity.Conversation.TenantId, authenticatedTenantId, StringComparison.Ordinal))
+        {
+            failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "tenant_mismatch");
+            return false;
+        }
+        if (activity.Conversation.Type is { IsChannel: true })
+        {
+            scope = TeamsConversationScope.Channel;
+            return true;
+        }
+        if (activity.Conversation.Type is { IsPersonal: true })
+        {
+            scope = TeamsConversationScope.Personal;
+            return true;
+        }
+
+        failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, kind, "unsupported_conversation_scope");
+        return false;
     }
+
+    private static ImmutableArray<TeamsMention> TranslateMentions(IList<IEntity>? entities)
+        => entities?.OfType<MentionEntity>()
+            .Where(entity => entity.Mentioned is not null && !string.IsNullOrWhiteSpace(entity.Text))
+            .Select(entity => new TeamsMention(entity.Type, entity.Mentioned!.Id ?? string.Empty, entity.Text!))
+            .ToImmutableArray() ?? [];
+
+    private static bool IsQualifiedBotMention(TeamsMention mention, string? recipientId, string? configuredBotId)
+        => string.Equals(mention.Type, "mention", StringComparison.Ordinal)
+           && mention.Text.StartsWith("<at>", StringComparison.Ordinal)
+           && mention.Text.EndsWith("</at>", StringComparison.Ordinal)
+           && mention.Text.Length > "<at></at>".Length
+           && !string.IsNullOrWhiteSpace(configuredBotId)
+           && !string.IsNullOrWhiteSpace(recipientId)
+           && string.Equals(mention.MentionedId, recipientId, StringComparison.Ordinal)
+           && string.Equals(mention.MentionedId, $"28:{configuredBotId}", StringComparison.Ordinal);
 }

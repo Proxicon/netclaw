@@ -22,6 +22,7 @@ public enum TeamsIngressSinkResult
 {
     Accepted,
     Duplicate,
+    Ignored,
     Denied,
     Cancelled,
     Failed,
@@ -34,6 +35,7 @@ public enum TeamsIngressRouteDisposition
 {
     Routed,
     Duplicate,
+    Ignored,
     Denied,
     Cancelled,
     Unavailable,
@@ -99,8 +101,15 @@ public sealed class TeamsIngressActor : ReceiveActor
 
             if (sinkResult == TeamsIngressSinkResult.Denied)
             {
-                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_acl_denied");
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("teams_acl_denied");
                 Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Denied));
+                return;
+            }
+
+            if (sinkResult == TeamsIngressSinkResult.Ignored)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("channel_unmentioned");
+                Sender.Tell(new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Ignored));
                 return;
             }
 

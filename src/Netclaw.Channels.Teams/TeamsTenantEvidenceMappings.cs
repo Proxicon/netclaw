@@ -10,7 +10,7 @@ namespace Netclaw.Channels.Teams;
 /// are deliberately not connected to production channel routing; PR 4 owns
 /// the policy and durable activity-to-root index that will consume them.
 /// </summary>
-internal static class TeamsTenantEvidenceMappings
+public static class TeamsTenantEvidenceMappings
 {
     private const string ThreadMessageIdSeparator = ";messageid=";
 
@@ -25,7 +25,10 @@ internal static class TeamsTenantEvidenceMappings
             return false;
 
         var candidate = conversationId[(separatorIndex + ThreadMessageIdSeparator.Length)..];
-        if (string.IsNullOrWhiteSpace(candidate) || candidate.Contains(';', StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(candidate)
+            || candidate.Contains(';', StringComparison.Ordinal)
+            || candidate.Contains("messageid=", StringComparison.Ordinal)
+            || !TeamsSessionIdentifierCodec.IsValidActivityIdentifier(candidate))
             return false;
 
         rootActivityId = candidate;
@@ -51,6 +54,7 @@ internal static class TeamsTenantEvidenceMappings
         {
             if (!string.Equals(entity.Type, "mention", StringComparison.Ordinal)
                 || string.IsNullOrWhiteSpace(entity.Text)
+                || !IsWellFormedMentionSpan(entity.Text)
                 || !string.Equals(entity.MentionedId, recipientId, StringComparison.Ordinal)
                 || !string.Equals(entity.MentionedId, qualifiedBotId, StringComparison.Ordinal))
             {
@@ -65,10 +69,15 @@ internal static class TeamsTenantEvidenceMappings
         return result;
     }
 
+    private static bool IsWellFormedMentionSpan(string text) =>
+        text.StartsWith("<at>", StringComparison.Ordinal)
+        && text.EndsWith("</at>", StringComparison.Ordinal)
+        && text.Length > "<at></at>".Length;
+
     public static bool IsUnsupportedGraphBackedAttachmentShell(string? contentType, string? name, string? contentUrl)
         => string.Equals(contentType, "text/html", StringComparison.OrdinalIgnoreCase)
            && string.IsNullOrWhiteSpace(name)
            && string.IsNullOrWhiteSpace(contentUrl);
 }
 
-internal sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);
+public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);

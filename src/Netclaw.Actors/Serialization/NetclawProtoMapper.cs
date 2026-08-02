@@ -48,6 +48,8 @@ internal static class NetclawProtoMapper
         DurableActivityDispatchReserved v => ToProto(v),
         DurableActivityDispatchReleased v => ToProto(v),
         DurableActivityDispatchSnapshot v => ToProto(v),
+        DurableTeamsChannelActivityMapped v => ToProto(v),
+        DurableTeamsChannelActivityIndexSnapshot v => ToProto(v),
         MemoriesDistilledV2 v => ToProto(v),
         _ => throw new ArgumentException($"No proto mapping for {obj.GetType().FullName}")
     };
@@ -812,6 +814,33 @@ internal static class NetclawProtoMapper
 
     internal static DurableActivityDispatchSnapshot FromProto(Proto.DurableActivityDispatchSnapshotProto proto) => new(
         proto.ActivityFingerprints.ToArray());
+
+    internal static Proto.DurableTeamsChannelActivityMappedProto ToProto(DurableTeamsChannelActivityMapped evt)
+    {
+        var proto = new Proto.DurableTeamsChannelActivityMappedProto
+        {
+            ActivityFingerprint = evt.ActivityFingerprint,
+            SessionId = evt.SessionId
+        };
+        if (evt.EvictedActivityFingerprint is not null)
+            proto.EvictedActivityFingerprint = evt.EvictedActivityFingerprint;
+        return proto;
+    }
+
+    internal static DurableTeamsChannelActivityMapped FromProto(Proto.DurableTeamsChannelActivityMappedProto proto) => new(
+        proto.ActivityFingerprint,
+        proto.SessionId,
+        proto.HasEvictedActivityFingerprint ? proto.EvictedActivityFingerprint : null);
+
+    internal static Proto.DurableTeamsChannelActivityIndexSnapshotProto ToProto(DurableTeamsChannelActivityIndexSnapshot snapshot)
+    {
+        var proto = new Proto.DurableTeamsChannelActivityIndexSnapshotProto();
+        proto.Entries.AddRange(snapshot.Entries.Select(ToProto));
+        return proto;
+    }
+
+    internal static DurableTeamsChannelActivityIndexSnapshot FromProto(Proto.DurableTeamsChannelActivityIndexSnapshotProto proto) => new(
+        proto.Entries.Select(FromProto).ToArray());
 
     // ── MemoriesDistilledV2 / ProposedMemoryContext ──
 
