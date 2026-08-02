@@ -27,6 +27,7 @@ public static class TeamsTenantEvidenceMappings
         var candidate = conversationId[(separatorIndex + ThreadMessageIdSeparator.Length)..];
         if (string.IsNullOrWhiteSpace(candidate)
             || candidate.Contains(';', StringComparison.Ordinal)
+            || candidate.Contains("messageid=", StringComparison.Ordinal)
             || !TeamsSessionIdentifierCodec.IsValidActivityIdentifier(candidate))
             return false;
 
@@ -53,6 +54,7 @@ public static class TeamsTenantEvidenceMappings
         {
             if (!string.Equals(entity.Type, "mention", StringComparison.Ordinal)
                 || string.IsNullOrWhiteSpace(entity.Text)
+                || !IsWellFormedMentionSpan(entity.Text)
                 || !string.Equals(entity.MentionedId, recipientId, StringComparison.Ordinal)
                 || !string.Equals(entity.MentionedId, qualifiedBotId, StringComparison.Ordinal))
             {
@@ -66,6 +68,11 @@ public static class TeamsTenantEvidenceMappings
 
         return result;
     }
+
+    private static bool IsWellFormedMentionSpan(string text) =>
+        text.StartsWith("<at>", StringComparison.Ordinal)
+        && text.EndsWith("</at>", StringComparison.Ordinal)
+        && text.Length > "<at></at>".Length;
 
     public static bool IsUnsupportedGraphBackedAttachmentShell(string? contentType, string? name, string? contentUrl)
         => string.Equals(contentType, "text/html", StringComparison.OrdinalIgnoreCase)

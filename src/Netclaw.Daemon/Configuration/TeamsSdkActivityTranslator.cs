@@ -85,7 +85,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             return TeamsTranslationResult.Rejected(
                 TeamsTranslationDisposition.RejectedMalformed,
                 TeamsIngressActivityKind.Message,
-                "channel_attachment_unsupported");
+                "graph_backed_attachment_unsupported");
         }
 
         string? rootActivityId = null;
@@ -177,6 +177,11 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "missing_activity_id");
             return false;
         }
+        if (string.IsNullOrWhiteSpace(activity.From?.Id))
+        {
+            failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "missing_sender_id");
+            return false;
+        }
         if (!string.IsNullOrWhiteSpace(activity.Conversation.TenantId)
             && !string.Equals(activity.Conversation.TenantId, authenticatedTenantId, StringComparison.Ordinal))
         {
@@ -206,6 +211,9 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
 
     private static bool IsQualifiedBotMention(TeamsMention mention, string? recipientId, string? configuredBotId)
         => string.Equals(mention.Type, "mention", StringComparison.Ordinal)
+           && mention.Text.StartsWith("<at>", StringComparison.Ordinal)
+           && mention.Text.EndsWith("</at>", StringComparison.Ordinal)
+           && mention.Text.Length > "<at></at>".Length
            && !string.IsNullOrWhiteSpace(configuredBotId)
            && !string.IsNullOrWhiteSpace(recipientId)
            && string.Equals(mention.MentionedId, recipientId, StringComparison.Ordinal)

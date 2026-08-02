@@ -230,8 +230,11 @@ is parsed once from the bounded, unique `;messageid=` suffix of
 `conversation.id`; `replyToId` is never used as a fallback. The opaque suffix
 is the sole root thread key. A channel conversation actor owns a 1,024-entry,
 oldest-first persisted SHA-256 activity fingerprint index. The value is the
-canonical encoded Teams session ID, not a raw Teams identifier. This permits a
-known edit or delete to resolve safely without content routing or an LLM turn.
+canonical encoded Teams session ID. That value is reversible base64url
+routing identity, not a secret or displayable raw activity payload: it is the
+minimum bounded identity needed to resolve a known edit or delete without
+storing the activity ID. The actor does not log the value. This permits a known
+edit or delete to resolve safely without content routing or an LLM turn.
 
 Channel ACL is fail closed: a message requires configured tenant, nonempty
 allowed team and channel lists, exact team/channel matches, and an optional
