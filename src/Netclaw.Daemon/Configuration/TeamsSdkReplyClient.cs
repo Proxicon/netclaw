@@ -87,41 +87,7 @@ internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore c
             ReplyToId = message.ReplyToActivityId
         };
         if (message.ApprovalCard is { } approvalCard)
-        {
-            var payload = new Dictionary<string, object?>
-            {
-                ["$schema"] = TeamsApprovalCard.Schema,
-                ["type"] = "AdaptiveCard",
-                ["version"] = TeamsApprovalCard.Version,
-                ["body"] = new object?[]
-                {
-                    new Dictionary<string, object?>
-                    {
-                        ["type"] = "TextBlock", ["text"] = approvalCard.Title,
-                        ["weight"] = "Bolder", ["wrap"] = true
-                    },
-                    new Dictionary<string, object?>
-                    {
-                        ["type"] = "TextBlock", ["text"] = approvalCard.Body, ["wrap"] = true
-                    }
-                },
-                ["actions"] = approvalCard.Actions.Select(cardAction => (object?)new Dictionary<string, object?>
-                {
-                    ["type"] = "Action.Execute",
-                    ["title"] = cardAction.Title,
-                    ["verb"] = "netclaw-approval",
-                    ["data"] = new Dictionary<string, object?>
-                    {
-                        ["correlation"] = cardAction.CorrelationId,
-                        ["nonce"] = cardAction.Nonce,
-                        ["action"] = cardAction.Action
-                    }
-                }).ToArray()
-            };
-            var card = Microsoft.Teams.Cards.AdaptiveCard.Deserialize(JsonSerializer.Serialize(payload))
-                ?? throw new InvalidOperationException("The Teams approval card did not deserialize.");
-            activity.Attachments = [new Attachment(card)];
-        }
+            activity.Attachments = [new Attachment(TeamsSdkApprovalCardFactory.Create(approvalCard))];
         if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
         {
             var update = await context.Api.Conversations.Activities.UpdateAsync(
@@ -134,6 +100,53 @@ internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore c
 
         var sent = await context.Send(activity, cancellationToken);
         return sent.Id;
+    }
+}
+
+/// <summary>
+/// Converts the SDK-free approval-card contract at the transport edge. The
+/// same card is used for normal deliveries and synchronous Action.Execute
+/// responses, which lets Teams replace an actionable card with its terminal
+/// state without posting a duplicate message.
+/// </summary>
+internal static class TeamsSdkApprovalCardFactory
+{
+    public static Microsoft.Teams.Cards.AdaptiveCard Create(TeamsApprovalCard approvalCard)
+    {
+        ArgumentNullException.ThrowIfNull(approvalCard);
+        var payload = new Dictionary<string, object?>
+        {
+            ["$schema"] = TeamsApprovalCard.Schema,
+            ["type"] = "AdaptiveCard",
+            ["version"] = TeamsApprovalCard.Version,
+            ["body"] = new object?[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "TextBlock", ["text"] = approvalCard.Title,
+                    ["weight"] = "Bolder", ["wrap"] = true
+                },
+                new Dictionary<string, object?>
+                {
+                    ["type"] = "TextBlock", ["text"] = approvalCard.Body, ["wrap"] = true
+                }
+            },
+            ["actions"] = approvalCard.Actions.Select(cardAction => (object?)new Dictionary<string, object?>
+            {
+                ["type"] = "Action.Execute",
+                ["title"] = cardAction.Title,
+                ["verb"] = "netclaw-approval",
+                ["data"] = new Dictionary<string, object?>
+                {
+                    ["correlation"] = cardAction.CorrelationId,
+                    ["nonce"] = cardAction.Nonce,
+                    ["action"] = cardAction.Action
+                }
+            }).ToArray()
+        };
+
+        return Microsoft.Teams.Cards.AdaptiveCard.Deserialize(JsonSerializer.Serialize(payload))
+            ?? throw new InvalidOperationException("The Teams approval card did not deserialize.");
     }
 }
 
@@ -164,7 +177,8 @@ internal sealed class TeamsSdkConversationContextStore
         }
     }
 
-    public void Capture(TeamsApprovalAction action, IContext<IActivity> context)
+    public void Capture<TActivity>(TeamsApprovalAction action, IContext<TActivity> context)
+        where TActivity : IActivity
     {
         ArgumentNullException.ThrowIfNull(action);
         ArgumentNullException.ThrowIfNull(context);
@@ -179,7 +193,7 @@ internal sealed class TeamsSdkConversationContextStore
             var key = TeamsSdkContextKey.Create(destination);
             if (_contexts.Count >= 1_024 && !_contexts.ContainsKey(key))
                 _contexts.Remove(_contexts.Keys.First());
-            _contexts[key] = context;
+            _contexts[key] = context.ToActivityType();
         }
     }
 

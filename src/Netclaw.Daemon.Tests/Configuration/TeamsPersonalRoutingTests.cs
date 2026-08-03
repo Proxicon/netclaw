@@ -657,6 +657,59 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         Assert.Single(pipeline.Feedback);
     }
 
+    [Fact]
+    public async Task Pending_approval_rebinds_its_card_locator_and_forwards_a_denial_without_a_duplicate_terminal_card()
+    {
+        var replyClient = new RecordingTeamsReplyClient(
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered));
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-rebind");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-approval-rebind", "tenant-a", "conversation-approval-rebind"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(new ToolInteractionRequest
+        {
+            SessionId = sessionId,
+            Kind = "approval",
+            CallId = new ToolCallId("call-approval-rebind"),
+            ToolName = new ToolName("safe_tool"),
+            DisplayText = "Approve safe tool use.",
+            Options =
+            [
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, "Approve"),
+                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, "Deny")
+            ],
+            RequesterSenderId = new SenderId("user-a"),
+            RequesterPrincipal = PrincipalClassification.TrustedInternal
+        });
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var card = Assert.Single(replyClient.Messages).ApprovalCard;
+        Assert.NotNull(card);
+        var deny = Assert.Single(card!.Actions, action => action.Action == "deny");
+        var action = CreateApprovalAction(
+            "tenant-a",
+            "conversation-approval-rebind",
+            deny.CorrelationId,
+            deny.Nonce,
+            "card-activity-rebind",
+            "deny");
+
+        var accepted = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(action, TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Accepted, accepted.Disposition);
+        await AwaitAssertAsync(() => Assert.Single(pipeline.Feedback), cancellationToken: TestContext.Current.CancellationToken);
+        var feedback = Assert.IsType<ToolInteractionResponse>(pipeline.Feedback[0]);
+        Assert.Equal(ApprovalOptionKeys.DenyKey, feedback.SelectedKey);
+        Assert.Single(replyClient.Messages);
+    }
+
     private ISessionPipeline CreatePipeline(IActorRef sessionManager)
     {
         var registry = ActorRegistry.For(Sys);
@@ -760,7 +813,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         string conversationId,
         string correlationId,
         string nonce,
-        string promptActivityId) => new(
+        string promptActivityId,
+        string action = "approve") => new(
         new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
@@ -774,7 +828,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
             TimeProvider.System.GetUtcNow()),
         correlationId,
         nonce,
-        "approve",
+        action,
         null,
         null,
         null,

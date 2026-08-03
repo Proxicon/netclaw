@@ -6,9 +6,11 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.AdaptiveCards;
 using Microsoft.Teams.Api.Auth;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Activities;
+using Microsoft.Teams.Apps.Activities.Invokes;
 using Microsoft.Teams.Plugins.AspNetCore;
 using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Netclaw.Actors.Channels;
@@ -75,7 +77,11 @@ internal static class TeamsActivityEndpointExtensions
         var translator = app.Services.GetRequiredService<TeamsSdkActivityTranslator>();
         var ingress = app.Services.GetRequiredService<TeamsIngressActorHost>();
         var contexts = app.Services.GetRequiredService<TeamsSdkConversationContextStore>();
-        teamsApp.OnActivity(async (context, cancellationToken) =>
+        // Adaptive-card invokes must be handled by their dedicated route below:
+        // it is the only Teams SDK route that can synchronously replace the
+        // original card. A generic handler consumes the route otherwise.
+        teamsApp.OnActivity(activity => activity is not Microsoft.Teams.Api.Activities.Invokes.AdaptiveCards.ActionActivity,
+            async (context, cancellationToken) =>
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventReceived("activity");
             var result = translator.Translate(
@@ -84,28 +90,57 @@ internal static class TeamsActivityEndpointExtensions
 
             if (result.Disposition == TeamsTranslationDisposition.Accepted)
             {
-                if (result.ApprovalAction is { } approvalAction)
-                {
-                    contexts.Capture(approvalAction, context);
-                    var approvalResult = await ingress.SubmitApprovalAsync(approvalAction, cancellationToken);
-                    ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
-                        $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
-                }
-                else
-                {
-                    contexts.Capture(result.Activity!, context);
-                    var routeResult = await ingress.SubmitAsync(result.Activity!, cancellationToken);
-                    if (routeResult.Disposition != TeamsIngressRouteDisposition.Routed)
-                        ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped($"ingress_{routeResult.Disposition.ToString().ToLowerInvariant()}");
-                }
+                contexts.Capture(result.Activity!, context);
+                var routeResult = await ingress.SubmitAsync(result.Activity!, cancellationToken);
+                if (routeResult.Disposition != TeamsIngressRouteDisposition.Routed)
+                    ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped($"ingress_{routeResult.Disposition.ToString().ToLowerInvariant()}");
             }
             else
             {
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(result.ReasonCode);
             }
-
-            await Task.CompletedTask;
         });
+
+        teamsApp.OnAdaptiveCardAction(async (context, cancellationToken) =>
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventReceived("activity");
+            var result = translator.Translate(
+                context.Activity,
+                ResolveTenantId(context.Activity, context.TenantId));
+
+            if (result.Disposition != TeamsTranslationDisposition.Accepted
+                || result.ApprovalAction is not { } approvalAction)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(result.ReasonCode);
+                return new ActionResponse.Message("This approval is no longer available.") { StatusCode = StatusCodes.Status400BadRequest };
+            }
+
+            contexts.Capture(approvalAction, context);
+            var approvalResult = await ingress.SubmitApprovalAsync(approvalAction, cancellationToken);
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
+                $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
+            return CreateApprovalActionResponse(approvalResult.Disposition, approvalAction.Action);
+        });
+    }
+
+    internal static ActionResponse CreateApprovalActionResponse(
+        TeamsApprovalActionDisposition disposition,
+        string action)
+    {
+        var text = disposition switch
+        {
+            TeamsApprovalActionDisposition.Accepted when string.Equals(action, "deny", StringComparison.Ordinal) => "Denied.",
+            TeamsApprovalActionDisposition.Accepted => "Approved.",
+            TeamsApprovalActionDisposition.AlreadyProcessed => "This approval was already processed.",
+            TeamsApprovalActionDisposition.Expired => "This approval has expired.",
+            _ => "This approval is no longer available."
+        };
+
+        return new ActionResponse(Microsoft.Teams.Api.ContentType.AdaptiveCard)
+        {
+            StatusCode = StatusCodes.Status200OK,
+            Value = TeamsSdkApprovalCardFactory.Create(TeamsApprovalCardRenderer.CreateTerminal(text))
+        };
     }
 
     /// <summary>

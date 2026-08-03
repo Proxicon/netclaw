@@ -4,6 +4,8 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Net;
+using System.Text.Json;
+using Microsoft.Teams.Api;
 using Netclaw.Channels.Teams;
 using Netclaw.Daemon.Configuration;
 using Xunit;
@@ -12,6 +14,24 @@ namespace Netclaw.Daemon.Tests.Configuration;
 
 public sealed class TeamsSdkReplyClientTests
 {
+    [Theory]
+    [InlineData("approve", "Approved.")]
+    [InlineData("deny", "Denied.")]
+    public void Approval_action_response_replaces_the_actionable_card_with_a_terminal_card(string action, string expectedText)
+    {
+        var response = TeamsActivityEndpointExtensions.CreateApprovalActionResponse(
+            TeamsApprovalActionDisposition.Accepted,
+            action);
+
+        var serialized = JsonSerializer.Serialize(response);
+
+        Assert.Equal(200, response.StatusCode);
+        Assert.Equal(ContentType.AdaptiveCard, response.Type);
+        Assert.Contains(expectedText, serialized, StringComparison.Ordinal);
+        Assert.Contains("\"actions\":[]", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("Action.Execute", serialized, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Reply_client_maps_create_and_update_success_without_exposing_sdk_data()
     {
