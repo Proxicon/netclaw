@@ -124,7 +124,7 @@ payload ceiling and update semantics remain 0.2 gates; use no undocumented
 constant. **Rollback:** disable processing updates and retain basic replies only
 when the verified transport behavior permits it.
 
-- [ ] 5.1 Implement constrained Markdown rendering, serialized-byte chunking,
+- [x] 5.1 Implement constrained Markdown rendering, serialized-byte chunking,
   processing-message updates, and transport-owned reply/update operations.
 
 ## PR 6 — Persisted Adaptive Card approvals
