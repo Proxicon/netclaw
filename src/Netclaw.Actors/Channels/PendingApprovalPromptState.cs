@@ -103,3 +103,26 @@ public sealed record TeamsApprovalConsumed : INetclawSerializableMessage
 
     public long ConsumedAtUnixMilliseconds { get; init; }
 }
+
+/// <summary>
+/// Stores the complete bounded Teams approval state in a binding snapshot.
+/// The state has no raw nonce, card payload, service URL, or tool arguments.
+/// </summary>
+public sealed record TeamsApprovalSnapshotEntry
+{
+    public string CallId { get; init; } = string.Empty;
+
+    public string CorrelationId { get; init; } = string.Empty;
+
+    public string NonceHash { get; init; } = string.Empty;
+
+    public string? RequesterSenderId { get; init; }
+
+    public PrincipalClassification? RequesterPrincipal { get; init; }
+
+    public long ExpiresAtUnixMilliseconds { get; init; }
+
+    public string? PromptId { get; init; }
+
+    public string? Decision { get; init; }
+}

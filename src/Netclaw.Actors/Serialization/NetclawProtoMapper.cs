@@ -866,11 +866,49 @@ internal static class NetclawProtoMapper
     {
         var proto = new Proto.DurableActivityDispatchSnapshotProto();
         proto.ActivityFingerprints.AddRange(snapshot.ActivityFingerprints);
+        proto.TeamsApprovals.AddRange(snapshot.TeamsApprovals.Select(ToProto));
         return proto;
     }
 
     internal static DurableActivityDispatchSnapshot FromProto(Proto.DurableActivityDispatchSnapshotProto proto) => new(
-        proto.ActivityFingerprints.ToArray());
+        proto.ActivityFingerprints.ToArray())
+    {
+        TeamsApprovals = proto.TeamsApprovals.Select(FromProto).ToArray()
+    };
+
+    private static Proto.TeamsApprovalSnapshotEntryProto ToProto(TeamsApprovalSnapshotEntry entry)
+    {
+        var proto = new Proto.TeamsApprovalSnapshotEntryProto
+        {
+            CallId = entry.CallId,
+            CorrelationId = entry.CorrelationId,
+            NonceHash = entry.NonceHash,
+            ExpiresAtUnixMilliseconds = entry.ExpiresAtUnixMilliseconds
+        };
+        if (entry.RequesterSenderId is not null)
+            proto.RequesterSenderId = entry.RequesterSenderId;
+        if (entry.RequesterPrincipal is not null)
+            proto.RequesterPrincipal = (int)entry.RequesterPrincipal.Value;
+        if (entry.PromptId is not null)
+            proto.PromptId = entry.PromptId;
+        if (entry.Decision is not null)
+            proto.Decision = entry.Decision;
+        return proto;
+    }
+
+    private static TeamsApprovalSnapshotEntry FromProto(Proto.TeamsApprovalSnapshotEntryProto proto) => new()
+    {
+        CallId = proto.CallId,
+        CorrelationId = proto.CorrelationId,
+        NonceHash = proto.NonceHash,
+        RequesterSenderId = proto.HasRequesterSenderId ? proto.RequesterSenderId : null,
+        RequesterPrincipal = proto.HasRequesterPrincipal
+            ? (Configuration.PrincipalClassification)proto.RequesterPrincipal
+            : null,
+        ExpiresAtUnixMilliseconds = proto.ExpiresAtUnixMilliseconds,
+        PromptId = proto.HasPromptId ? proto.PromptId : null,
+        Decision = proto.HasDecision ? proto.Decision : null
+    };
 
     internal static Proto.DurableTeamsChannelActivityMappedProto ToProto(DurableTeamsChannelActivityMapped evt)
     {

@@ -812,9 +812,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     {
         if (snapshot.ActivityFingerprints.Count > ProcessedActivityCapacity)
             throw new InvalidOperationException("The Teams processed activity snapshot exceeds its retention limit.");
+        if (snapshot.TeamsApprovals.Count > ApprovalCapacity)
+            throw new InvalidOperationException("The Teams approval snapshot exceeds its retention limit.");
 
         _processedActivityIds.Clear();
         _processedActivityOrder.Clear();
+        _pendingApprovals.Clear();
         foreach (var fingerprint in snapshot.ActivityFingerprints)
         {
             EnsureValidFingerprint(fingerprint);
@@ -823,12 +826,56 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
             _processedActivityOrder.Enqueue(fingerprint);
         }
+
+        foreach (var approval in snapshot.TeamsApprovals)
+        {
+            ApplyApprovalPendingCreated(new TeamsApprovalPendingCreated
+            {
+                CallId = approval.CallId,
+                CorrelationId = approval.CorrelationId,
+                NonceHash = approval.NonceHash,
+                RequesterSenderId = approval.RequesterSenderId,
+                RequesterPrincipal = approval.RequesterPrincipal,
+                ExpiresAtUnixMilliseconds = approval.ExpiresAtUnixMilliseconds
+            });
+            if (approval.PromptId is not null)
+            {
+                ApplyApprovalCardDelivered(new TeamsApprovalCardDelivered
+                {
+                    CorrelationId = approval.CorrelationId,
+                    PromptId = approval.PromptId
+                });
+            }
+            if (approval.Decision is not null)
+            {
+                ApplyApprovalConsumed(new TeamsApprovalConsumed
+                {
+                    CorrelationId = approval.CorrelationId,
+                    Decision = approval.Decision
+                });
+            }
+        }
     }
 
     private void SaveSnapshotWhenDue()
     {
         if (!IsRecovering && LastSequenceNr > 0 && LastSequenceNr % SnapshotInterval == 0)
-            SaveSnapshot(new DurableActivityDispatchSnapshot(_processedActivityOrder.ToArray()));
+        {
+            SaveSnapshot(new DurableActivityDispatchSnapshot(_processedActivityOrder.ToArray())
+            {
+                TeamsApprovals = _pendingApprovals.Values.Select(pending => new TeamsApprovalSnapshotEntry
+                {
+                    CallId = pending.CallId,
+                    CorrelationId = pending.CorrelationId,
+                    NonceHash = pending.NonceHash,
+                    RequesterSenderId = pending.RequesterSenderId,
+                    RequesterPrincipal = pending.RequesterPrincipal,
+                    ExpiresAtUnixMilliseconds = pending.ExpiresAtUnixMilliseconds,
+                    PromptId = pending.PromptId,
+                    Decision = pending.Decision
+                }).ToArray()
+            });
+        }
     }
 
     private async Task HandleOutputAsync(BindingOutput received)
@@ -1242,6 +1289,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     {
         if (!TeamsApprovalAction.IsBoundedOpaqueValue(created.CorrelationId, TeamsApprovalAction.MaxCorrelationLength)
             || created.NonceHash.Length != 64
+            || created.NonceHash.Any(static character => !char.IsAsciiHexDigit(character))
             || created.ExpiresAtUnixMilliseconds <= 0
             || string.IsNullOrWhiteSpace(created.CallId))
         {
@@ -1251,13 +1299,16 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         if (_pendingApprovals.Count >= ApprovalCapacity && !_pendingApprovals.ContainsKey(created.CorrelationId))
             throw new InvalidOperationException("The Teams approval state exceeds its retention limit.");
 
-        _pendingApprovals[created.CorrelationId] = new TeamsPendingApproval(
+        if (!_pendingApprovals.TryAdd(created.CorrelationId, new TeamsPendingApproval(
             created.CallId,
             created.CorrelationId,
             created.NonceHash,
             created.RequesterSenderId,
             created.RequesterPrincipal,
-            created.ExpiresAtUnixMilliseconds);
+            created.ExpiresAtUnixMilliseconds)))
+        {
+            throw new InvalidOperationException("The Teams approval state contains a duplicate correlation.");
+        }
     }
 
     private void ApplyApprovalCardDelivered(TeamsApprovalCardDelivered delivered)
