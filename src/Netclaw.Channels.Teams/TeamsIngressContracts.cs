@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Collections.Immutable;
+using System.Text;
 using Netclaw.Actors.Channels;
 using Netclaw.Configuration;
 
@@ -162,7 +163,8 @@ public sealed record TeamsAttachmentMetadata
 
 public sealed record TeamsReplyMetadata(
     string? ReplyToActivityId,
-    string? RootActivityId);
+    string? RootActivityId,
+    string? ServiceUrl = null);
 
 public sealed record TeamsInboundActivity
 {
@@ -218,22 +220,36 @@ public sealed record TeamsInboundActivity
 /// </summary>
 public sealed record TeamsOutboundDestination
 {
+    public const int MaxServiceUrlLength = 2_048;
+
     public TeamsOutboundDestination(
         string tenantId,
         string conversationId,
         TeamsConversationScope scope,
+        string serviceUrl,
+        string? rootActivityId = null,
         string? teamId = null,
         string? channelId = null,
         string? userId = null)
     {
-        TenantId = RequireValue(tenantId, nameof(tenantId));
-        ConversationId = RequireValue(conversationId, nameof(conversationId));
+        TenantId = RequireIdentifier(tenantId, nameof(tenantId));
+        ConversationId = RequireIdentifier(conversationId, nameof(conversationId));
         Scope = scope is TeamsConversationScope.Personal or TeamsConversationScope.Channel
             ? scope
             : throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unsupported Teams conversation scope.");
-        TeamId = teamId;
-        ChannelId = channelId;
-        UserId = userId;
+        ServiceUrl = RequireServiceUrl(serviceUrl);
+        RootActivityId = scope == TeamsConversationScope.Channel
+            ? RequireIdentifier(rootActivityId!, nameof(rootActivityId))
+            : null;
+        TeamId = scope == TeamsConversationScope.Channel
+            ? RequireIdentifier(teamId!, nameof(teamId))
+            : null;
+        ChannelId = scope == TeamsConversationScope.Channel
+            ? RequireIdentifier(channelId!, nameof(channelId))
+            : null;
+        UserId = scope == TeamsConversationScope.Personal
+            ? RequireIdentifier(userId!, nameof(userId))
+            : null;
     }
 
     public string TenantId { get; }
@@ -242,16 +258,49 @@ public sealed record TeamsOutboundDestination
 
     public TeamsConversationScope Scope { get; }
 
+    /// <summary>
+    /// The authenticated Teams service endpoint. This is runtime address data,
+    /// not a credential. Actors never log it or retain an SDK client.
+    /// </summary>
+    public string ServiceUrl { get; }
+
+    public string? RootActivityId { get; }
+
     public string? TeamId { get; }
 
     public string? ChannelId { get; }
 
     public string? UserId { get; }
 
-    private static string RequireValue(string value, string parameterName)
-        => string.IsNullOrWhiteSpace(value)
-            ? throw new ArgumentException("A nonblank value is required.", parameterName)
-            : value;
+    internal static bool IsValidServiceUrl(string? value)
+        => !string.IsNullOrWhiteSpace(value)
+           && Encoding.UTF8.GetByteCount(value) <= MaxServiceUrlLength
+           && Uri.TryCreate(value, UriKind.Absolute, out var uri)
+           && uri.Scheme == Uri.UriSchemeHttps
+           && string.IsNullOrEmpty(uri.UserInfo)
+           && string.IsNullOrEmpty(uri.Query)
+           && string.IsNullOrEmpty(uri.Fragment);
+
+    private static string RequireIdentifier(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || Encoding.UTF8.GetByteCount(value) > TeamsSessionIdentifierCodec.MaxRawIdentifierBytes)
+        {
+            throw new ArgumentException("A bounded nonblank value is required.", parameterName);
+        }
+
+        return value;
+    }
+
+    private static string RequireServiceUrl(string value)
+    {
+        if (!IsValidServiceUrl(value))
+        {
+            throw new ArgumentException("A bounded HTTPS service URL is required.", nameof(value));
+        }
+
+        return new Uri(value, UriKind.Absolute).AbsoluteUri;
+    }
 }
 
 public sealed record TeamsOutboundMessage
@@ -267,8 +316,13 @@ public sealed record TeamsOutboundMessage
     {
         Destination = destination ?? throw new ArgumentNullException(nameof(destination));
         Text = string.IsNullOrWhiteSpace(text) ? throw new ArgumentException("Text is required.", nameof(text)) : text;
-        ReplyToActivityId = replyToActivityId;
-        UpdateActivityId = updateActivityId;
+        ReplyToActivityId = RequireOptionalIdentifier(replyToActivityId, nameof(replyToActivityId));
+        UpdateActivityId = RequireOptionalIdentifier(updateActivityId, nameof(updateActivityId));
+        if (Destination.Scope == TeamsConversationScope.Channel
+            && !string.Equals(ReplyToActivityId, Destination.RootActivityId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Channel output must target the canonical root activity.", nameof(replyToActivityId));
+        }
         IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? throw new ArgumentException("Idempotency key is required.", nameof(idempotencyKey)) : idempotencyKey;
         CorrelationId = string.IsNullOrWhiteSpace(correlationId) ? throw new ArgumentException("Correlation ID is required.", nameof(correlationId)) : correlationId;
         Attachments = attachments.IsDefault ? [] : attachments;
@@ -287,4 +341,16 @@ public sealed record TeamsOutboundMessage
     public string CorrelationId { get; }
 
     public ImmutableArray<TeamsAttachmentMetadata> Attachments { get; }
+
+    private static string? RequireOptionalIdentifier(string? value, string parameterName)
+    {
+        if (value is not null
+            && (string.IsNullOrWhiteSpace(value)
+                || Encoding.UTF8.GetByteCount(value) > TeamsSessionIdentifierCodec.MaxRawIdentifierBytes))
+        {
+            throw new ArgumentException("An optional identifier must be bounded when present.", parameterName);
+        }
+
+        return value;
+    }
 }
