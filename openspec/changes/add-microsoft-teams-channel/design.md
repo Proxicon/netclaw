@@ -383,18 +383,21 @@ arguments, service URL, token, or SDK object. The actor creates 256-bit nonces
 and 192-bit correlation values with `RandomNumberGenerator`. It compares nonce
 hashes with `CryptographicOperations.FixedTimeEquals`.
 
-Each card has only `approve` and `deny` Action.Execute values. The daemon edge
-converts the authenticated SDK invoke into an SDK-free action record. The actor
-checks the canonical session, tenant-derived ACL, sender, captured card ID,
-correlation, nonce, action, expiry, and terminal state. It rejects all other
-values without feedback to the tool workflow.
+Each card has generic text and only `approve` and `deny` Action.Execute values.
+The payload carries bounded opaque correlation and nonce values only. The daemon
+edge converts the authenticated SDK invoke into an SDK-free action record. The
+actor checks the canonical session, tenant-derived ACL, sender, captured card
+ID, correlation, nonce, action, expiry, and terminal state. It rejects all
+other values without feedback to the tool workflow.
 
 The actor journals the terminal decision before it forwards one existing
 `ToolInteractionResponse`. A crash after that journal write can lose the
 continuation, but it cannot repeat the decision or claim exactly-once tool
 execution. A terminal card update has one update attempt and one reply fallback.
-Presentation failure does not reopen the decision. The actor retains at most
-128 approval states and lazily marks expiry during an action.
+Presentation failure does not reopen the decision. The binding snapshot holds
+the complete bounded approval state before journal compaction removes approval
+events. The actor retains at most 128 approval states and lazily marks expiry
+during an action.
 
 Older binaries do not recognize the new approval protobuf manifests. Operators
 must disable Teams instead of using binary rollback against a journal that

@@ -43,6 +43,7 @@ public sealed class TeamsInteractiveApprovalTests
             Assert.Equal("nonce_123", action.Nonce);
         });
         Assert.DoesNotContain(sensitiveArguments, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(request.ToolName.Value, serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("Authorization", serialized, StringComparison.Ordinal);
     }
 

@@ -28,10 +28,9 @@ public static class TeamsApprovalCardRenderer
         if (!TeamsApprovalAction.IsBoundedOpaqueValue(nonce, TeamsApprovalAction.MaxNonceLength))
             throw new ArgumentException("The approval nonce must be bounded and opaque.", nameof(nonce));
 
-        var toolName = Truncate(request.ToolName.Value, 128);
         var card = new TeamsApprovalCard(
             "Approval required",
-            $"Netclaw needs approval to use {toolName}.",
+            "Netclaw needs approval to continue.",
             [
                 new TeamsApprovalCardAction("Approve", "approve", correlationId, nonce),
                 new TeamsApprovalCardAction("Deny", "deny", correlationId, nonce)
