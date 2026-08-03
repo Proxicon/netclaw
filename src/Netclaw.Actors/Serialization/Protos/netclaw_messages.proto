@@ -327,6 +327,30 @@ message PendingApprovalPromptClearedProto {
   string call_id = 1;
 }
 
+// ── Teams Adaptive Card approval state ──
+// Fields are append-only. Older binaries do not understand these manifests and
+// must not run against a journal that contains them.
+
+message TeamsApprovalPendingCreatedProto {
+  string call_id = 1;
+  string correlation_id = 2;
+  string nonce_hash = 3;
+  optional string requester_sender_id = 4;
+  optional int32 requester_principal = 5;
+  int64 expires_at_unix_milliseconds = 6;
+}
+
+message TeamsApprovalCardDeliveredProto {
+  string correlation_id = 1;
+  string prompt_id = 2;
+}
+
+message TeamsApprovalConsumedProto {
+  string correlation_id = 1;
+  string decision = 2;
+  int64 consumed_at_unix_milliseconds = 3;
+}
+
 // ── Durable channel activity dispatch ──
 
 message DurableActivityDispatchReservedProto {

@@ -60,3 +60,46 @@ public sealed record PendingApprovalPromptCleared : INetclawSerializableMessage
 {
     public string CallId { get; init; } = string.Empty;
 }
+
+/// <summary>
+/// Journaled by the Teams binding before it sends an approval card. The nonce
+/// hash permits restart-safe validation without retaining the bearer value.
+/// </summary>
+public sealed record TeamsApprovalPendingCreated : INetclawSerializableMessage
+{
+    public string CallId { get; init; } = string.Empty;
+
+    public string CorrelationId { get; init; } = string.Empty;
+
+    public string NonceHash { get; init; } = string.Empty;
+
+    public string? RequesterSenderId { get; init; }
+
+    public PrincipalClassification? RequesterPrincipal { get; init; }
+
+    public long ExpiresAtUnixMilliseconds { get; init; }
+}
+
+/// <summary>
+/// Journaled after Teams creates the card. The actor uses this locator for a
+/// terminal update. It never trusts an invoke-supplied message identifier.
+/// </summary>
+public sealed record TeamsApprovalCardDelivered : INetclawSerializableMessage
+{
+    public string CorrelationId { get; init; } = string.Empty;
+
+    public string PromptId { get; init; } = string.Empty;
+}
+
+/// <summary>
+/// Journaled before the binding forwards an approval decision to the existing
+/// session workflow. A later card update cannot reopen this terminal state.
+/// </summary>
+public sealed record TeamsApprovalConsumed : INetclawSerializableMessage
+{
+    public string CorrelationId { get; init; } = string.Empty;
+
+    public string Decision { get; init; } = string.Empty;
+
+    public long ConsumedAtUnixMilliseconds { get; init; }
+}

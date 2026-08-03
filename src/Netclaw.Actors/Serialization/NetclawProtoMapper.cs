@@ -45,6 +45,9 @@ internal static class NetclawProtoMapper
         CursorAdvanced v => ToProto(v),
         PendingApprovalPromptTracked v => ToProto(v),
         PendingApprovalPromptCleared v => ToProto(v),
+        TeamsApprovalPendingCreated v => ToProto(v),
+        TeamsApprovalCardDelivered v => ToProto(v),
+        TeamsApprovalConsumed v => ToProto(v),
         DurableActivityDispatchReserved v => ToProto(v),
         DurableActivityDispatchReleased v => ToProto(v),
         DurableActivityDispatchSnapshot v => ToProto(v),
@@ -780,6 +783,60 @@ internal static class NetclawProtoMapper
     internal static PendingApprovalPromptCleared FromProto(Proto.PendingApprovalPromptClearedProto proto) => new()
     {
         CallId = proto.CallId
+    };
+
+    internal static Proto.TeamsApprovalPendingCreatedProto ToProto(TeamsApprovalPendingCreated evt)
+    {
+        var proto = new Proto.TeamsApprovalPendingCreatedProto
+        {
+            CallId = evt.CallId,
+            CorrelationId = evt.CorrelationId,
+            NonceHash = evt.NonceHash,
+            ExpiresAtUnixMilliseconds = evt.ExpiresAtUnixMilliseconds
+        };
+        if (evt.RequesterSenderId is not null)
+            proto.RequesterSenderId = evt.RequesterSenderId;
+        if (evt.RequesterPrincipal is not null)
+            proto.RequesterPrincipal = (int)evt.RequesterPrincipal.Value;
+        return proto;
+    }
+
+    internal static TeamsApprovalPendingCreated FromProto(Proto.TeamsApprovalPendingCreatedProto proto) => new()
+    {
+        CallId = proto.CallId,
+        CorrelationId = proto.CorrelationId,
+        NonceHash = proto.NonceHash,
+        RequesterSenderId = proto.HasRequesterSenderId ? proto.RequesterSenderId : null,
+        RequesterPrincipal = proto.HasRequesterPrincipal
+            ? (Configuration.PrincipalClassification)proto.RequesterPrincipal
+            : null,
+        ExpiresAtUnixMilliseconds = proto.ExpiresAtUnixMilliseconds
+    };
+
+    internal static Proto.TeamsApprovalCardDeliveredProto ToProto(TeamsApprovalCardDelivered evt) => new()
+    {
+        CorrelationId = evt.CorrelationId,
+        PromptId = evt.PromptId
+    };
+
+    internal static TeamsApprovalCardDelivered FromProto(Proto.TeamsApprovalCardDeliveredProto proto) => new()
+    {
+        CorrelationId = proto.CorrelationId,
+        PromptId = proto.PromptId
+    };
+
+    internal static Proto.TeamsApprovalConsumedProto ToProto(TeamsApprovalConsumed evt) => new()
+    {
+        CorrelationId = evt.CorrelationId,
+        Decision = evt.Decision,
+        ConsumedAtUnixMilliseconds = evt.ConsumedAtUnixMilliseconds
+    };
+
+    internal static TeamsApprovalConsumed FromProto(Proto.TeamsApprovalConsumedProto proto) => new()
+    {
+        CorrelationId = proto.CorrelationId,
+        Decision = proto.Decision,
+        ConsumedAtUnixMilliseconds = proto.ConsumedAtUnixMilliseconds
     };
 
     internal static Proto.DurableActivityDispatchReservedProto ToProto(DurableActivityDispatchReserved evt)

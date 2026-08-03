@@ -46,6 +46,9 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
     private const string SessionBackgroundJobsReapedManifest = "sbjr-v1";
     private const string PendingApprovalPromptTrackedManifest = "papt-v1";
     private const string PendingApprovalPromptClearedManifest = "papc-v1";
+    private const string TeamsApprovalPendingCreatedManifest = "tapc-v1";
+    private const string TeamsApprovalCardDeliveredManifest = "tacd-v1";
+    private const string TeamsApprovalConsumedManifest = "taco-v1";
     private const string DurableActivityDispatchReservedManifest = "dadr-v1";
     private const string DurableActivityDispatchReleasedManifest = "dadl-v1";
     private const string DurableActivityDispatchSnapshotManifest = "dads-v1";
@@ -79,6 +82,9 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
         [typeof(SessionBackgroundJobsReaped)] = SessionBackgroundJobsReapedManifest,
         [typeof(Channels.PendingApprovalPromptTracked)] = PendingApprovalPromptTrackedManifest,
         [typeof(Channels.PendingApprovalPromptCleared)] = PendingApprovalPromptClearedManifest,
+        [typeof(Channels.TeamsApprovalPendingCreated)] = TeamsApprovalPendingCreatedManifest,
+        [typeof(Channels.TeamsApprovalCardDelivered)] = TeamsApprovalCardDeliveredManifest,
+        [typeof(Channels.TeamsApprovalConsumed)] = TeamsApprovalConsumedManifest,
         [typeof(Channels.DurableActivityDispatchReserved)] = DurableActivityDispatchReservedManifest,
         [typeof(Channels.DurableActivityDispatchReleased)] = DurableActivityDispatchReleasedManifest,
         [typeof(Channels.DurableActivityDispatchSnapshot)] = DurableActivityDispatchSnapshotManifest,
@@ -160,6 +166,12 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
                 Proto.PendingApprovalPromptTrackedProto.Parser.ParseFrom(bytes)),
             PendingApprovalPromptClearedManifest => NetclawProtoMapper.FromProto(
                 Proto.PendingApprovalPromptClearedProto.Parser.ParseFrom(bytes)),
+            TeamsApprovalPendingCreatedManifest => NetclawProtoMapper.FromProto(
+                Proto.TeamsApprovalPendingCreatedProto.Parser.ParseFrom(bytes)),
+            TeamsApprovalCardDeliveredManifest => NetclawProtoMapper.FromProto(
+                Proto.TeamsApprovalCardDeliveredProto.Parser.ParseFrom(bytes)),
+            TeamsApprovalConsumedManifest => NetclawProtoMapper.FromProto(
+                Proto.TeamsApprovalConsumedProto.Parser.ParseFrom(bytes)),
             DurableActivityDispatchReservedManifest => NetclawProtoMapper.FromProto(
                 Proto.DurableActivityDispatchReservedProto.Parser.ParseFrom(bytes)),
             DurableActivityDispatchReleasedManifest => NetclawProtoMapper.FromProto(
