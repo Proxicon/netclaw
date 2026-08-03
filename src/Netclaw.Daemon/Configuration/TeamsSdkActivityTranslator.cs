@@ -22,6 +22,9 @@ namespace Netclaw.Daemon.Configuration;
 /// </summary>
 internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, TimeProvider timeProvider)
 {
+    private const int MaxAttachmentContentTypeLength = 255;
+    private const int MaxAttachmentContentUrlLength = 2_048;
+
     public TeamsTranslationResult Translate(IActivity activity, string? authenticatedTenantId)
     {
         ArgumentNullException.ThrowIfNull(activity);
@@ -144,22 +147,16 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         if (scope is null)
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, TeamsIngressActivityKind.Message, "unsupported_conversation_scope");
 
-        // Attachment retrieval is deliberately deferred to PR 7. Do not let
-        // an attachment-bearing channel post reach the model as its caption.
-        if (scope == TeamsConversationScope.Channel && activity.Attachments is { Count: > 0 })
-        {
-            return TeamsTranslationResult.Rejected(
-                TeamsTranslationDisposition.RejectedMalformed,
-                TeamsIngressActivityKind.Message,
-                "graph_backed_attachment_unsupported");
-        }
-
         string? rootActivityId = null;
         if (scope == TeamsConversationScope.Channel
             && !TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(activity.Conversation.Id, out rootActivityId))
         {
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "invalid_channel_root_identity");
         }
+
+        var attachmentFailure = RejectUnsupportedAttachments(activity.Attachments);
+        if (attachmentFailure is not null)
+            return attachmentFailure;
 
         var trust = CreateTrust(activity, authenticatedTenantId, scope.Value);
         var mentions = TranslateMentions(activity.Entities);
@@ -268,6 +265,36 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, kind, "unsupported_conversation_scope");
         return false;
     }
+
+    private static TeamsTranslationResult? RejectUnsupportedAttachments(IList<Attachment>? attachments)
+    {
+        if (attachments is null || attachments.Count == 0)
+            return null;
+
+        var reasonCode = "unsupported_attachment_shape";
+        foreach (var attachment in attachments)
+        {
+            if (attachment is null)
+                continue;
+
+            var classification = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+                GetBoundedAttachmentMetadata(attachment.ContentType?.Value, MaxAttachmentContentTypeLength),
+                !string.IsNullOrWhiteSpace(attachment.Name),
+                GetBoundedAttachmentMetadata(attachment.ContentUrl, MaxAttachmentContentUrlLength),
+                attachment.Content is not null,
+                !string.IsNullOrWhiteSpace(attachment.ContentUrl)));
+            if (classification.Classification == TeamsAttachmentClassification.GraphBackedUnsupported)
+                reasonCode = classification.ReasonCode!;
+        }
+
+        return TeamsTranslationResult.Rejected(
+            TeamsTranslationDisposition.RejectedMalformed,
+            TeamsIngressActivityKind.Message,
+            reasonCode);
+    }
+
+    private static string? GetBoundedAttachmentMetadata(string? value, int maximumLength)
+        => value is { Length: > 0 } && value.Length <= maximumLength ? value : null;
 
     private static ImmutableArray<TeamsMention> TranslateMentions(IList<IEntity>? entities)
         => entities?.OfType<MentionEntity>()

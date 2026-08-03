@@ -1216,6 +1216,130 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_rejects_personal_messages_with_graph_backed_attachment_references_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            ContentUrl = "https://graph.microsoft.com/v1.0/me/drive/items/1"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
+    }
+
+    [Fact]
+    public void Translator_rejects_messages_with_conflicting_attachment_representations_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Text,
+            Content = "dGVzdA==",
+            ContentUrl = "https://example.test/file.txt"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+    }
+
+    [Fact]
+    public void Translator_rejects_inline_attachment_content_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Text,
+            Content = "untrusted inline attachment"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_rejects_non_graph_attachment_urls_without_a_proven_download_shape()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Text,
+            ContentUrl = "https://example.test/file.txt"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_rejects_null_attachment_entries_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = new List<TeamsAttachment> { null! };
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Attachment_classifier_rejects_known_file_download_info_as_graph_backed()
+    {
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+            ContentType: "application/vnd.microsoft.teams.file.download.info",
+            HasName: false,
+            ContentUrl: null,
+            HasContent: true,
+            HasContentUrl: false));
+
+        Assert.Equal(TeamsAttachmentClassification.GraphBackedUnsupported, result.Classification);
+        Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
+    }
+
+    [Fact]
+    public void Translator_rejects_oversized_attachment_metadata_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Text,
+            Name = new string('a', 16_384),
+            Content = "untrusted inline attachment"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
     public void Translator_does_not_treat_a_malformed_mention_entity_as_a_bot_mention()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
