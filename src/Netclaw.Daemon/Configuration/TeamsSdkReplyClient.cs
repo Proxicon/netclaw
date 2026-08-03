@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Net;
+using System.Text.Json;
 using Microsoft.Teams.Api;
 using Microsoft.Teams.Api.Activities;
 using Microsoft.Teams.Apps;
@@ -85,6 +86,42 @@ internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore c
         {
             ReplyToId = message.ReplyToActivityId
         };
+        if (message.ApprovalCard is { } approvalCard)
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["$schema"] = TeamsApprovalCard.Schema,
+                ["type"] = "AdaptiveCard",
+                ["version"] = TeamsApprovalCard.Version,
+                ["body"] = new object?[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "TextBlock", ["text"] = approvalCard.Title,
+                        ["weight"] = "Bolder", ["wrap"] = true
+                    },
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "TextBlock", ["text"] = approvalCard.Body, ["wrap"] = true
+                    }
+                },
+                ["actions"] = approvalCard.Actions.Select(cardAction => (object?)new Dictionary<string, object?>
+                {
+                    ["type"] = "Action.Execute",
+                    ["title"] = cardAction.Title,
+                    ["verb"] = "netclaw-approval",
+                    ["data"] = new Dictionary<string, object?>
+                    {
+                        ["correlation"] = cardAction.CorrelationId,
+                        ["nonce"] = cardAction.Nonce,
+                        ["action"] = cardAction.Action
+                    }
+                }).ToArray()
+            };
+            var card = Microsoft.Teams.Cards.AdaptiveCard.Deserialize(JsonSerializer.Serialize(payload))
+                ?? throw new InvalidOperationException("The Teams approval card did not deserialize.");
+            activity.Attachments = [new Attachment(card)];
+        }
         if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
         {
             var update = await context.Api.Conversations.Activities.UpdateAsync(
@@ -127,6 +164,25 @@ internal sealed class TeamsSdkConversationContextStore
         }
     }
 
+    public void Capture(TeamsApprovalAction action, IContext<IActivity> context)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        ArgumentNullException.ThrowIfNull(context);
+        if (!TryCreateDestination(action, out var destination)
+            || !MatchesAction(action, context.Activity))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            var key = TeamsSdkContextKey.Create(destination);
+            if (_contexts.Count >= 1_024 && !_contexts.ContainsKey(key))
+                _contexts.Remove(_contexts.Keys.First());
+            _contexts[key] = context;
+        }
+    }
+
     public bool TryGet(TeamsOutboundDestination destination, out IContext<IActivity> context)
     {
         lock (_gate)
@@ -155,10 +211,37 @@ internal sealed class TeamsSdkConversationContextStore
         }
     }
 
+    private static bool TryCreateDestination(TeamsApprovalAction action, out TeamsOutboundDestination destination)
+    {
+        destination = null!;
+        try
+        {
+            destination = new TeamsOutboundDestination(
+                action.Trust.TenantId,
+                action.Trust.ConversationId,
+                action.Trust.Scope,
+                action.ServiceUrl,
+                action.RootActivityId,
+                action.TeamId,
+                action.ChannelId,
+                action.Trust.Scope == TeamsConversationScope.Personal ? action.Trust.SenderId : null);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
     private static bool MatchesActivity(TeamsInboundActivity activity, IActivity sdkActivity) =>
         string.Equals(activity.Trust.ActivityId, sdkActivity.Id, StringComparison.Ordinal)
         && string.Equals(activity.Trust.ConversationId, sdkActivity.Conversation?.Id, StringComparison.Ordinal)
         && string.Equals(activity.Reply?.ServiceUrl, sdkActivity.ServiceUrl, StringComparison.Ordinal);
+
+    private static bool MatchesAction(TeamsApprovalAction action, IActivity sdkActivity) =>
+        string.Equals(action.Trust.ActivityId, sdkActivity.Id, StringComparison.Ordinal)
+        && string.Equals(action.Trust.ConversationId, sdkActivity.Conversation?.Id, StringComparison.Ordinal)
+        && string.Equals(action.ServiceUrl, sdkActivity.ServiceUrl, StringComparison.Ordinal);
 
     private sealed record TeamsSdkContextKey(
         string TenantId,

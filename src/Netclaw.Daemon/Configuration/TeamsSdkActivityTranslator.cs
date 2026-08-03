@@ -4,12 +4,15 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Collections.Immutable;
+using System.Text.Json;
 using Microsoft.Teams.Api;
 using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.Activities.Invokes;
 using Microsoft.Teams.Api.Entities;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
+using MessageActivity = Microsoft.Teams.Api.Activities.MessageActivity;
 
 namespace Netclaw.Daemon.Configuration;
 
@@ -30,9 +33,72 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             ConversationUpdateActivity => TeamsTranslationResult.Ignored(
                 TeamsIngressActivityKind.ConversationUpdate,
                 "conversation_update_recording_not_implemented"),
+            AdaptiveCards.ActionActivity action => TranslateApprovalAction(action, authenticatedTenantId),
             MessageActivity message => TranslateMessage(message, authenticatedTenantId),
             _ => TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Unknown, "unsupported_activity_type")
         };
+    }
+
+    private TeamsTranslationResult TranslateApprovalAction(
+        AdaptiveCards.ActionActivity activity,
+        string? authenticatedTenantId)
+    {
+        if (!TryValidateCommon(activity, authenticatedTenantId, TeamsIngressActivityKind.AdaptiveCardAction, out var scope, out var failure))
+            return failure!;
+        var invokeAction = activity.Value?.Action;
+        if (invokeAction is null || !invokeAction.Type.IsExecute)
+        {
+            return TeamsTranslationResult.Rejected(
+                TeamsTranslationDisposition.RejectedMalformed,
+                TeamsIngressActivityKind.AdaptiveCardAction,
+                "unsupported_card_action_type");
+        }
+
+        var data = invokeAction.Data;
+        if (!TryGetOpaqueValue(data, "correlation", TeamsApprovalAction.MaxCorrelationLength, out var correlation)
+            || !TryGetOpaqueValue(data, "nonce", TeamsApprovalAction.MaxNonceLength, out var nonce)
+            || !TryGetOpaqueValue(data, "action", 16, out var action)
+            || !TeamsApprovalAction.IsSupportedAction(action)
+            || !TeamsApprovalAction.IsBoundedOpaqueValue(correlation, TeamsApprovalAction.MaxCorrelationLength)
+            || !TeamsApprovalAction.IsBoundedOpaqueValue(nonce, TeamsApprovalAction.MaxNonceLength))
+        {
+            return TeamsTranslationResult.Rejected(
+                TeamsTranslationDisposition.RejectedMalformed,
+                TeamsIngressActivityKind.AdaptiveCardAction,
+                "invalid_approval_action_data");
+        }
+
+        string? rootActivityId = null;
+        if (scope == TeamsConversationScope.Channel
+            && !TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(activity.Conversation!.Id, out rootActivityId))
+        {
+            return TeamsTranslationResult.Rejected(
+                TeamsTranslationDisposition.RejectedMalformed,
+                TeamsIngressActivityKind.AdaptiveCardAction,
+                "invalid_channel_root_identity");
+        }
+
+        var serviceUrl = activity.ServiceUrl;
+        if (string.IsNullOrWhiteSpace(activity.ReplyToId)
+            || !TeamsSessionIdentifierCodec.IsValidActivityIdentifier(activity.ReplyToId)
+            || !TeamsOutboundDestination.IsValidServiceUrl(serviceUrl))
+        {
+            return TeamsTranslationResult.Rejected(
+                TeamsTranslationDisposition.RejectedMalformed,
+                TeamsIngressActivityKind.AdaptiveCardAction,
+                "invalid_approval_action_context");
+        }
+
+        return TeamsTranslationResult.Accepted(new TeamsApprovalAction(
+            CreateTrust(activity, authenticatedTenantId!, scope),
+            correlation,
+            nonce,
+            action,
+            rootActivityId,
+            activity.ChannelData?.Team?.Id,
+            activity.ChannelData?.Channel?.Id,
+            activity.ReplyToId,
+            serviceUrl!));
     }
 
     private TeamsTranslationResult TranslateMessage(MessageActivity activity, string? authenticatedTenantId)
@@ -218,4 +284,23 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
            && !string.IsNullOrWhiteSpace(recipientId)
            && string.Equals(mention.MentionedId, recipientId, StringComparison.Ordinal)
            && string.Equals(mention.MentionedId, $"28:{configuredBotId}", StringComparison.Ordinal);
+
+    private static bool TryGetOpaqueValue(
+        IDictionary<string, object>? data,
+        string key,
+        int maximumLength,
+        out string value)
+    {
+        value = string.Empty;
+        if (data is null || !data.TryGetValue(key, out var candidate))
+            return false;
+
+        value = candidate switch
+        {
+            string text => text,
+            JsonElement { ValueKind: JsonValueKind.String } json => json.GetString() ?? string.Empty,
+            _ => string.Empty
+        };
+        return value.Length <= maximumLength;
+    }
 }

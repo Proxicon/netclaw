@@ -16,6 +16,7 @@ using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Serialization;
 using Netclaw.Actors.Sessions;
+using Netclaw.Configuration;
 using Netclaw.Tools;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
@@ -1079,5 +1080,37 @@ public sealed class SerializationRoundTripTests : TestKit
         Assert.Empty(result.Anchors);
         Assert.Empty(result.Proposals);
         Assert.Equal(0L, result.TimestampMs);
+    }
+
+    [Fact]
+    public void Teams_approval_pending_state_round_trips_without_a_raw_nonce()
+    {
+        var original = new TeamsApprovalPendingCreated
+        {
+            CallId = "call-1",
+            CorrelationId = "correlation_123",
+            NonceHash = new string('A', 64),
+            RequesterSenderId = "user-1",
+            RequesterPrincipal = PrincipalClassification.TrustedInternal,
+            ExpiresAtUnixMilliseconds = 1_800_000_000_000
+        };
+
+        var result = RoundTrip(original);
+
+        Assert.Equal(original, result);
+        Assert.DoesNotContain("nonce_", Encoding.UTF8.GetString(Serialize(original)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Teams_approval_terminal_state_round_trips()
+    {
+        var original = new TeamsApprovalConsumed
+        {
+            CorrelationId = "correlation_123",
+            Decision = "approve",
+            ConsumedAtUnixMilliseconds = 1_800_000_000_001
+        };
+
+        Assert.Equal(original, RoundTrip(original));
     }
 }
