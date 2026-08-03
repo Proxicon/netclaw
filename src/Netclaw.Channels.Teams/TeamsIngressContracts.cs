@@ -14,6 +14,7 @@ public enum TeamsIngressActivityKind
 {
     Unknown,
     Message,
+    AdaptiveCardAction,
     ConversationUpdate,
     MessageUpdate,
     MessageDelete
@@ -42,10 +43,14 @@ public sealed record TeamsTranslationResult(
     TeamsTranslationDisposition Disposition,
     string ReasonCode,
     TeamsIngressActivityKind ActivityKind,
-    TeamsInboundActivity? Activity = null)
+    TeamsInboundActivity? Activity = null,
+    TeamsApprovalAction? ApprovalAction = null)
 {
     public static TeamsTranslationResult Accepted(TeamsInboundActivity activity)
         => new(TeamsTranslationDisposition.Accepted, "accepted", activity.Kind, activity);
+
+    public static TeamsTranslationResult Accepted(TeamsApprovalAction action)
+        => new(TeamsTranslationDisposition.Accepted, "accepted", TeamsIngressActivityKind.AdaptiveCardAction, ApprovalAction: action);
 
     public static TeamsTranslationResult Ignored(TeamsIngressActivityKind kind, string reasonCode)
         => new(TeamsTranslationDisposition.Ignored, reasonCode, kind);
@@ -185,6 +190,7 @@ public sealed record TeamsInboundActivity
         IsMentioned = isMentioned;
         Attachments = attachments.IsDefault ? [] : attachments;
         Kind = kind is TeamsIngressActivityKind.Message
+            or TeamsIngressActivityKind.AdaptiveCardAction
             or TeamsIngressActivityKind.MessageUpdate
             or TeamsIngressActivityKind.MessageDelete
             ? kind
@@ -212,6 +218,56 @@ public sealed record TeamsInboundActivity
 
     public ImmutableArray<TeamsMention> Mentions { get; }
 }
+
+/// <summary>
+/// SDK-free card action. The daemon creates this record only after the Teams
+/// SDK authenticates the invoke and validates its bounded action data.
+/// </summary>
+public sealed record TeamsApprovalAction(
+    TeamsIngressTrustContext Trust,
+    string CorrelationId,
+    string Nonce,
+    string Action,
+    string? RootActivityId,
+    string? TeamId,
+    string? ChannelId,
+    string? PromptActivityId,
+    string ServiceUrl)
+{
+    public const int MaxCorrelationLength = 128;
+    public const int MaxNonceLength = 128;
+
+    public bool IsChannel => Trust.Scope == TeamsConversationScope.Channel;
+
+    public static bool IsSupportedAction(string? action) =>
+        string.Equals(action, "approve", StringComparison.Ordinal)
+        || string.Equals(action, "deny", StringComparison.Ordinal);
+
+    public static bool IsBoundedOpaqueValue(string? value, int maximumLength) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Length <= maximumLength
+        && value.All(static character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
+}
+
+/// <summary>
+/// SDK-free Adaptive Card output. It contains only the opaque approval values
+/// needed for an Action.Execute callback and safe display text.
+/// </summary>
+public sealed record TeamsApprovalCard(
+    string Title,
+    string Body,
+    IReadOnlyList<TeamsApprovalCardAction> Actions)
+{
+    public const string Schema = "http://adaptivecards.io/schemas/adaptive-card.json";
+    public const string Version = "1.5";
+    public const int MaxSerializedBytes = 80 * 1024;
+}
+
+public sealed record TeamsApprovalCardAction(
+    string Title,
+    string Action,
+    string CorrelationId,
+    string Nonce);
 
 /// <summary>
 /// SDK-free destination captured only after a Teams activity passes the future
@@ -272,7 +328,7 @@ public sealed record TeamsOutboundDestination
 
     public string? UserId { get; }
 
-    internal static bool IsValidServiceUrl(string? value)
+    public static bool IsValidServiceUrl(string? value)
         => !string.IsNullOrWhiteSpace(value)
            && Encoding.UTF8.GetByteCount(value) <= MaxServiceUrlLength
            && Uri.TryCreate(value, UriKind.Absolute, out var uri)
@@ -312,7 +368,8 @@ public sealed record TeamsOutboundMessage
         string correlationId,
         string? replyToActivityId = null,
         string? updateActivityId = null,
-        ImmutableArray<TeamsAttachmentMetadata> attachments = default)
+        ImmutableArray<TeamsAttachmentMetadata> attachments = default,
+        TeamsApprovalCard? approvalCard = null)
     {
         Destination = destination ?? throw new ArgumentNullException(nameof(destination));
         Text = string.IsNullOrWhiteSpace(text) ? throw new ArgumentException("Text is required.", nameof(text)) : text;
@@ -326,6 +383,7 @@ public sealed record TeamsOutboundMessage
         IdempotencyKey = string.IsNullOrWhiteSpace(idempotencyKey) ? throw new ArgumentException("Idempotency key is required.", nameof(idempotencyKey)) : idempotencyKey;
         CorrelationId = string.IsNullOrWhiteSpace(correlationId) ? throw new ArgumentException("Correlation ID is required.", nameof(correlationId)) : correlationId;
         Attachments = attachments.IsDefault ? [] : attachments;
+        ApprovalCard = approvalCard;
     }
 
     public TeamsOutboundDestination Destination { get; }
@@ -341,6 +399,8 @@ public sealed record TeamsOutboundMessage
     public string CorrelationId { get; }
 
     public ImmutableArray<TeamsAttachmentMetadata> Attachments { get; }
+
+    public TeamsApprovalCard? ApprovalCard { get; }
 
     private static string? RequireOptionalIdentifier(string? value, string parameterName)
     {

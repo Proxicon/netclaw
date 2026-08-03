@@ -16,7 +16,23 @@ namespace Netclaw.Channels.Teams;
 public interface ITeamsConversationIngressSink
 {
     ValueTask<TeamsIngressSinkResult> RouteAsync(TeamsInboundActivity activity, CancellationToken cancellationToken);
+
+    ValueTask<TeamsApprovalActionResult> RouteApprovalAsync(TeamsApprovalAction action, CancellationToken cancellationToken)
+        => ValueTask.FromResult(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
 }
+
+public enum TeamsApprovalActionDisposition
+{
+    Accepted,
+    Rejected,
+    Expired,
+    AlreadyProcessed,
+    Unavailable,
+    Failed,
+    Cancelled
+}
+
+public sealed record TeamsApprovalActionResult(TeamsApprovalActionDisposition Disposition);
 
 public enum TeamsIngressSinkResult
 {

@@ -16,6 +16,7 @@ using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Serialization;
 using Netclaw.Actors.Sessions;
+using Netclaw.Configuration;
 using Netclaw.Tools;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
@@ -583,6 +584,33 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void Durable_activity_dispatch_snapshot_round_trips_teams_approval_state_without_a_raw_nonce()
+    {
+        var snapshot = new DurableActivityDispatchSnapshot([])
+        {
+            TeamsApprovals =
+            [
+                new TeamsApprovalSnapshotEntry
+                {
+                    CallId = "call-1",
+                    CorrelationId = "correlation_123",
+                    NonceHash = new string('A', 64),
+                    RequesterSenderId = "user-1",
+                    RequesterPrincipal = PrincipalClassification.TrustedInternal,
+                    ExpiresAtUnixMilliseconds = 1_800_000_000_000,
+                    PromptId = "prompt-1",
+                    Decision = "approve"
+                }
+            ]
+        };
+
+        var result = RoundTrip(snapshot);
+
+        Assert.Equal(snapshot.TeamsApprovals, result.TeamsApprovals);
+        Assert.DoesNotContain("nonce_", Encoding.UTF8.GetString(Serialize(snapshot)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Durable_activity_dispatch_default_payloads_deserialize_without_raw_activity_content()
     {
         const string activityId = "opaque-活動-id";
@@ -599,6 +627,8 @@ public sealed class SerializationRoundTripTests : TestKit
         Assert.Null(reserved.EvictedActivityFingerprint);
         Assert.Empty(snapshot.ActivityFingerprints);
         Assert.Empty(snapshotWithUnknownField.ActivityFingerprints);
+        Assert.Empty(snapshot.TeamsApprovals);
+        Assert.Empty(snapshotWithUnknownField.TeamsApprovals);
         Assert.DoesNotContain(activityId, Encoding.UTF8.GetString(serialized), StringComparison.Ordinal);
     }
 
@@ -1079,5 +1109,37 @@ public sealed class SerializationRoundTripTests : TestKit
         Assert.Empty(result.Anchors);
         Assert.Empty(result.Proposals);
         Assert.Equal(0L, result.TimestampMs);
+    }
+
+    [Fact]
+    public void Teams_approval_pending_state_round_trips_without_a_raw_nonce()
+    {
+        var original = new TeamsApprovalPendingCreated
+        {
+            CallId = "call-1",
+            CorrelationId = "correlation_123",
+            NonceHash = new string('A', 64),
+            RequesterSenderId = "user-1",
+            RequesterPrincipal = PrincipalClassification.TrustedInternal,
+            ExpiresAtUnixMilliseconds = 1_800_000_000_000
+        };
+
+        var result = RoundTrip(original);
+
+        Assert.Equal(original, result);
+        Assert.DoesNotContain("nonce_", Encoding.UTF8.GetString(Serialize(original)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Teams_approval_terminal_state_round_trips()
+    {
+        var original = new TeamsApprovalConsumed
+        {
+            CorrelationId = "correlation_123",
+            Decision = "approve",
+            ConsumedAtUnixMilliseconds = 1_800_000_000_001
+        };
+
+        Assert.Equal(original, RoundTrip(original));
     }
 }

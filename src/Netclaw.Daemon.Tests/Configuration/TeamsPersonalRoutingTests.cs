@@ -597,6 +597,66 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         Assert.Equal("current output", Assert.Single(replyClient.Messages).Text);
     }
 
+    [Fact]
+    public async Task A_pending_approval_survives_a_binding_restart_and_continues_once()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-restart");
+        var dependencies = CreateDependencies(pipeline, replyClient: replyClient);
+        var first = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-approval-first");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity("activity-approval", "tenant-a", "conversation-approval-restart"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(new ToolInteractionRequest
+        {
+            SessionId = sessionId,
+            Kind = "approval",
+            CallId = new ToolCallId("call-approval"),
+            ToolName = new ToolName("safe_tool"),
+            DisplayText = "Approve safe tool use.",
+            Options =
+            [
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, "Approve"),
+                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, "Deny")
+            ],
+            RequesterSenderId = new SenderId("user-a"),
+            RequesterPrincipal = PrincipalClassification.TrustedInternal
+        });
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var card = replyClient.Messages[0].ApprovalCard;
+        Assert.NotNull(card);
+        var approve = Assert.Single(card!.Actions, action => action.Action == "approve");
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-approval-second");
+        var action = CreateApprovalAction(
+            "tenant-a",
+            "conversation-approval-restart",
+            approve.CorrelationId,
+            approve.Nonce,
+            "synthetic-activity");
+        var accepted = await recovered.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(action, TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Accepted, accepted.Disposition);
+        await AwaitAssertAsync(() => Assert.Single(pipeline.Feedback), cancellationToken: TestContext.Current.CancellationToken);
+        var feedback = Assert.IsType<ToolInteractionResponse>(pipeline.Feedback[0]);
+        Assert.Equal(ApprovalOptionKeys.ApproveOnceKey, feedback.SelectedKey);
+
+        var duplicate = await recovered.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(action, TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(TeamsApprovalActionDisposition.AlreadyProcessed, duplicate.Disposition);
+        Assert.Single(pipeline.Feedback);
+    }
+
     private ISessionPipeline CreatePipeline(IActorRef sessionManager)
     {
         var registry = ActorRegistry.For(Sys);
@@ -695,6 +755,32 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         teamId: "team-a",
         channelId: "channel-a");
 
+    private static TeamsApprovalAction CreateApprovalAction(
+        string tenantId,
+        string conversationId,
+        string correlationId,
+        string nonce,
+        string promptActivityId) => new(
+        new TeamsIngressTrustContext(
+            TrustAudience.Public,
+            PrincipalClassification.UntrustedExternal,
+            TrustBoundary.Public,
+            new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+            "user-a",
+            tenantId,
+            conversationId,
+            TeamsConversationScope.Personal,
+            "invoke-approval",
+            TimeProvider.System.GetUtcNow()),
+        correlationId,
+        nonce,
+        "approve",
+        null,
+        null,
+        null,
+        promptActivityId,
+        "https://service.invalid/");
+
     private static Task<TeamsBindingRouteResult> RouteAsync(
         IActorRef actor,
         TeamsInboundActivity activity) => actor.Ask<TeamsBindingRouteResult>(
@@ -730,6 +816,30 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
     private sealed class DiscardActor : ReceiveActor
     {
         public static Props Create() => Props.Create(() => new DiscardActor());
+    }
+
+    private sealed class ApprovalRecordingPipeline(ISessionPipeline fallback) : ISessionPipeline
+    {
+        public List<IWithSessionId> Feedback { get; } = [];
+
+        public Task<MaterializedSession> CreateAsync(
+            SessionId sessionId,
+            SessionPipelineOptions options,
+            Akka.Streams.IMaterializer? materializer = null,
+            CancellationToken cancellationToken = default) =>
+            fallback.CreateAsync(sessionId, options, materializer, cancellationToken);
+
+        public Task SendFeedbackAsync(IWithSessionId feedback, CancellationToken ct = default)
+        {
+            Feedback.Add(feedback);
+            return Task.CompletedTask;
+        }
+
+        public Task<ISessionResponse> SendFeedbackAndWaitAsync(IWithSessionId feedback, CancellationToken ct = default)
+        {
+            Feedback.Add(feedback);
+            return Task.FromResult<ISessionResponse>(CommandAck.For(feedback.SessionId));
+        }
     }
 
     private sealed class FailThenDelegatePipeline(ISessionPipeline fallback) : ISessionPipeline

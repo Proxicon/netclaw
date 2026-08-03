@@ -84,10 +84,20 @@ internal static class TeamsActivityEndpointExtensions
 
             if (result.Disposition == TeamsTranslationDisposition.Accepted)
             {
-                contexts.Capture(result.Activity!, context);
-                var routeResult = await ingress.SubmitAsync(result.Activity!, cancellationToken);
-                if (routeResult.Disposition != TeamsIngressRouteDisposition.Routed)
-                    ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped($"ingress_{routeResult.Disposition.ToString().ToLowerInvariant()}");
+                if (result.ApprovalAction is { } approvalAction)
+                {
+                    contexts.Capture(approvalAction, context);
+                    var approvalResult = await ingress.SubmitApprovalAsync(approvalAction, cancellationToken);
+                    ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
+                        $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
+                }
+                else
+                {
+                    contexts.Capture(result.Activity!, context);
+                    var routeResult = await ingress.SubmitAsync(result.Activity!, cancellationToken);
+                    if (routeResult.Disposition != TeamsIngressRouteDisposition.Routed)
+                        ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped($"ingress_{routeResult.Disposition.ToString().ToLowerInvariant()}");
+                }
             }
             else
             {
