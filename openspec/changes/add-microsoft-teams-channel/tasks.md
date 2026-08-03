@@ -138,9 +138,9 @@ cannot repeat a tool decision. **Tenant prerequisite:** card round-trip and
 terminal update behavior must be observed in 0.2 before production release.
 **Rollback:** disable Teams approval capability; do not silently use text fallback.
 
-- [ ] 6.1 Extend pending approval persistence with versioned nonce/expiry and
+- [x] 6.1 Extend pending approval persistence with versioned nonce/expiry and
   stable protobuf compatibility behavior.
-- [ ] 6.2 Implement card action decoding, binding rehydration, consume-once
+- [x] 6.2 Implement card action decoding, binding rehydration, consume-once
   validation, terminal result rendering, and presentation-failure telemetry.
 
 ## PR 7 — Tenant-spike-approved attachment ingress

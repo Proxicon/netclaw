@@ -21,6 +21,12 @@ internal sealed class DeferredTeamsConversationIngressSink : ITeamsConversationI
         ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("conversation_routing_not_implemented");
         return ValueTask.FromResult(TeamsIngressSinkResult.Unavailable);
     }
+
+    public ValueTask<TeamsApprovalActionResult> RouteApprovalAsync(TeamsApprovalAction action, CancellationToken cancellationToken)
+    {
+        ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_routing_not_implemented");
+        return ValueTask.FromResult(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
+    }
 }
 
 internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : IHostedService
@@ -67,6 +73,28 @@ internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : 
         catch (AskTimeoutException)
         {
             return new TeamsIngressRouteResult(TeamsIngressRouteDisposition.Unavailable);
+        }
+    }
+
+    public async ValueTask<TeamsApprovalActionResult> SubmitApprovalAsync(
+        TeamsApprovalAction action,
+        CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled);
+
+        var sink = serviceProvider.GetRequiredService<ITeamsConversationIngressSink>();
+        try
+        {
+            return await sink.RouteApprovalAsync(action, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled);
+        }
+        catch (Exception)
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Failed);
         }
     }
 }

@@ -13,9 +13,11 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
+using Netclaw.Actors.Sessions;
 using Netclaw.Channels;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
+using Netclaw.Tools;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Channels.Teams;
@@ -36,6 +38,14 @@ public sealed record TeamsConversationIngress(
 
 public sealed record TeamsBindingIngress(
     TeamsInboundActivity Activity,
+    CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
+
+public sealed record TeamsBindingApprovalAction(
+    TeamsApprovalAction Action,
+    CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
+
+public sealed record TeamsConversationApprovalAction(
+    TeamsApprovalAction Action,
     CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
 
 public enum TeamsBindingRouteDisposition
@@ -125,6 +135,120 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
             return TeamsIngressSinkResult.Denied;
 
         return await RouteChannelAsync(activity, conversationId, cancellationToken);
+    }
+
+    public async ValueTask<TeamsApprovalActionResult> RouteApprovalAsync(
+        TeamsApprovalAction action,
+        CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled);
+
+        if (!TryCreateApprovalActivity(action, out var activity)
+            || !TeamsSessionIdentifierCodec.TryCreatePersonal(
+                action.Trust.TenantId,
+                action.Trust.ConversationId,
+                out var conversationId,
+                out _))
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+        }
+
+        if (action.Trust.Scope == TeamsConversationScope.Personal)
+        {
+            if (!TeamsPersonalAclPolicy.Evaluate(activity, _options).IsAllowed)
+                return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+
+            return await RoutePersonalApprovalAsync(action, conversationId, cancellationToken);
+        }
+
+        if (action.Trust.Scope != TeamsConversationScope.Channel
+            || TeamsChannelAclPolicy.Evaluate(activity, _options).Disposition != TeamsChannelPolicyDisposition.Allowed)
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+        }
+
+        return await RouteChannelApprovalAsync(action, conversationId, cancellationToken);
+    }
+
+    private async ValueTask<TeamsApprovalActionResult> RoutePersonalApprovalAsync(
+        TeamsApprovalAction action,
+        SessionId conversationId,
+        CancellationToken cancellationToken)
+    {
+        var conversation = GetOrCreatePersonalConversation(conversationId, CreateDependencies());
+        return await AskApprovalAsync(conversation, action, cancellationToken);
+    }
+
+    private async ValueTask<TeamsApprovalActionResult> RouteChannelApprovalAsync(
+        TeamsApprovalAction action,
+        SessionId conversationId,
+        CancellationToken cancellationToken)
+    {
+        var conversation = GetOrCreateChannelConversation(conversationId, CreateDependencies());
+        return await AskApprovalAsync(conversation, action, cancellationToken);
+    }
+
+    private TeamsConversationDependencies CreateDependencies() => new(
+        _options,
+        _serviceProvider.GetRequiredService<ISessionPipeline>(),
+        _serviceProvider.GetRequiredService<ITeamsReplyClient>(),
+        _serviceProvider.GetRequiredService<TeamsOutputRenderer>(),
+        _serviceProvider.GetRequiredService<TimeProvider>());
+
+    private static async ValueTask<TeamsApprovalActionResult> AskApprovalAsync(
+        IActorRef conversation,
+        TeamsApprovalAction action,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await conversation.Ask<TeamsApprovalActionResult>(
+                new TeamsConversationApprovalAction(action, cancellationToken),
+                RouteTimeout,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled);
+        }
+        catch (AskTimeoutException)
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable);
+        }
+        catch (Exception)
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Failed);
+        }
+    }
+
+    private static bool TryCreateApprovalActivity(TeamsApprovalAction action, out TeamsInboundActivity activity)
+    {
+        activity = null!;
+        if (!TeamsApprovalAction.IsBoundedOpaqueValue(action.CorrelationId, TeamsApprovalAction.MaxCorrelationLength)
+            || !TeamsApprovalAction.IsBoundedOpaqueValue(action.Nonce, TeamsApprovalAction.MaxNonceLength)
+            || !TeamsApprovalAction.IsSupportedAction(action.Action)
+            || !TeamsOutboundDestination.IsValidServiceUrl(action.ServiceUrl))
+        {
+            return false;
+        }
+
+        try
+        {
+            activity = new TeamsInboundActivity(
+                action.Trust,
+                string.Empty,
+                new TeamsReplyMetadata(null, action.RootActivityId, action.ServiceUrl),
+                isMentioned: true,
+                kind: TeamsIngressActivityKind.AdaptiveCardAction,
+                teamId: action.TeamId,
+                channelId: action.ChannelId);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
     }
 
     private async ValueTask<TeamsIngressSinkResult> RoutePersonalAsync(
@@ -267,6 +391,7 @@ public sealed class TeamsPersonalConversationActor : ReceiveActor
         _log = Context.GetLogger().WithContext("Adapter", "teams");
 
         ReceiveAsync<TeamsConversationIngress>(HandleIngressAsync);
+        ReceiveAsync<TeamsConversationApprovalAction>(HandleApprovalAsync);
     }
 
     public static Props CreateProps(SessionId sessionId, TeamsConversationDependencies dependencies) =>
@@ -330,6 +455,53 @@ public sealed class TeamsPersonalConversationActor : ReceiveActor
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Failed));
         }
     }
+
+    private async Task HandleApprovalAsync(TeamsConversationApprovalAction action)
+    {
+        var replyTo = Sender;
+        if (action.CancellationToken.IsCancellationRequested
+            || action.Action.Trust.Scope != TeamsConversationScope.Personal
+            || !TeamsSessionIdentifierCodec.TryCreatePersonal(
+                action.Action.Trust.TenantId,
+                action.Action.Trust.ConversationId,
+                out var expectedSessionId,
+                out _)
+            || expectedSessionId != _sessionId)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(action.CancellationToken.IsCancellationRequested
+                ? TeamsApprovalActionDisposition.Cancelled
+                : TeamsApprovalActionDisposition.Rejected));
+            return;
+        }
+
+        var binding = Context.Child(TeamsActorNames.Binding(_sessionId));
+        if (binding.IsNobody())
+        {
+            binding = Context.ActorOf(
+                TeamsSessionBindingActor.CreateProps(_sessionId, _dependencies),
+                TeamsActorNames.Binding(_sessionId));
+        }
+
+        try
+        {
+            replyTo.Tell(await binding.Ask<TeamsApprovalActionResult>(
+                new TeamsBindingApprovalAction(action.Action, action.CancellationToken),
+                BindingRouteTimeout,
+                action.CancellationToken));
+        }
+        catch (OperationCanceledException) when (action.CancellationToken.IsCancellationRequested)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled));
+        }
+        catch (AskTimeoutException)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
+        }
+        catch (Exception)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Failed));
+        }
+    }
 }
 
 /// <summary>
@@ -340,6 +512,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 {
     internal const int ProcessedActivityCapacity = 1_024;
 
+    internal const int ApprovalCapacity = 128;
+
     private const long SnapshotInterval = 64;
 
     private readonly SessionId _sessionId;
@@ -349,6 +523,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private readonly bool _isChannelBinding;
     private readonly HashSet<string> _processedActivityIds = new(StringComparer.Ordinal);
     private readonly Queue<string> _processedActivityOrder = new();
+    private readonly Dictionary<string, TeamsPendingApproval> _pendingApprovals = new(StringComparer.Ordinal);
     private TeamsOutboundDestination? _destination;
     private string? _processingActivityId;
 
@@ -366,6 +541,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         Recover<DurableActivityDispatchReserved>(ApplyReserved);
         Recover<DurableActivityDispatchReleased>(ApplyReleased);
+        Recover<TeamsApprovalPendingCreated>(ApplyApprovalPendingCreated);
+        Recover<TeamsApprovalCardDelivered>(ApplyApprovalCardDelivered);
+        Recover<TeamsApprovalConsumed>(ApplyApprovalConsumed);
         Recover<SnapshotOffer>(offer =>
         {
             if (offer.Snapshot is DurableActivityDispatchSnapshot snapshot)
@@ -375,8 +553,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Context.SetReceiveTimeout(TimeSpan.FromHours(1));
         Command<ReceiveTimeout>(_ => Context.Stop(Self));
         Command<TeamsBindingIngress>(HandleIngress);
+        CommandAsync<TeamsBindingApprovalAction>(HandleApprovalActionAsync);
+        CommandAsync<ForwardTeamsApprovalDecision>(ForwardApprovalDecisionAsync);
+        CommandAsync<DeliverTeamsApprovalTerminal>(DeliverApprovalTerminalAsync);
+        CommandAsync<DenyTeamsApprovalRequest>(DenyApprovalRequestAsync);
         CommandAsync<DispatchReservedActivity>(DispatchReservedActivityAsync);
         CommandAsync<BindingOutput>(HandleOutputAsync);
+        CommandAsync<DeliverTeamsApprovalCard>(DeliverApprovalCardAsync);
         Command<OutputStreamTerminated>(terminated =>
         {
             if (terminated.Generation == _pipelineHandle.Generation)
@@ -629,9 +812,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     {
         if (snapshot.ActivityFingerprints.Count > ProcessedActivityCapacity)
             throw new InvalidOperationException("The Teams processed activity snapshot exceeds its retention limit.");
+        if (snapshot.TeamsApprovals.Count > ApprovalCapacity)
+            throw new InvalidOperationException("The Teams approval snapshot exceeds its retention limit.");
 
         _processedActivityIds.Clear();
         _processedActivityOrder.Clear();
+        _pendingApprovals.Clear();
         foreach (var fingerprint in snapshot.ActivityFingerprints)
         {
             EnsureValidFingerprint(fingerprint);
@@ -640,12 +826,56 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
             _processedActivityOrder.Enqueue(fingerprint);
         }
+
+        foreach (var approval in snapshot.TeamsApprovals)
+        {
+            ApplyApprovalPendingCreated(new TeamsApprovalPendingCreated
+            {
+                CallId = approval.CallId,
+                CorrelationId = approval.CorrelationId,
+                NonceHash = approval.NonceHash,
+                RequesterSenderId = approval.RequesterSenderId,
+                RequesterPrincipal = approval.RequesterPrincipal,
+                ExpiresAtUnixMilliseconds = approval.ExpiresAtUnixMilliseconds
+            });
+            if (approval.PromptId is not null)
+            {
+                ApplyApprovalCardDelivered(new TeamsApprovalCardDelivered
+                {
+                    CorrelationId = approval.CorrelationId,
+                    PromptId = approval.PromptId
+                });
+            }
+            if (approval.Decision is not null)
+            {
+                ApplyApprovalConsumed(new TeamsApprovalConsumed
+                {
+                    CorrelationId = approval.CorrelationId,
+                    Decision = approval.Decision
+                });
+            }
+        }
     }
 
     private void SaveSnapshotWhenDue()
     {
         if (!IsRecovering && LastSequenceNr > 0 && LastSequenceNr % SnapshotInterval == 0)
-            SaveSnapshot(new DurableActivityDispatchSnapshot(_processedActivityOrder.ToArray()));
+        {
+            SaveSnapshot(new DurableActivityDispatchSnapshot(_processedActivityOrder.ToArray())
+            {
+                TeamsApprovals = _pendingApprovals.Values.Select(pending => new TeamsApprovalSnapshotEntry
+                {
+                    CallId = pending.CallId,
+                    CorrelationId = pending.CorrelationId,
+                    NonceHash = pending.NonceHash,
+                    RequesterSenderId = pending.RequesterSenderId,
+                    RequesterPrincipal = pending.RequesterPrincipal,
+                    ExpiresAtUnixMilliseconds = pending.ExpiresAtUnixMilliseconds,
+                    PromptId = pending.PromptId,
+                    Decision = pending.Decision
+                }).ToArray()
+            });
+        }
     }
 
     private async Task HandleOutputAsync(BindingOutput received)
@@ -667,6 +897,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                         ? processing.ActivityId
                         : null;
             }
+            return;
+        }
+
+        if (received.Output is ToolInteractionRequest approval)
+        {
+            HandleApprovalRequest(approval);
             return;
         }
 
@@ -773,13 +1009,329 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private TeamsOutboundMessage CreateMessage(
         TeamsOutboundDestination destination,
         string text,
-        string? updateActivityId = null) => new(
+        string? updateActivityId = null,
+        TeamsApprovalCard? approvalCard = null) => new(
         destination,
         text,
         ActivityFingerprint.Create(_sessionId.Value + text),
         ActivityFingerprint.Create(_sessionId.Value),
         destination.Scope == TeamsConversationScope.Channel ? destination.RootActivityId : null,
-        updateActivityId);
+        updateActivityId,
+        approvalCard: approvalCard);
+
+    private void HandleApprovalRequest(ToolInteractionRequest request)
+    {
+        if (_destination is null || !string.Equals(request.Kind, "approval", StringComparison.Ordinal))
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_card_destination_unavailable");
+            return;
+        }
+
+        if (_pendingApprovals.Count >= ApprovalCapacity)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_state_capacity_exceeded");
+            Self.Tell(new DenyTeamsApprovalRequest(request));
+            return;
+        }
+
+        var correlationId = TeamsApprovalCardRenderer.CreateCorrelationId();
+        var nonce = TeamsApprovalCardRenderer.CreateNonce();
+        var expiresAt = _dependencies.TimeProvider.GetUtcNow().AddMinutes(15);
+        Persist(new TeamsApprovalPendingCreated
+        {
+            CallId = request.CallId.Value,
+            CorrelationId = correlationId,
+            NonceHash = TeamsApprovalCardRenderer.HashNonce(nonce),
+            RequesterSenderId = request.RequesterSenderId?.Value,
+            RequesterPrincipal = request.RequesterPrincipal,
+            ExpiresAtUnixMilliseconds = expiresAt.ToUnixTimeMilliseconds()
+        }, created =>
+        {
+            ApplyApprovalPendingCreated(created);
+            Self.Tell(new DeliverTeamsApprovalCard(request, correlationId, nonce));
+        });
+    }
+
+    private async Task DeliverApprovalCardAsync(DeliverTeamsApprovalCard delivery)
+    {
+        if (_destination is null || !_pendingApprovals.TryGetValue(delivery.CorrelationId, out var pending))
+            return;
+
+        TeamsApprovalCard card;
+        try
+        {
+            card = TeamsApprovalCardRenderer.CreatePending(delivery.Request, delivery.CorrelationId, delivery.Nonce);
+        }
+        catch (ArgumentException)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_card_invalid_contract");
+            return;
+        }
+
+        var result = await DeliverAsync(CreateMessage(_destination, "Approval required.", approvalCard: card));
+        if (!result.IsSuccess || !IsBoundedActivityId(result.ActivityId))
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_card_delivery_failed");
+            return;
+        }
+
+        Persist(new TeamsApprovalCardDelivered
+        {
+            CorrelationId = pending.CorrelationId,
+            PromptId = result.ActivityId!
+        }, ApplyApprovalCardDelivered);
+    }
+
+    private async Task DenyApprovalRequestAsync(DenyTeamsApprovalRequest request)
+    {
+        try
+        {
+            await _dependencies.Pipeline.SendFeedbackAsync(new ToolInteractionResponse
+            {
+                SessionId = _sessionId,
+                CallId = request.Request.CallId,
+                SelectedKey = ApprovalOptionKeys.DenyKey,
+                SenderId = request.Request.RequesterSenderId ?? new SenderId(string.Empty)
+            });
+        }
+        catch (Exception)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_capacity_deny_failed");
+        }
+    }
+
+    private async Task HandleApprovalActionAsync(TeamsBindingApprovalAction received)
+    {
+        if (received.CancellationToken.IsCancellationRequested)
+        {
+            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled));
+            return;
+        }
+
+        var action = received.Action;
+        if (!TryGetExpectedSessionId(action, out var expectedSessionId)
+            || expectedSessionId != _sessionId
+            || !TryCreateDestination(action, out var destination)
+            || !TeamsApprovalAction.IsSupportedAction(action.Action)
+            || !_pendingApprovals.TryGetValue(action.CorrelationId, out var pending)
+            || pending.PromptId is null
+            || !string.Equals(pending.PromptId, action.PromptActivityId, StringComparison.Ordinal)
+            || !TeamsApprovalCardRenderer.NonceMatches(pending.NonceHash, action.Nonce))
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_rejected");
+            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+            return;
+        }
+
+        _destination = destination;
+        if (!ApprovalButtonValueCodec.CanApprove(
+                pending.RequesterPrincipal,
+                pending.RequesterSenderId,
+                action.Trust.SenderId))
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_wrong_user");
+            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+            return;
+        }
+
+        if (pending.Decision is not null)
+        {
+            await DeliverTerminalCardAsync(destination, pending, "This approval was already processed.");
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_duplicate");
+            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.AlreadyProcessed));
+            return;
+        }
+
+        if (_dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds() >= pending.ExpiresAtUnixMilliseconds)
+        {
+            Persist(new TeamsApprovalConsumed
+            {
+                CorrelationId = pending.CorrelationId,
+                Decision = "expired",
+                ConsumedAtUnixMilliseconds = _dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds()
+            }, consumed =>
+            {
+                ApplyApprovalConsumed(consumed);
+                Self.Tell(new DeliverTeamsApprovalTerminal(destination, pending.CorrelationId, "This approval has expired."));
+            });
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_expired");
+            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Expired));
+            return;
+        }
+
+        var replyTo = Sender;
+        Persist(new TeamsApprovalConsumed
+        {
+            CorrelationId = pending.CorrelationId,
+            Decision = action.Action,
+            ConsumedAtUnixMilliseconds = _dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds()
+        }, consumed =>
+        {
+            ApplyApprovalConsumed(consumed);
+            Self.Tell(new ForwardTeamsApprovalDecision(
+                destination,
+                pending.CorrelationId,
+                action.Action,
+                action.Trust.SenderId));
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_action_accepted");
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Accepted));
+        });
+    }
+
+    private async Task ForwardApprovalDecisionAsync(ForwardTeamsApprovalDecision decision)
+    {
+        if (!_pendingApprovals.TryGetValue(decision.CorrelationId, out var pending))
+            return;
+
+        try
+        {
+            var feedback = await _dependencies.Pipeline.SendFeedbackAndWaitAsync(new ToolInteractionResponse
+            {
+                SessionId = _sessionId,
+                CallId = new ToolCallId(pending.CallId),
+                SelectedKey = decision.Action == "approve"
+                    ? ApprovalOptionKeys.ApproveOnceKey
+                    : ApprovalOptionKeys.DenyKey,
+                SenderId = new SenderId(decision.SenderId)
+            });
+
+            var text = feedback is CommandAck
+                ? decision.Action == "approve" ? "Approved." : "Denied."
+                : "This approval is no longer available.";
+            await DeliverTerminalCardAsync(decision.Destination, pending, text);
+        }
+        catch (Exception)
+        {
+            // The terminal decision already exists in the journal. Never retry
+            // feedback from presentation code because that could repeat a tool decision.
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_feedback_failed");
+            await DeliverTerminalCardAsync(decision.Destination, pending, "This approval is no longer available.");
+        }
+    }
+
+    private async Task DeliverTerminalCardAsync(
+        TeamsOutboundDestination destination,
+        TeamsPendingApproval pending,
+        string text)
+    {
+        if (pending.PromptId is null)
+            return;
+
+        var card = TeamsApprovalCardRenderer.CreateTerminal(text);
+        var update = await DeliverAsync(CreateMessage(destination, text, pending.PromptId, card));
+        if (update.IsSuccess)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_terminal_update_succeeded");
+            return;
+        }
+
+        // One fallback provides a safe visible result. The decision remains
+        // terminal when both presentation attempts fail.
+        await DeliverAsync(CreateMessage(destination, text, approvalCard: card));
+        ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_terminal_update_failed");
+    }
+
+    private async Task DeliverApprovalTerminalAsync(DeliverTeamsApprovalTerminal terminal)
+    {
+        if (_pendingApprovals.TryGetValue(terminal.CorrelationId, out var pending))
+            await DeliverTerminalCardAsync(terminal.Destination, pending, terminal.Text);
+    }
+
+    private bool TryGetExpectedSessionId(TeamsApprovalAction action, out SessionId sessionId)
+    {
+        if (action.Trust.Scope == TeamsConversationScope.Personal)
+        {
+            return TeamsSessionIdentifierCodec.TryCreatePersonal(
+                action.Trust.TenantId,
+                action.Trust.ConversationId,
+                out sessionId,
+                out _);
+        }
+
+        if (action.Trust.Scope == TeamsConversationScope.Channel
+            && action.RootActivityId is { } rootActivityId)
+        {
+            return TeamsSessionIdentifierCodec.TryCreateChannel(
+                action.Trust.TenantId,
+                action.Trust.ConversationId,
+                rootActivityId,
+                out sessionId,
+                out _);
+        }
+
+        sessionId = default;
+        return false;
+    }
+
+    private static bool TryCreateDestination(TeamsApprovalAction action, out TeamsOutboundDestination destination)
+    {
+        try
+        {
+            destination = new TeamsOutboundDestination(
+                action.Trust.TenantId,
+                action.Trust.ConversationId,
+                action.Trust.Scope,
+                action.ServiceUrl,
+                action.RootActivityId,
+                action.TeamId,
+                action.ChannelId,
+                action.Trust.Scope == TeamsConversationScope.Personal ? action.Trust.SenderId : null);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            destination = null!;
+            return false;
+        }
+    }
+
+    private void ApplyApprovalPendingCreated(TeamsApprovalPendingCreated created)
+    {
+        if (!TeamsApprovalAction.IsBoundedOpaqueValue(created.CorrelationId, TeamsApprovalAction.MaxCorrelationLength)
+            || created.NonceHash.Length != 64
+            || created.NonceHash.Any(static character => !char.IsAsciiHexDigit(character))
+            || created.ExpiresAtUnixMilliseconds <= 0
+            || string.IsNullOrWhiteSpace(created.CallId))
+        {
+            throw new InvalidOperationException("The Teams approval state is invalid.");
+        }
+
+        if (_pendingApprovals.Count >= ApprovalCapacity && !_pendingApprovals.ContainsKey(created.CorrelationId))
+            throw new InvalidOperationException("The Teams approval state exceeds its retention limit.");
+
+        if (!_pendingApprovals.TryAdd(created.CorrelationId, new TeamsPendingApproval(
+            created.CallId,
+            created.CorrelationId,
+            created.NonceHash,
+            created.RequesterSenderId,
+            created.RequesterPrincipal,
+            created.ExpiresAtUnixMilliseconds)))
+        {
+            throw new InvalidOperationException("The Teams approval state contains a duplicate correlation.");
+        }
+    }
+
+    private void ApplyApprovalCardDelivered(TeamsApprovalCardDelivered delivered)
+    {
+        if (!_pendingApprovals.TryGetValue(delivered.CorrelationId, out var pending)
+            || !IsBoundedActivityId(delivered.PromptId))
+        {
+            throw new InvalidOperationException("The Teams approval card locator is invalid.");
+        }
+
+        _pendingApprovals[delivered.CorrelationId] = pending with { PromptId = delivered.PromptId };
+    }
+
+    private void ApplyApprovalConsumed(TeamsApprovalConsumed consumed)
+    {
+        if (!_pendingApprovals.TryGetValue(consumed.CorrelationId, out var pending)
+            || (consumed.Decision is not "approve" and not "deny" and not "expired"))
+        {
+            throw new InvalidOperationException("The Teams approval terminal state is invalid.");
+        }
+
+        _pendingApprovals[consumed.CorrelationId] = pending with { Decision = consumed.Decision };
+    }
 
     private static void EnsureValidFingerprint(string fingerprint)
     {
@@ -801,6 +1353,34 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Exception? Cause) : INoSerializationVerificationNeeded;
 
     private sealed record ReinitializePipeline : INoSerializationVerificationNeeded;
+
+    private sealed record DeliverTeamsApprovalCard(
+        ToolInteractionRequest Request,
+        string CorrelationId,
+        string Nonce) : INoSerializationVerificationNeeded;
+
+    private sealed record DenyTeamsApprovalRequest(ToolInteractionRequest Request) : INoSerializationVerificationNeeded;
+
+    private sealed record ForwardTeamsApprovalDecision(
+        TeamsOutboundDestination Destination,
+        string CorrelationId,
+        string Action,
+        string SenderId) : INoSerializationVerificationNeeded;
+
+    private sealed record DeliverTeamsApprovalTerminal(
+        TeamsOutboundDestination Destination,
+        string CorrelationId,
+        string Text) : INoSerializationVerificationNeeded;
+
+    private sealed record TeamsPendingApproval(
+        string CallId,
+        string CorrelationId,
+        string NonceHash,
+        string? RequesterSenderId,
+        PrincipalClassification? RequesterPrincipal,
+        long ExpiresAtUnixMilliseconds,
+        string? PromptId = null,
+        string? Decision = null);
 
     internal sealed record BindingOutput(SessionOutput Output) : INoSerializationVerificationNeeded;
 

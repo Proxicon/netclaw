@@ -45,6 +45,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         });
 
         Command<TeamsConversationIngress>(HandleIngress);
+        CommandAsync<TeamsConversationApprovalAction>(HandleApprovalActionAsync);
         CommandAsync<RouteChannelBinding>(RouteBindingAsync);
         Command<SaveSnapshotSuccess>(saved =>
         {
@@ -190,6 +191,54 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         }
     }
 
+    private async Task HandleApprovalActionAsync(TeamsConversationApprovalAction action)
+    {
+        var replyTo = Sender;
+        if (action.CancellationToken.IsCancellationRequested
+            || !IsExpectedApprovalConversation(action.Action)
+            || action.Action.RootActivityId is not { } rootActivityId
+            || !TeamsSessionIdentifierCodec.TryCreateChannel(
+                action.Action.Trust.TenantId,
+                action.Action.Trust.ConversationId,
+                rootActivityId,
+                out var sessionId,
+                out _))
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(action.CancellationToken.IsCancellationRequested
+                ? TeamsApprovalActionDisposition.Cancelled
+                : TeamsApprovalActionDisposition.Rejected));
+            return;
+        }
+
+        var binding = Context.Child(TeamsActorNames.Binding(sessionId));
+        if (binding.IsNobody())
+        {
+            binding = Context.ActorOf(
+                TeamsSessionBindingActor.CreateProps(sessionId, _dependencies),
+                TeamsActorNames.Binding(sessionId));
+        }
+
+        try
+        {
+            replyTo.Tell(await binding.Ask<TeamsApprovalActionResult>(
+                new TeamsBindingApprovalAction(action.Action, action.CancellationToken),
+                BindingRouteTimeout,
+                action.CancellationToken));
+        }
+        catch (OperationCanceledException) when (action.CancellationToken.IsCancellationRequested)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled));
+        }
+        catch (AskTimeoutException)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
+        }
+        catch (Exception)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Failed));
+        }
+    }
+
     private bool IsExpectedConversation(TeamsInboundActivity activity)
     {
         if (activity.Trust.Scope != TeamsConversationScope.Channel)
@@ -198,6 +247,19 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         return TeamsSessionIdentifierCodec.TryCreatePersonal(
                    activity.Trust.TenantId,
                    activity.Trust.ConversationId,
+                   out var expected,
+                   out _)
+               && expected == _conversationId;
+    }
+
+    private bool IsExpectedApprovalConversation(TeamsApprovalAction action)
+    {
+        if (action.Trust.Scope != TeamsConversationScope.Channel)
+            return false;
+
+        return TeamsSessionIdentifierCodec.TryCreatePersonal(
+                   action.Trust.TenantId,
+                   action.Trust.ConversationId,
                    out var expected,
                    out _)
                && expected == _conversationId;
