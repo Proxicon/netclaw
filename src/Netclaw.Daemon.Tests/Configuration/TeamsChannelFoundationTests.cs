@@ -1202,17 +1202,131 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
-    public void Translator_rejects_graph_backed_attachment_shells_before_channel_routing()
+    public void Translator_accepts_plain_text_without_a_wrapper_before_channel_routing()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
         activity.Conversation!.Id = "conversation;messageid=root";
-        activity.Attachments = [new TeamsAttachment { ContentType = TeamsContentType.Html }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("plain_text_accepted", result.ReasonCode);
+        Assert.Equal("hello", result.Activity!.Text);
+    }
+
+    [Fact]
+    public void Translator_rejects_embedded_graph_references_in_html_attachment_content_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = "<a href=\"https://graph.microsoft.com/v1.0/me/drive/items/1\">file</a>"
+        }];
 
         var result = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
         Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_accepts_formatted_text_rendering_wrapper_without_exposing_its_markup()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = "<pre>line one\nline two \ud83d\ude80</pre>"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("teams_text_rendering_wrapper_ignored", result.ReasonCode);
+        Assert.Equal("hello", result.Activity!.Text);
+    }
+
+    [Fact]
+    public void Translator_accepts_a_json_string_formatted_text_rendering_wrapper_from_the_sdk()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = JsonDocument.Parse("\"<pre>line one\\nline two \\ud83d\\ude80</pre>\"").RootElement.Clone()
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("teams_text_rendering_wrapper_ignored", result.ReasonCode);
+        Assert.Equal("hello", result.Activity!.Text);
+    }
+
+    [Fact]
+    public void Translator_does_not_duplicate_canonical_text_when_it_has_a_formatted_text_wrapper()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Text = "canonical\ntext \ud83d\ude80";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = "<pre>canonical\ntext \ud83d\ude80</pre>"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("canonical\ntext \ud83d\ude80", result.Activity!.Text);
+    }
+
+    [Fact]
+    public void Translator_rejects_empty_html_upload_shell_before_channel_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = string.Empty
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_rejects_structured_html_attachment_content_before_channel_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = new { rendering = "text" }
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
     }
 
     [Fact]
@@ -1250,6 +1364,25 @@ public sealed class TeamsChannelFoundationTests
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
         Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+    }
+
+    [Fact]
+    public void Translator_rejects_a_mixed_text_wrapper_and_unknown_attachment_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments =
+        [
+            new TeamsAttachment { ContentType = TeamsContentType.Html, Content = "<pre>normal text</pre>" },
+            new TeamsAttachment { ContentType = TeamsContentType.Text, Content = "untrusted inline attachment" }
+        ];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
     }
 
     [Fact]
@@ -1301,7 +1434,7 @@ public sealed class TeamsChannelFoundationTests
         var result = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Equal("attachment_malformed_rejected", result.ReasonCode);
         Assert.Null(result.Activity);
     }
 
@@ -1312,7 +1445,6 @@ public sealed class TeamsChannelFoundationTests
             ContentType: "application/vnd.microsoft.teams.file.download.info",
             HasName: false,
             ContentUrl: null,
-            HasContent: true,
             HasContentUrl: false));
 
         Assert.Equal(TeamsAttachmentClassification.GraphBackedUnsupported, result.Classification);
@@ -1337,6 +1469,73 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
         Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
         Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_rejects_an_html_wrapper_with_an_oversized_url_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = "<pre>normal text</pre>",
+            ContentUrl = $"https://example.test/{new string('a', 2_048)}"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_rejects_an_html_wrapper_with_an_empty_url_field_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = "<pre>normal text</pre>",
+            ContentUrl = string.Empty
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translation_telemetry_uses_safe_wrapper_and_attachment_reason_codes()
+    {
+        var telemetry = ChannelTelemetry.For(ChannelType.Teams);
+        var initial = telemetry.GetSnapshot();
+
+        TeamsActivityEndpointExtensions.RecordTranslationTelemetry(TeamsTranslationResult.Accepted(
+            CreateInboundActivity(), "teams_text_rendering_wrapper_ignored"));
+        TeamsActivityEndpointExtensions.RecordTranslationTelemetry(TeamsTranslationResult.Rejected(
+            TeamsTranslationDisposition.RejectedMalformed,
+            TeamsIngressActivityKind.Message,
+            "graph_backed_attachment_unsupported"));
+        TeamsActivityEndpointExtensions.RecordTranslationTelemetry(TeamsTranslationResult.Rejected(
+            TeamsTranslationDisposition.RejectedMalformed,
+            TeamsIngressActivityKind.Message,
+            "attachment_malformed_rejected"));
+
+        var extras = telemetry.GetSnapshot().Extras;
+        Assert.Equal((initial.Extras.TryGetValue("teams_text_rendering_wrapper_ignored", out var wrapper) ? wrapper : 0) + 1,
+            extras["teams_text_rendering_wrapper_ignored"]);
+        Assert.Equal((initial.Extras.TryGetValue("attachment_graph_backed_rejected", out var graph) ? graph : 0) + 1,
+            extras["attachment_graph_backed_rejected"]);
+        Assert.Equal((initial.Extras.TryGetValue("attachment_malformed_rejected", out var malformed) ? malformed : 0) + 1,
+            extras["attachment_malformed_rejected"]);
+        Assert.DoesNotContain(extras.Keys, key => key.Contains("hello", StringComparison.Ordinal));
     }
 
     [Fact]
