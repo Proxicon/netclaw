@@ -127,7 +127,8 @@ final reply for that completion path; retry logic SHALL remain bounded.
 ### Requirement: Teams attachments and text renderings are evidence-gated
 
 The Teams channel SHALL accept plain activity text. It SHALL accept a formatted
-text rendering only when the SDK attachment has a non-empty `text/html` string,
+text rendering only when the SDK attachment has a non-empty `text/html` scalar
+(a CLR string or SDK JSON string element),
 no name, no content URL, no embedded reference, and no structured content.
 The HTTP body limit bounds this rendering. The translator SHALL ignore wrapper
 markup and use only canonical activity text for model input.
