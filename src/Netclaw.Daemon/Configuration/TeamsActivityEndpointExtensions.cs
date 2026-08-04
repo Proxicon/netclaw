@@ -84,6 +84,7 @@ internal static class TeamsActivityEndpointExtensions
 
             if (result.Disposition == TeamsTranslationDisposition.Accepted)
             {
+                RecordTranslationTelemetry(result);
                 if (result.ApprovalAction is { } approvalAction)
                 {
                     contexts.Capture(approvalAction, context);
@@ -102,10 +103,28 @@ internal static class TeamsActivityEndpointExtensions
             else
             {
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(result.ReasonCode);
+                RecordTranslationTelemetry(result);
             }
 
             await Task.CompletedTask;
         });
+    }
+
+    internal static void RecordTranslationTelemetry(TeamsTranslationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        var telemetryCode = result.ReasonCode switch
+        {
+            "plain_text_accepted" => "plain_text_accepted",
+            "teams_text_rendering_wrapper_ignored" => "teams_text_rendering_wrapper_ignored",
+            "graph_backed_attachment_unsupported" => "attachment_graph_backed_rejected",
+            "unsupported_attachment_shape" => "attachment_shape_rejected",
+            "attachment_malformed_rejected" => "attachment_malformed_rejected",
+            _ => null
+        };
+        if (telemetryCode is not null)
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra(telemetryCode);
     }
 
     /// <summary>

@@ -73,10 +73,23 @@ public static class TeamsTenantEvidenceMappings
         && text.EndsWith("</at>", StringComparison.Ordinal)
         && text.Length > "<at></at>".Length;
 
-    public static bool IsUnsupportedGraphBackedAttachmentShell(string? contentType, string? name, string? contentUrl)
-        => string.Equals(contentType, "text/html", StringComparison.OrdinalIgnoreCase)
-           && string.IsNullOrWhiteSpace(name)
-           && string.IsNullOrWhiteSpace(contentUrl);
+    /// <summary>
+    /// Teams can include a non-empty HTML rendering of ordinary formatted text
+    /// beside the canonical activity text. The tenant upload fixture has an
+    /// empty HTML payload, so only this distinct bounded SDK shape is metadata.
+    /// The daemon never exposes the rendering markup to the model.
+    /// </summary>
+    public static bool IsInlineTextRendering(TeamsAttachmentEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+
+        return string.Equals(evidence.ContentType, "text/html", StringComparison.OrdinalIgnoreCase)
+               && !evidence.HasName
+               && !evidence.HasContentUrl
+               && string.IsNullOrWhiteSpace(evidence.ContentUrl)
+               && !evidence.HasEmbeddedContentReference
+               && evidence.ContentKind == TeamsAttachmentContentKind.NonEmptyText;
+    }
 
     /// <summary>
     /// Classifies only bounded, transport-neutral attachment facts. The current
@@ -87,18 +100,18 @@ public static class TeamsTenantEvidenceMappings
     {
         ArgumentNullException.ThrowIfNull(evidence);
 
-        if (evidence.HasContent && evidence.HasContentUrl)
-            return TeamsAttachmentClassificationResult.UnsupportedAttachmentShape();
-
-        if (IsUnsupportedGraphBackedAttachmentShell(
-                evidence.ContentType,
-                evidence.HasName ? "attachment" : null,
-                evidence.HasContentUrl ? evidence.ContentUrl : null)
+        if (evidence.HasEmbeddedGraphBackedContentReference
             || IsGraphBackedContentReference(evidence.ContentUrl)
             || IsKnownGraphBackedContentType(evidence.ContentType))
         {
             return TeamsAttachmentClassificationResult.GraphBackedUnsupported();
         }
+
+        if (IsInlineTextRendering(evidence))
+            return TeamsAttachmentClassificationResult.InlineTextRendering();
+
+        if (IsKnownGraphBackedUploadShell(evidence))
+            return TeamsAttachmentClassificationResult.GraphBackedUnsupported();
 
         return TeamsAttachmentClassificationResult.UnsupportedAttachmentShape();
     }
@@ -121,16 +134,39 @@ public static class TeamsTenantEvidenceMappings
     private static bool IsKnownGraphBackedContentType(string? contentType)
         => string.Equals(contentType, "application/vnd.microsoft.teams.file.download.info", StringComparison.OrdinalIgnoreCase)
            || string.Equals(contentType, "application/vnd.microsoft.teams.file.download.info+json", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsKnownGraphBackedUploadShell(TeamsAttachmentEvidence evidence)
+        => string.Equals(evidence.ContentType, "text/html", StringComparison.OrdinalIgnoreCase)
+           && !evidence.HasName
+           && !evidence.HasContentUrl
+           && !evidence.HasEmbeddedContentReference
+           && evidence.ContentKind == TeamsAttachmentContentKind.EmptyText;
 }
 
 public enum TeamsAttachmentClassification
 {
+    InlineTextRendering,
     GraphBackedUnsupported,
     UnsupportedAttachmentShape
 }
 
+/// <summary>
+/// Bounded content facts copied from the SDK attachment. The descriptor has no
+/// markup, file bytes, URI, or provider metadata.
+/// </summary>
+public enum TeamsAttachmentContentKind
+{
+    Missing,
+    EmptyText,
+    NonEmptyText,
+    Structured
+}
+
 public sealed record TeamsAttachmentClassificationResult(TeamsAttachmentClassification Classification, string? ReasonCode = null)
 {
+    public static TeamsAttachmentClassificationResult InlineTextRendering()
+        => new(TeamsAttachmentClassification.InlineTextRendering);
+
     public static TeamsAttachmentClassificationResult GraphBackedUnsupported()
         => new(TeamsAttachmentClassification.GraphBackedUnsupported, "graph_backed_attachment_unsupported");
 
@@ -146,7 +182,9 @@ public sealed record TeamsAttachmentEvidence(
     string? ContentType,
     bool HasName,
     string? ContentUrl,
-    bool HasContent,
-    bool HasContentUrl);
+    bool HasContentUrl,
+    bool HasEmbeddedContentReference = false,
+    bool HasEmbeddedGraphBackedContentReference = false,
+    TeamsAttachmentContentKind ContentKind = TeamsAttachmentContentKind.Missing);
 
 public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);

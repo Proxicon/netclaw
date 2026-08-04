@@ -104,10 +104,14 @@ down by offline fixture tests:
   and thread conversation identity. The delete carried no message text or
   mention entities. PR 4's activity-to-root index must resolve these operations
   from durable identity, not their content.
-- Channel uploads exposed only a `text/html` attachment shell without a name,
+- Channel uploads exposed an empty `text/html` attachment shell without a name,
   safe direct URL, or usable file metadata at the SDK boundary. The attachment
   remains `graph_backed_attachment_unsupported`; no Graph fallback or permission
   is approved.
+- Formatted text can expose a distinct non-empty `text/html` rendering beside
+  canonical activity text. The translator ignores that markup as metadata only.
+  It requires no name, URL, embedded reference, or structured content.
+  The canonical activity text is the only model-visible text.
 - Teams SDK plain reply delivery worked in the originating thread. The earlier
   non-SDK connector/test-harness path did not prove production delivery.
 - Teams SDK Adaptive Card delivery and authenticated `Action.Execute` invokes
