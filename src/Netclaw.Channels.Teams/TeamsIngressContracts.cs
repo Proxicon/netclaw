@@ -46,8 +46,8 @@ public sealed record TeamsTranslationResult(
     TeamsInboundActivity? Activity = null,
     TeamsApprovalAction? ApprovalAction = null)
 {
-    public static TeamsTranslationResult Accepted(TeamsInboundActivity activity)
-        => new(TeamsTranslationDisposition.Accepted, "accepted", activity.Kind, activity);
+    public static TeamsTranslationResult Accepted(TeamsInboundActivity activity, string reasonCode = "accepted")
+        => new(TeamsTranslationDisposition.Accepted, reasonCode, activity.Kind, activity);
 
     public static TeamsTranslationResult Accepted(TeamsApprovalAction action)
         => new(TeamsTranslationDisposition.Accepted, "accepted", TeamsIngressActivityKind.AdaptiveCardAction, ApprovalAction: action);

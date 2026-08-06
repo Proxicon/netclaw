@@ -71,14 +71,19 @@ public sealed class TeamsTenantEvidenceFixtureTests
     }
 
     [Fact]
-    public void Attachment_shell_has_no_supported_graph_free_download_shape()
+    public void Tenant_upload_shell_is_classified_as_graph_backed_before_routing()
     {
         var attachment = Load("attachment-shell.json")["attachments"]![0]!;
 
-        Assert.True(TeamsTenantEvidenceMappings.IsUnsupportedGraphBackedAttachmentShell(
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
             attachment["contentType"]!.GetValue<string>(),
-            attachment["name"]?.GetValue<string>(),
-            attachment["contentUrl"]?.GetValue<string>()));
+            HasName: false,
+            ContentUrl: null,
+            HasContentUrl: false,
+            ContentKind: TeamsAttachmentContentKind.EmptyText));
+
+        Assert.Equal(TeamsAttachmentClassification.GraphBackedUnsupported, result.Classification);
+        Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
     }
 
     [Fact]

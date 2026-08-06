@@ -6,9 +6,8 @@
 namespace Netclaw.Channels.Teams;
 
 /// <summary>
-/// Pure mappings recorded by the opt-in tenant transport spike. These helpers
-/// are deliberately not connected to production channel routing; PR 4 owns
-/// the policy and durable activity-to-root index that will consume them.
+/// Pure mappings recorded by the opt-in tenant transport spike. The daemon
+/// uses the attachment classifier before it routes an activity to an actor.
 /// </summary>
 public static class TeamsTenantEvidenceMappings
 {
@@ -74,10 +73,118 @@ public static class TeamsTenantEvidenceMappings
         && text.EndsWith("</at>", StringComparison.Ordinal)
         && text.Length > "<at></at>".Length;
 
-    public static bool IsUnsupportedGraphBackedAttachmentShell(string? contentType, string? name, string? contentUrl)
-        => string.Equals(contentType, "text/html", StringComparison.OrdinalIgnoreCase)
-           && string.IsNullOrWhiteSpace(name)
-           && string.IsNullOrWhiteSpace(contentUrl);
+    /// <summary>
+    /// Teams can include a non-empty HTML rendering of ordinary formatted text
+    /// beside the canonical activity text. The tenant upload fixture has an
+    /// empty HTML payload, so only this distinct bounded SDK shape is metadata.
+    /// The daemon never exposes the rendering markup to the model.
+    /// </summary>
+    public static bool IsInlineTextRendering(TeamsAttachmentEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+
+        return string.Equals(evidence.ContentType, "text/html", StringComparison.OrdinalIgnoreCase)
+               && !evidence.HasName
+               && !evidence.HasContentUrl
+               && string.IsNullOrWhiteSpace(evidence.ContentUrl)
+               && !evidence.HasEmbeddedContentReference
+               && evidence.ContentKind == TeamsAttachmentContentKind.NonEmptyText;
+    }
+
+    /// <summary>
+    /// Classifies only bounded, transport-neutral attachment facts. The current
+    /// tenant evidence approves no downloadable attachment shape, so every
+    /// nonempty attachment fails closed before actor routing.
+    /// </summary>
+    public static TeamsAttachmentClassificationResult ClassifyAttachment(TeamsAttachmentEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+
+        if (evidence.HasEmbeddedGraphBackedContentReference
+            || IsGraphBackedContentReference(evidence.ContentUrl)
+            || IsKnownGraphBackedContentType(evidence.ContentType))
+        {
+            return TeamsAttachmentClassificationResult.GraphBackedUnsupported();
+        }
+
+        if (IsInlineTextRendering(evidence))
+            return TeamsAttachmentClassificationResult.InlineTextRendering();
+
+        if (IsKnownGraphBackedUploadShell(evidence))
+            return TeamsAttachmentClassificationResult.GraphBackedUnsupported();
+
+        return TeamsAttachmentClassificationResult.UnsupportedAttachmentShape();
+    }
+
+    private static bool IsGraphBackedContentReference(string? contentUrl)
+    {
+        if (string.IsNullOrWhiteSpace(contentUrl))
+            return false;
+
+        if (!Uri.TryCreate(contentUrl, UriKind.Absolute, out var uri))
+            return false;
+
+        return uri.Host.Equals("graph.microsoft.com", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".sharepoint.com", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".sharepoint.us", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.EndsWith(".onedrive.com", StringComparison.OrdinalIgnoreCase)
+            || uri.Host.Equals("onedrive.live.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsKnownGraphBackedContentType(string? contentType)
+        => string.Equals(contentType, "application/vnd.microsoft.teams.file.download.info", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(contentType, "application/vnd.microsoft.teams.file.download.info+json", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsKnownGraphBackedUploadShell(TeamsAttachmentEvidence evidence)
+        => string.Equals(evidence.ContentType, "text/html", StringComparison.OrdinalIgnoreCase)
+           && !evidence.HasName
+           && !evidence.HasContentUrl
+           && !evidence.HasEmbeddedContentReference
+           && evidence.ContentKind == TeamsAttachmentContentKind.EmptyText;
 }
+
+public enum TeamsAttachmentClassification
+{
+    InlineTextRendering,
+    GraphBackedUnsupported,
+    UnsupportedAttachmentShape
+}
+
+/// <summary>
+/// Bounded content facts copied from the SDK attachment. The descriptor has no
+/// markup, file bytes, URI, or provider metadata.
+/// </summary>
+public enum TeamsAttachmentContentKind
+{
+    Missing,
+    EmptyText,
+    NonEmptyText,
+    Structured
+}
+
+public sealed record TeamsAttachmentClassificationResult(TeamsAttachmentClassification Classification, string? ReasonCode = null)
+{
+    public static TeamsAttachmentClassificationResult InlineTextRendering()
+        => new(TeamsAttachmentClassification.InlineTextRendering);
+
+    public static TeamsAttachmentClassificationResult GraphBackedUnsupported()
+        => new(TeamsAttachmentClassification.GraphBackedUnsupported, "graph_backed_attachment_unsupported");
+
+    public static TeamsAttachmentClassificationResult UnsupportedAttachmentShape()
+        => new(TeamsAttachmentClassification.UnsupportedAttachmentShape, "unsupported_attachment_shape");
+}
+
+/// <summary>
+/// Attachment facts copied by the daemon from the SDK object. This descriptor
+/// never enters actor state, telemetry, persistence, or a model request.
+/// </summary>
+public sealed record TeamsAttachmentEvidence(
+    string? ContentType,
+    bool HasName,
+    string? ContentUrl,
+    bool HasContentUrl,
+    bool HasEmbeddedContentReference = false,
+    bool HasEmbeddedGraphBackedContentReference = false,
+    TeamsAttachmentContentKind ContentKind = TeamsAttachmentContentKind.Missing);
 
 public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);

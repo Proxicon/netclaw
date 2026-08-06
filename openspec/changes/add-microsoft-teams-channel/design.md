@@ -104,10 +104,16 @@ down by offline fixture tests:
   and thread conversation identity. The delete carried no message text or
   mention entities. PR 4's activity-to-root index must resolve these operations
   from durable identity, not their content.
-- Channel uploads exposed only a `text/html` attachment shell without a name,
+- Channel uploads exposed an empty `text/html` attachment shell without a name,
   safe direct URL, or usable file metadata at the SDK boundary. The attachment
   remains `graph_backed_attachment_unsupported`; no Graph fallback or permission
   is approved.
+- Formatted text can expose a distinct non-empty `text/html` rendering beside
+  canonical activity text. The SDK materializes its scalar content as either a
+  CLR string or JSON string element. The translator ignores that markup as
+  metadata only. It requires no name, URL, embedded reference, or structured
+  content.
+  The canonical activity text is the only model-visible text.
 - Teams SDK plain reply delivery worked in the originating thread. The earlier
   non-SDK connector/test-harness path did not prove production delivery.
 - Teams SDK Adaptive Card delivery and authenticated `Action.Execute` invokes
@@ -123,6 +129,21 @@ down by offline fixture tests:
   destination conversation plus the created activity ID. The transport needs
   those identities and the authenticated SDK request context; it persists no
   access token.
+
+#### PR 7 live attachment validation record (2026-08-04)
+
+An isolated persistence root reused the existing app identity and authorized
+user while an allowlist policy exposed no tools or MCP servers. Plain text and
+a VS Code-formatted paste each produced one routed turn and one terminal reply.
+Both exposed the bounded HTML rendering wrapper and recorded only the safe
+`teams_text_rendering_wrapper_ignored` metric; canonical activity text remained
+the only model input.
+
+A real channel file upload was received and rejected as
+`attachment_shape_rejected`. Its receipt did not increase routed-event or reply
+counts, and it created no model turn, Graph request, download, staging action,
+or file-content ingestion. The observed upload did not match the known empty
+HTML upload shell, so the generic fail-closed result is the expected outcome.
 
 The tenant spike did **not** prove personal reply delivery or personal proactive
 delivery. PR 3 deliberately has no Teams outbound delivery, and no further
