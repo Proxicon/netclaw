@@ -153,7 +153,7 @@ assumption, no Graph fallback, no Teams-specific size knob. **Tenant prerequisit
 0.2 sanitized attachment fixture and authorization proof. **Rollback:** disable
 Teams file ingress independently.
 
-- [ ] 7.1 Implement only spike-approved attachment shapes through shared staging;
+- [x] 7.1 Implement only spike-approved attachment shapes through shared staging;
   reject Adaptive Cards, content links, and SharePoint/OneDrive as
   `graph_backed_attachment_unsupported` before model dispatch when required.
 

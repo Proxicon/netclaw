@@ -124,22 +124,40 @@ final reply for that completion path; retry logic SHALL remain bounded.
 - **WHEN** a final update to a processing message fails
 - **THEN** the channel records the failure and posts one correlated final response
 
-### Requirement: Teams attachment ingress is evidence-gated and shared
+### Requirement: Teams attachments and text renderings are evidence-gated
 
-The Teams channel SHALL reuse Netclaw's shared attachment staging, scanner,
-timeout, MIME, size, redirect-trust, duplicate, cancellation, and cleanup
-policies. It SHALL NOT introduce a parallel Teams maximum-size setting unless
-repository analysis proves the shared setting cannot apply. No Teams file shape
-may be enabled from documentation assumptions alone: only a sanitized,
-tenant-backed-spike-proven authenticated download shape may be accepted.
-Adaptive Cards are not files, content links are not automatically downloaded,
-and SharePoint/OneDrive references SHALL be rejected as
-`graph_backed_attachment_unsupported` without Graph fallback. Where an
-attachment is required to make a message valid, rejection SHALL precede model
-dispatch.
+The Teams channel SHALL accept plain activity text. It SHALL accept a formatted
+text rendering only when the SDK attachment has a non-empty `text/html` scalar
+(a CLR string or SDK JSON string element),
+no name, no content URL, no embedded reference, and no structured content.
+The HTTP body limit bounds this rendering. The translator SHALL ignore wrapper
+markup and use only canonical activity text for model input.
+
+The tenant-backed upload fixture has an empty `text/html` shell. That shell
+SHALL be rejected as `graph_backed_attachment_unsupported`. Graph, SharePoint,
+OneDrive, and file-download-info references SHALL use the same result. All
+other attachment shapes SHALL be rejected as `unsupported_attachment_shape`.
+The channel SHALL not download, stage, or send file data to a model.
+
+Safe channel telemetry SHALL record `plain_text_accepted`,
+`teams_text_rendering_wrapper_ignored`, `attachment_graph_backed_rejected`,
+`attachment_shape_rejected`, or `attachment_malformed_rejected` as applicable.
+The telemetry SHALL not contain message text, markup, filenames, URLs, or IDs.
 
 #### Scenario: Unsupported Graph-backed file is rejected
 
 - **WHEN** an inbound Teams attachment is a SharePoint or OneDrive reference
 - **THEN** it is rejected as `graph_backed_attachment_unsupported`
 - **AND** no Graph request, staging operation, or model dispatch occurs
+
+#### Scenario: Formatted pasted text uses a rendering wrapper
+
+- **WHEN** a message has canonical activity text and an evidence-backed HTML rendering wrapper
+- **THEN** the channel routes the canonical text once
+- **AND** the wrapper markup does not enter model input or attachment handling
+
+#### Scenario: An empty HTML upload shell is rejected
+
+- **WHEN** a message has the empty HTML shell from the tenant upload fixture
+- **THEN** the channel rejects it as `graph_backed_attachment_unsupported`
+- **AND** no actor, model, Graph, download, or staging action occurs

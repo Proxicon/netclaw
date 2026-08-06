@@ -22,6 +22,9 @@ namespace Netclaw.Daemon.Configuration;
 /// </summary>
 internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, TimeProvider timeProvider)
 {
+    private const int MaxAttachmentContentTypeLength = 255;
+    private const int MaxAttachmentContentUrlLength = 2_048;
+
     public TeamsTranslationResult Translate(IActivity activity, string? authenticatedTenantId)
     {
         ArgumentNullException.ThrowIfNull(activity);
@@ -144,22 +147,16 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         if (scope is null)
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, TeamsIngressActivityKind.Message, "unsupported_conversation_scope");
 
-        // Attachment retrieval is deliberately deferred to PR 7. Do not let
-        // an attachment-bearing channel post reach the model as its caption.
-        if (scope == TeamsConversationScope.Channel && activity.Attachments is { Count: > 0 })
-        {
-            return TeamsTranslationResult.Rejected(
-                TeamsTranslationDisposition.RejectedMalformed,
-                TeamsIngressActivityKind.Message,
-                "graph_backed_attachment_unsupported");
-        }
-
         string? rootActivityId = null;
         if (scope == TeamsConversationScope.Channel
             && !TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(activity.Conversation.Id, out rootActivityId))
         {
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "invalid_channel_root_identity");
         }
+
+        var attachmentFailure = RejectUnsupportedAttachments(activity.Attachments);
+        if (attachmentFailure is not null)
+            return attachmentFailure;
 
         var trust = CreateTrust(activity, authenticatedTenantId, scope.Value);
         var mentions = TranslateMentions(activity.Entities);
@@ -181,7 +178,10 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             kind: TeamsIngressActivityKind.Message,
             teamId: activity.ChannelData?.Team?.Id,
             channelId: activity.ChannelData?.Channel?.Id,
-            mentions: mentions));
+            mentions: mentions),
+            activity.Attachments is { Count: > 0 }
+                ? "teams_text_rendering_wrapper_ignored"
+                : "plain_text_accepted");
     }
 
     private TeamsTranslationResult TranslateMutation(
@@ -267,6 +267,91 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
 
         failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedUnsupportedScope, kind, "unsupported_conversation_scope");
         return false;
+    }
+
+    private static TeamsTranslationResult? RejectUnsupportedAttachments(IList<Attachment>? attachments)
+    {
+        if (attachments is null || attachments.Count == 0)
+            return null;
+
+        var reasonCode = "unsupported_attachment_shape";
+        var hasUnsupportedAttachment = false;
+        var hasMalformedAttachment = false;
+        foreach (var attachment in attachments)
+        {
+            if (attachment is null)
+            {
+                hasUnsupportedAttachment = true;
+                hasMalformedAttachment = true;
+                continue;
+            }
+
+            var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference) = GetContentFacts(attachment.Content);
+            var evidence = new TeamsAttachmentEvidence(
+                GetBoundedAttachmentMetadata(attachment.ContentType?.Value, MaxAttachmentContentTypeLength),
+                attachment.Name is not null,
+                GetBoundedAttachmentMetadata(attachment.ContentUrl, MaxAttachmentContentUrlLength),
+                attachment.ContentUrl is not null,
+                hasEmbeddedContentReference,
+                hasEmbeddedGraphBackedContentReference,
+                contentKind);
+
+            var classification = TeamsTenantEvidenceMappings.ClassifyAttachment(evidence);
+            if (classification.Classification == TeamsAttachmentClassification.InlineTextRendering)
+                continue;
+
+            hasUnsupportedAttachment = true;
+            if (classification.Classification == TeamsAttachmentClassification.GraphBackedUnsupported)
+                reasonCode = classification.ReasonCode!;
+        }
+
+        if (!hasUnsupportedAttachment)
+            return null;
+
+        if (reasonCode == "unsupported_attachment_shape" && hasMalformedAttachment)
+            reasonCode = "attachment_malformed_rejected";
+
+        return TeamsTranslationResult.Rejected(
+            TeamsTranslationDisposition.RejectedMalformed,
+            TeamsIngressActivityKind.Message,
+            reasonCode);
+    }
+
+    private static string? GetBoundedAttachmentMetadata(string? value, int maximumLength)
+        => value is { Length: > 0 } && value.Length <= maximumLength ? value : null;
+
+    private static (TeamsAttachmentContentKind ContentKind, bool HasReference, bool HasGraphBackedReference) GetContentFacts(object? content)
+    {
+        if (content is null)
+            return (TeamsAttachmentContentKind.Missing, false, false);
+
+        // The Teams SDK declares attachment Content as object. System.Text.Json
+        // therefore materializes the normal text/html rendering wrapper as a
+        // JSON string element on live inbound activities, not a CLR string.
+        // Only that scalar representation is equivalent to text; objects and
+        // arrays remain structured attachment evidence and fail closed.
+        var text = content switch
+        {
+            string value => value,
+            JsonElement { ValueKind: JsonValueKind.String } json => json.GetString(),
+            _ => null
+        };
+        if (text is null)
+            return (TeamsAttachmentContentKind.Structured, false, false);
+        if (string.IsNullOrWhiteSpace(text))
+            return (TeamsAttachmentContentKind.EmptyText, false, false);
+
+        var hasReference = text.Contains("http://", StringComparison.OrdinalIgnoreCase)
+                           || text.Contains("https://", StringComparison.OrdinalIgnoreCase);
+        if (!hasReference)
+            return (TeamsAttachmentContentKind.NonEmptyText, false, false);
+
+        var hasGraphBackedReference = text.Contains("graph.microsoft.com", StringComparison.OrdinalIgnoreCase)
+                                      || text.Contains(".sharepoint.com", StringComparison.OrdinalIgnoreCase)
+                                      || text.Contains(".sharepoint.us", StringComparison.OrdinalIgnoreCase)
+                                      || text.Contains(".onedrive.com", StringComparison.OrdinalIgnoreCase)
+                                      || text.Contains("onedrive.live.com", StringComparison.OrdinalIgnoreCase);
+        return (TeamsAttachmentContentKind.NonEmptyText, true, hasGraphBackedReference);
     }
 
     private static ImmutableArray<TeamsMention> TranslateMentions(IList<IEntity>? entities)
