@@ -6,6 +6,7 @@
 using Akka.Actor;
 using Akka.Hosting;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
@@ -387,6 +388,13 @@ public class DispatchingToolExecutorTests
             ChannelType = "signalr"
         });
 
+        var decision = await executor.EvaluateAuthorizationAsync(
+            toolCall,
+            context,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ToolAuthorizationOutcome.Denied, decision.Outcome);
+        Assert.Equal("shell_disabled", decision.DenyReason);
         var ex = await Assert.ThrowsAsync<ToolAccessDeniedException>(() => executor.ExecuteAsync(toolCall, context, TestContext.Current.CancellationToken));
         Assert.Equal("shell_disabled", ex.DenyReason);
     }
@@ -407,6 +415,185 @@ public class DispatchingToolExecutorTests
 
         var result = await _restrictedExecutor.ExecuteAsync(toolCall, context, TestContext.Current.CancellationToken);
         Assert.Contains("allowed", result);
+    }
+
+    [Theory]
+    [InlineData("echo observable")]
+    [InlineData("printf observable")]
+    [InlineData(":")]
+    [InlineData("true")]
+    [InlineData("false")]
+    public async Task Approval_exempt_shell_candidates_report_allow_reason(string command)
+    {
+        var executor = CreateApprovalGatedShellExecutor();
+        var call = new FunctionCallContent(
+            "call-approval-exempt",
+            "shell_execute",
+            ToolInput.Create("Command", command));
+        var context = CreateInteractivePersonalContext("signalr/thread-approval-exempt");
+
+        var decision = await executor.EvaluateAuthorizationAsync(
+            call,
+            context,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ToolAuthorizationOutcome.Allowed, decision.Outcome);
+        Assert.Equal(ToolAllowReason.ApprovalExemptShellCandidates, decision.AllowReason);
+        Assert.Empty(decision.ApprovalMatches);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Shell_approval_without_extracted_candidates_fails_closed(string command)
+    {
+        var executor = CreateApprovalGatedShellExecutor();
+        var call = new FunctionCallContent(
+            "call-no-approval-candidates",
+            "shell_execute",
+            ToolInput.Create("Command", command));
+        var context = CreateInteractivePersonalContext("signalr/thread-no-approval-candidates");
+
+        var decision = await executor.EvaluateAuthorizationAsync(
+            call,
+            context,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ToolAuthorizationOutcome.RequiresApproval, decision.Outcome);
+        Assert.NotNull(decision.ApprovalContext);
+        Assert.Empty(decision.ApprovalContext.Candidates!);
+    }
+
+    [Fact]
+    public async Task Shell_parser_rejection_fails_closed_without_execution()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var markerPath = Path.Combine(Path.GetTempPath(), $"netclaw-approval-{Guid.NewGuid():N}");
+        var command = $"touch {markerPath} <(true)";
+        var arguments = ToolInput.Create("Command", command);
+        Assert.False(ShellTokenizer.IsMessyCompoundCommand(command));
+        Assert.Empty(ShellApprovalMatcher.Instance.ExtractCandidates(new ToolName("shell_execute"), arguments));
+
+        var executor = CreateApprovalGatedShellExecutor();
+        var call = new FunctionCallContent(
+            "call-parser-rejection",
+            "shell_execute",
+            arguments);
+        var context = CreateInteractivePersonalContext("signalr/thread-parser-rejection");
+
+        var decision = await executor.EvaluateAuthorizationAsync(
+            call,
+            context,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ToolAuthorizationOutcome.RequiresApproval, decision.Outcome);
+        Assert.NotNull(decision.ApprovalContext);
+        Assert.Empty(decision.ApprovalContext.Candidates!);
+        Assert.False(File.Exists(markerPath));
+    }
+
+    [Fact]
+    public async Task Authorization_evaluation_preserves_partial_approval_matches()
+    {
+        var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        config.AudienceProfiles.Personal.ApprovalPolicy = new ToolApprovalConfig
+        {
+            ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                ["shell_execute"] = ToolApprovalMode.Approval
+            }
+        };
+        var registry = new ToolRegistry();
+        registry.WithFirstPartyTools(
+            config,
+            new NetclawPaths(),
+            new ToolPathPolicy([]),
+            new ShellCommandPolicy());
+        var approvedMatch = new ToolApprovalMatch("git status", "session", "this chat");
+        var approvalService = new FixedApprovalService(
+            new ToolApprovalCheckResult(["git push"], [approvedMatch]));
+        var executor = new DispatchingToolExecutor(
+            registry,
+            new ToolAccessPolicy(
+                config,
+                new EffectivePolicyDefaults(
+                    DeploymentPosture.Personal,
+                    TrustAudience.Personal,
+                    ShellExecutionMode.HostAllowed,
+                    UsedStrictFallback: false)),
+            approvalService);
+        var call = new FunctionCallContent(
+            "call-partial-approval",
+            "shell_execute",
+            ToolInput.Create("Command", "git status && git push"));
+        var context = TestToolExecutionContext.CreateBound(
+            "signalr/thread-partial-approval",
+            null,
+            new TestToolExecutionContextOptions
+            {
+                Audience = TrustAudience.Personal,
+                InteractiveApproval = TestToolExecutionContext.InteractiveApproval(true)
+            });
+
+        var decision = await executor.EvaluateAuthorizationAsync(
+            call,
+            context,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ToolAuthorizationOutcome.RequiresApproval, decision.Outcome);
+        Assert.NotNull(decision.ApprovalContext);
+        Assert.Equal([approvedMatch], decision.ApprovalMatches);
+    }
+
+    [Fact]
+    public async Task Authorization_evaluation_logs_allow_reason_before_execution()
+    {
+        var config = new ToolConfig();
+        var registry = new ToolRegistry();
+        var executionCount = 0;
+        registry.Register(
+            AIFunctionFactory.Create(() =>
+            {
+                executionCount++;
+                return "ok";
+            }, "telemetry_probe"),
+            "test");
+        var logger = new RecordingLogger<DispatchingToolExecutor>();
+        var executor = new DispatchingToolExecutor(
+            registry,
+            new ToolAccessPolicy(
+                config,
+                new EffectivePolicyDefaults(
+                    DeploymentPosture.Personal,
+                    TrustAudience.Personal,
+                    ShellExecutionMode.HostAllowed,
+                    UsedStrictFallback: false)),
+            logger: logger);
+        var call = new FunctionCallContent(
+            "call-authorization-telemetry",
+            "telemetry_probe",
+            ToolInput.Empty());
+        var context = TestToolExecutionContext.CreateBound(
+            "signalr/thread-authorization-telemetry",
+            null,
+            new TestToolExecutionContextOptions { Audience = TrustAudience.Personal });
+
+        var decision = await executor.EvaluateAuthorizationAsync(
+            call,
+            context,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, executionCount);
+        Assert.Equal(ToolAuthorizationOutcome.Allowed, decision.Outcome);
+        Assert.Equal(ToolAllowReason.PolicyAuto, decision.AllowReason);
+        var log = Assert.Single(logger.Entries);
+        Assert.Equal(nameof(ToolAuthorizationOutcome.Allowed), log["AuthorizationOutcome"]);
+        Assert.Equal(nameof(ToolAllowReason.PolicyAuto), log["AuthorizationReason"]);
+        Assert.Equal(
+            ToolAllowReason.PolicyAuto.GetDescription(),
+            log["AuthorizationExplanation"]);
     }
 
     [Fact]
@@ -720,14 +907,27 @@ public class DispatchingToolExecutorTests
             InteractiveApproval = TestToolExecutionContext.InteractiveApproval(true)
         });
 
+        var initialDecision = await executor.EvaluateAuthorizationAsync(
+            toolCall,
+            context,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ToolAuthorizationOutcome.RequiresApproval, initialDecision.Outcome);
+        Assert.NotNull(initialDecision.ApprovalContext);
+
         var firstAttempt = await Assert.ThrowsAsync<ToolApprovalRequiredException>(() =>
             executor.ExecuteAsync(toolCall, context, TestContext.Current.CancellationToken));
 
         context.OneTimeApprovedToolName = toolCall.Name;
         context.SetOneTimeApprovedPatterns(firstAttempt.ApprovalContext.Patterns);
 
+        var decision = await executor.EvaluateAuthorizationAsync(
+            toolCall,
+            context,
+            TestContext.Current.CancellationToken);
         var retryResult = await executor.ExecuteAsync(toolCall, context, TestContext.Current.CancellationToken);
 
+        Assert.Equal(ToolAuthorizationOutcome.Allowed, decision.Outcome);
+        Assert.Equal(ToolAllowReason.OneTimeApproval, decision.AllowReason);
         Assert.Contains("bypass", retryResult, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -934,8 +1134,17 @@ public class DispatchingToolExecutorTests
                 "shell_execute",
                 ToolInput.Create("Command", "git status"));
 
-            await executor.AuthorizeAsync(call, context, TestContext.Current.CancellationToken);
+            var decision = await executor.EvaluateAuthorizationAsync(
+                call,
+                context,
+                TestContext.Current.CancellationToken);
 
+            Assert.Equal(ToolAuthorizationOutcome.Allowed, decision.Outcome);
+            Assert.Equal(ToolAllowReason.StoredApproval, decision.AllowReason);
+            var match = Assert.Single(decision.ApprovalMatches);
+            Assert.Equal("git status", match.Pattern);
+            Assert.Equal("persistent", match.Source);
+            Assert.Equal("git status anywhere", match.Scope);
             Assert.Equal("PreviouslyApproved", context.AppliedApprovalDecision);
             Assert.Equal("git status [persistent: git status anywhere]", context.AppliedApprovalPattern);
         }
@@ -1139,6 +1348,141 @@ public class DispatchingToolExecutorTests
         finally
         {
             await system.Terminate();
+        }
+    }
+
+    private static DispatchingToolExecutor CreateApprovalGatedShellExecutor()
+    {
+        var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        config.AudienceProfiles.Personal.ApprovalPolicy = new ToolApprovalConfig
+        {
+            ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                ["shell_execute"] = ToolApprovalMode.Approval
+            }
+        };
+        var registry = new ToolRegistry();
+        registry.WithFirstPartyTools(
+            config,
+            new NetclawPaths(),
+            new ToolPathPolicy([]),
+            new ShellCommandPolicy());
+        return new DispatchingToolExecutor(
+            registry,
+            new ToolAccessPolicy(
+                config,
+                new EffectivePolicyDefaults(
+                    DeploymentPosture.Personal,
+                    TrustAudience.Personal,
+                    ShellExecutionMode.HostAllowed,
+                    UsedStrictFallback: false)),
+            new UnexpectedApprovalService());
+    }
+
+    private static ToolExecutionContext CreateInteractivePersonalContext(string sessionId)
+        => TestToolExecutionContext.CreateBound(
+            sessionId,
+            null,
+            new TestToolExecutionContextOptions
+            {
+                Audience = TrustAudience.Personal,
+                InteractiveApproval = TestToolExecutionContext.InteractiveApproval(true)
+            });
+
+    private sealed class UnexpectedApprovalService : IToolApprovalService
+    {
+        public Task<ToolApprovalCheckResult> CheckApprovalAsync(
+            ToolApprovalSessionId? sessionId,
+            TrustAudience audience,
+            ToolName toolName,
+            IReadOnlyList<ApprovalCandidate> candidates,
+            string? cwd,
+            CancellationToken ct = default)
+            => throw new InvalidOperationException("The approval-exempt path must not query stored approvals.");
+
+        public Task<IReadOnlyList<string>> GetUnapprovedPatternsAsync(
+            ToolApprovalSessionId? sessionId,
+            TrustAudience audience,
+            ToolName toolName,
+            IReadOnlyList<string> patterns,
+            string? cwd,
+            CancellationToken ct = default)
+            => throw new InvalidOperationException("The approval-exempt path must not query stored approvals.");
+
+        public Task RecordApprovalAsync(
+            ToolApprovalSessionId sessionId,
+            TrustAudience audience,
+            ToolName toolName,
+            IReadOnlyList<string> patterns,
+            bool persistent,
+            string? cwd,
+            CancellationToken ct = default)
+            => throw new InvalidOperationException("The approval-exempt path must not record an approval.");
+    }
+
+    private sealed class FixedApprovalService(ToolApprovalCheckResult result) : IToolApprovalService
+    {
+        public Task<ToolApprovalCheckResult> CheckApprovalAsync(
+            ToolApprovalSessionId? sessionId,
+            TrustAudience audience,
+            ToolName toolName,
+            IReadOnlyList<ApprovalCandidate> candidates,
+            string? cwd,
+            CancellationToken ct = default)
+            => Task.FromResult(result);
+
+        public Task<IReadOnlyList<string>> GetUnapprovedPatternsAsync(
+            ToolApprovalSessionId? sessionId,
+            TrustAudience audience,
+            ToolName toolName,
+            IReadOnlyList<string> patterns,
+            string? cwd,
+            CancellationToken ct = default)
+            => throw new InvalidOperationException("The test does not use the legacy approval check.");
+
+        public Task RecordApprovalAsync(
+            ToolApprovalSessionId sessionId,
+            TrustAudience audience,
+            ToolName toolName,
+            IReadOnlyList<string> patterns,
+            bool persistent,
+            string? cwd,
+            CancellationToken ct = default)
+            => throw new InvalidOperationException("The authorization evaluator must not record an approval.");
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<IReadOnlyDictionary<string, object?>> Entries { get; } = [];
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull
+            => EmptyScope.Instance;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (state is not IEnumerable<KeyValuePair<string, object?>> properties)
+                return;
+
+            Entries.Add(properties.ToDictionary(
+                property => property.Key,
+                property => property.Value,
+                StringComparer.Ordinal));
+        }
+
+        private sealed class EmptyScope : IDisposable
+        {
+            public static readonly EmptyScope Instance = new();
+
+            public void Dispose()
+            {
+            }
         }
     }
 
