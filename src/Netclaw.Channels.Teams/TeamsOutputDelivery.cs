@@ -18,7 +18,23 @@ public enum TeamsDeliveryStatus
     RejectedTooLarge,
     Unavailable,
     Cancelled,
-    Failed
+    Failed,
+    InvalidDestination
+}
+
+/// <summary>
+/// Durable state for one reminder delivery key. A recovered Sending state is
+/// represented as DeliveryUnknown and requires operator-visible retry policy;
+/// it never implies a successful external post.
+/// </summary>
+public enum TeamsProactiveDeliveryState
+{
+    Pending = 0,
+    Sending = 1,
+    Sent = 2,
+    FailedRetryable = 3,
+    FailedPermanent = 4,
+    DeliveryUnknown = 5
 }
 
 public sealed record TeamsDeliveryResult(TeamsDeliveryStatus Status, string? ActivityId = null, string? ReasonCode = null)

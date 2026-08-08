@@ -611,6 +611,49 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void Teams_proactive_destination_and_delivery_state_round_trip_without_message_content()
+    {
+        var destination = new TeamsProactiveDestinationCaptured
+        {
+            TenantId = "tenant-a",
+            ConversationId = "conversation-a",
+            Scope = 1,
+            ServiceUrl = "https://service.invalid/",
+            UserId = "user-a"
+        };
+        var delivery = new TeamsProactiveDeliveryRecorded
+        {
+            DeliveryKey = "reminder-a:123",
+            State = 2
+        };
+        var snapshot = new DurableActivityDispatchSnapshot([])
+        {
+            TeamsDestination = new TeamsProactiveDestinationSnapshotEntry
+            {
+                TenantId = destination.TenantId,
+                ConversationId = destination.ConversationId,
+                Scope = destination.Scope,
+                ServiceUrl = destination.ServiceUrl,
+                UserId = destination.UserId
+            },
+            TeamsProactiveDeliveries =
+            [
+                new TeamsProactiveDeliverySnapshotEntry
+                {
+                    DeliveryKey = delivery.DeliveryKey,
+                    State = delivery.State
+                }
+            ]
+        };
+
+        Assert.Equal(destination, RoundTrip(destination));
+        Assert.Equal(delivery, RoundTrip(delivery));
+        Assert.Equal(snapshot.TeamsDestination, RoundTrip(snapshot).TeamsDestination);
+        Assert.Equal(snapshot.TeamsProactiveDeliveries, RoundTrip(snapshot).TeamsProactiveDeliveries);
+        Assert.DoesNotContain("message body", Encoding.UTF8.GetString(Serialize(snapshot)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Durable_activity_dispatch_default_payloads_deserialize_without_raw_activity_content()
     {
         const string activityId = "opaque-活動-id";
@@ -629,6 +672,10 @@ public sealed class SerializationRoundTripTests : TestKit
         Assert.Empty(snapshotWithUnknownField.ActivityFingerprints);
         Assert.Empty(snapshot.TeamsApprovals);
         Assert.Empty(snapshotWithUnknownField.TeamsApprovals);
+        Assert.Null(snapshot.TeamsDestination);
+        Assert.Empty(snapshot.TeamsProactiveDeliveries);
+        Assert.Null(snapshotWithUnknownField.TeamsDestination);
+        Assert.Empty(snapshotWithUnknownField.TeamsProactiveDeliveries);
         Assert.DoesNotContain(activityId, Encoding.UTF8.GetString(serialized), StringComparison.Ordinal);
     }
 

@@ -168,9 +168,9 @@ chosen and exposed to operators. **Tenant prerequisite:** proactive address
 construction and send behavior from 0.2. **Rollback:** disable Teams reminder
 targets while preserving evidence.
 
-- [ ] 8.1 Implement tenant-bound persisted destinations and current-session/
+- [x] 8.1 Implement tenant-bound persisted destinations and current-session/
   explicit target resolution without Graph discovery.
-- [ ] 8.2 Implement `Pending`/`Sending`/`Sent`/`FailedRetryable`/
+- [x] 8.2 Implement `Pending`/`Sending`/`Sent`/`FailedRetryable`/
   `FailedPermanent`/`DeliveryUnknown` state transitions and choose/document the
   explicit `DeliveryUnknown` recovery policy.
 

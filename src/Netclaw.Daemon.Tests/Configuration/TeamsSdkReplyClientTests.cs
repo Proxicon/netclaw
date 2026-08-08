@@ -54,6 +54,16 @@ public sealed class TeamsSdkReplyClientTests
     }
 
     [Fact]
+    public async Task Reply_client_maps_a_missing_destination_to_a_permanent_safe_result()
+    {
+        var result = await new TeamsSdkReplyClient(new FakeOperations("missing-destination"))
+            .DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsDeliveryStatus.InvalidDestination, result.Status);
+        Assert.Equal("sdk_destination_invalid", result.ReasonCode);
+    }
+
+    [Fact]
     public async Task Reply_client_maps_cancellation_and_sanitizes_unknown_exceptions()
     {
         var cancelled = await new TeamsSdkReplyClient(new FakeOperations("cancelled"))
@@ -95,6 +105,7 @@ public sealed class TeamsSdkReplyClientTests
                 "unavailable" => Task.FromException<string?>(new HttpRequestException("transport unavailable")),
                 "unauthorized" => Task.FromException<string?>(new UnauthorizedAccessException("credential failure")),
                 "too-large" => Task.FromException<string?>(new HttpRequestException("MessageSizeTooBig", null, HttpStatusCode.RequestEntityTooLarge)),
+                "missing-destination" => Task.FromException<string?>(new HttpRequestException("gone", null, HttpStatusCode.Gone)),
                 "cancelled" => Task.FromException<string?>(new OperationCanceledException()),
                 "secret" => Task.FromException<string?>(new InvalidOperationException("secret tenant service URL body")),
                 _ => Task.FromResult<string?>(outcome)

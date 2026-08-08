@@ -34,6 +34,91 @@ public sealed record DurableActivityDispatchSnapshot(
     /// the empty default.
     /// </summary>
     public IReadOnlyList<TeamsApprovalSnapshotEntry> TeamsApprovals { get; init; } = Array.Empty<TeamsApprovalSnapshotEntry>();
+
+    /// <summary>
+    /// The current Teams proactive destination. It contains only bounded routing
+    /// data and is null until an allowed Teams activity captures one.
+    /// </summary>
+    public TeamsProactiveDestinationSnapshotEntry? TeamsDestination { get; init; }
+
+    /// <summary>
+    /// Bounded per-reminder delivery state retained by a Teams binding. Entries
+    /// are keyed by a generic reminder delivery key, never reminder content.
+    /// </summary>
+    public IReadOnlyList<TeamsProactiveDeliverySnapshotEntry> TeamsProactiveDeliveries { get; init; } = Array.Empty<TeamsProactiveDeliverySnapshotEntry>();
+}
+
+/// <summary>
+/// Captures a validated Teams destination after an allowed inbound activity.
+/// SDK objects, tokens, message bodies, and headers are deliberately absent.
+/// </summary>
+public sealed record TeamsProactiveDestinationCaptured : INetclawSerializableMessage
+{
+    public string TenantId { get; init; } = string.Empty;
+
+    public string ConversationId { get; init; } = string.Empty;
+
+    public int Scope { get; init; }
+
+    public string ServiceUrl { get; init; } = string.Empty;
+
+    public string? RootActivityId { get; init; }
+
+    public string? TeamId { get; init; }
+
+    public string? ChannelId { get; init; }
+
+    public string? UserId { get; init; }
+}
+
+/// <summary>
+/// Removes the current Teams destination after a permanent outbound failure.
+/// The event applies only to its owning session-binding actor.
+/// </summary>
+public sealed record TeamsProactiveDestinationInvalidated : INetclawSerializableMessage;
+
+/// <summary>
+/// Durable state transition for a single Teams reminder delivery attempt.
+/// </summary>
+public sealed record TeamsProactiveDeliveryRecorded : INetclawSerializableMessage
+{
+    public string DeliveryKey { get; init; } = string.Empty;
+
+    public int State { get; init; }
+
+    public string? EvictedDeliveryKey { get; init; }
+}
+
+/// <summary>
+/// Snapshot representation of the non-secret Teams destination.
+/// </summary>
+public sealed record TeamsProactiveDestinationSnapshotEntry
+{
+    public string TenantId { get; init; } = string.Empty;
+
+    public string ConversationId { get; init; } = string.Empty;
+
+    public int Scope { get; init; }
+
+    public string ServiceUrl { get; init; } = string.Empty;
+
+    public string? RootActivityId { get; init; }
+
+    public string? TeamId { get; init; }
+
+    public string? ChannelId { get; init; }
+
+    public string? UserId { get; init; }
+}
+
+/// <summary>
+/// Snapshot representation of one bounded reminder delivery state transition.
+/// </summary>
+public sealed record TeamsProactiveDeliverySnapshotEntry
+{
+    public string DeliveryKey { get; init; } = string.Empty;
+
+    public int State { get; init; }
 }
 
 /// <summary>

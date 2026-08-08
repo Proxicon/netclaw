@@ -371,6 +371,62 @@ records a success only after an SDK success result.
 PR 5 does not add personal proactive delivery. PR 8 owns persisted destination
 selection, proactive sends, and their durable delivery state.
 
+#### PR 8 proactive reminder delivery record (2026-08-08)
+
+`TeamsSessionBindingActor` is the sole authoritative owner of one current,
+tenant-bound `TeamsOutboundDestination` for its canonical personal session or
+channel-root session. It captures or refreshes that destination only after
+the authenticated activity has passed tenant, scope, canonical-session/root,
+and personal or channel ACL validation. Destination capture happens before the
+durable admission reservation. Rejected, ignored, malformed, duplicate,
+update, delete, attachment-rejected, and unsupported activities do not capture
+or replace it.
+
+The persisted destination contains only the bounded tenant, conversation,
+scope, required HTTPS service URL, and scope-specific identity: personal user,
+or channel team, channel, and root activity ID. It contains no SDK context,
+access token, credential, message body, raw activity, or URL query, fragment,
+or user-info. A recovered binding validates all fields and requires that the
+destination reconstruct exactly the binding session. A channel destination
+always replies to its captured root. It never falls back to a top-level post,
+a different root, or a personal conversation.
+
+The generic current-session reminder workflow routes a canonical Teams session
+to the registered Teams gateway, then to its owning conversation and binding.
+It therefore resolves one explicit known destination; a missing destination
+returns a typed unavailable result and makes no SDK call. There is no Graph
+lookup, global last-destination selection, or cross-tenant/user/channel
+discovery. Arbitrary user or channel target strings are not accepted as Teams
+proactive destinations.
+
+For each stable generic reminder delivery key, the binding persists `Pending`
+before it records `Sending` and submits the turn to the normal session pipeline.
+It persists `Sent` only after the Teams SDK accepts a post. Retryable local or
+transport failures record `FailedRetryable`; a missing or expired remote
+destination records `FailedPermanent` and invalidates only that binding's
+destination. A repeated `Sent` key reports the already confirmed delivery
+without another post. A process recovery converts every recorded `Sending`
+entry to a persisted `DeliveryUnknown`. The selected policy is
+operator-review-only: a repeated unknown key is not automatically resent and
+is never reported as delivered. This prevents a false exactly-once claim during
+the external-send crash window.
+
+The daemon transport first uses a live inbound SDK context for ordinary replies.
+After that request has completed, proactive sends use the daemon SDK app and
+the validated persisted destination. Update operations still require a live
+context and are not treated as proactive sends. Safe telemetry records only
+classification codes for destination capture, missing destination, delivery
+attempt, success, retryable failure, and permanent invalidation. It never
+contains destination values, reminder content, SDK exceptions, or credentials.
+
+The new protobuf fields and manifests are append-only. Older binaries do not
+understand the PR 8 durable events and must not be rolled back against a journal
+containing them. Operators may instead disable Teams while retaining that state.
+Offline tests cover destination recovery, missing-destination refusal,
+confirmed-delivery restart idempotency, and the `DeliveryUnknown` recovery
+policy. Personal and channel-thread tenant proactive sends remain live test
+gates and are not yet claimed as complete.
+
 ### Keep credentials secret in every surface
 
 `ClientSecret` may participate in effective runtime binding for ClientSecret
