@@ -269,27 +269,39 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
         // Each parser path is an authorization scope. A grant must cover all
         // scopes, or a later external path could hide behind an earlier local
         // path. The resolved value also handles native forms such as @file.
-        foreach (var arg in clause.Args)
+        //
+        // Temporary containment for #1795. ShellSyntaxTree 0.2 tags an echo or
+        // printf text operand as a path arg or a glob arg. The matcher then
+        // makes a phantom directory scope from literal text. A pure side-effect
+        // verb writes only to stdout. Its operands are never filesystem paths.
+        // So this verb derives no arg-based scope. A redirect still gives a real
+        // scope below. This code only removes a false scope. It never grants a
+        // new one. ShellSyntaxTree v0.3.0 fixes the misclassification in the
+        // parser. Remove this guard then.
+        if (!isSideEffectVerb)
         {
-            if (arg.IsCwdAttribution || !IsAuthorizationPathArg(arg, clauseWorkingDirectory))
-                continue;
-
-            if (arg.Kind == ShellSyntaxTree.ArgKind.Glob)
+            foreach (var arg in clause.Args)
             {
-                var coveringDirectory = ResolveGlobCoveringDirectory(arg, clauseWorkingDirectory);
-                if (coveringDirectory is null)
+                if (arg.IsCwdAttribution || !IsAuthorizationPathArg(arg, clauseWorkingDirectory))
+                    continue;
+
+                if (arg.Kind == ShellSyntaxTree.ArgKind.Glob)
+                {
+                    var coveringDirectory = ResolveGlobCoveringDirectory(arg, clauseWorkingDirectory);
+                    if (coveringDirectory is null)
+                        return null;
+
+                    directories.Add(coveringDirectory);
+                    continue;
+                }
+
+                // A parser path without a canonical value cannot use the broader
+                // cwd grant. Return no candidates so the command fails closed.
+                if (string.IsNullOrWhiteSpace(arg.Resolved))
                     return null;
 
-                directories.Add(coveringDirectory);
-                continue;
+                directories.Add(ShellTokenizer.ApplyFileParentRule(arg.Resolved));
             }
-
-            // A parser path without a canonical value cannot use the broader
-            // cwd grant. Return no candidates so the command fails closed.
-            if (string.IsNullOrWhiteSpace(arg.Resolved))
-                return null;
-
-            directories.Add(ShellTokenizer.ApplyFileParentRule(arg.Resolved));
         }
 
         foreach (var redirect in clause.Redirects)
@@ -395,6 +407,28 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
         if (!arg.IsPath)
             return false;
 
+        // Temporary containment for #1795. ShellSyntaxTree 0.2 tags a bare
+        // numeric operand such as `head -c 2000` as a path arg. The matcher
+        // then makes a phantom scope `/cwd/2000`. A token of only ASCII digits
+        // is normally a numeric value, not a path.
+        //
+        // Drop the token ONLY when no filesystem entry exists at its resolved
+        // path. A real file, directory, or symlink named `2000` stays a path
+        // arg, so its directory scope and the later symlink-segment check
+        // survive. Without this existence gate, `cat 2000` where `2000` is a
+        // symlink out of the granted tree would collapse to the cwd and skip
+        // the symlink check — a prompt-to-auto-approve escalation on the ACL
+        // perimeter. ShouldDropNumericToken safe-fails: it keeps the arg as a
+        // path on any doubt, so the gate prompts. This guard stays narrow:
+        // `2000.txt`, `file1234`, and `1234/x` still pass. This code only
+        // removes a false scope. It never grants a new one. ShellSyntaxTree
+        // v0.3.0 classifies the operand in the parser. Remove this guard then.
+        if (arg.Raw.Length > 0 && arg.Raw.All(char.IsAsciiDigit)
+            && ShouldDropNumericToken(arg, workingDirectory))
+        {
+            return false;
+        }
+
         if (ShellTokenizer.IsPathToken(arg.Raw) || !arg.Raw.Contains('/', StringComparison.Ordinal))
             return true;
 
@@ -425,6 +459,51 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
                                       or System.Security.SecurityException)
         {
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Decides if an all-digit operand is a plain numeric value and not a real
+    /// filesystem object. This is temporary containment for #1795. It returns
+    /// <c>true</c> only when the matcher can prove no entry exists at the
+    /// resolved path. On any doubt it returns <c>false</c>, so the caller keeps
+    /// the token as a path and the gate prompts. It never fails toward an
+    /// automatic grant.
+    /// </summary>
+    private static bool ShouldDropNumericToken(ShellSyntaxTree.Arg arg, string? workingDirectory)
+    {
+        try
+        {
+            var token = string.IsNullOrWhiteSpace(arg.Resolved) ? arg.Raw : arg.Resolved;
+
+            string path;
+            if (Path.IsPathRooted(token))
+            {
+                path = token;
+            }
+            else if (!string.IsNullOrWhiteSpace(workingDirectory))
+            {
+                path = Path.Combine(workingDirectory, token);
+            }
+            else
+            {
+                // No absolute path to probe. Keep the token as a path.
+                return false;
+            }
+
+            // File.Exists and Directory.Exists follow a symlink to its target.
+            // A real symlink to an outside path returns true here, so the token
+            // stays a path and keeps its symlink-segment check downstream.
+            return !File.Exists(path) && !Directory.Exists(path);
+        }
+        catch (Exception ex) when (ex is ArgumentException
+                                      or IOException
+                                      or NotSupportedException
+                                      or UnauthorizedAccessException
+                                      or System.Security.SecurityException)
+        {
+            // The probe failed. Keep the token as a path so the gate prompts.
+            return false;
         }
     }
 
@@ -511,12 +590,14 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
     /// Rebuilds one clause's user-facing text from its parsed parts: verb
     /// chain, positional/flag args, and redirects. Synthetic cd-attribution
     /// args are dropped — they carry an inherited cwd, not a token the user
-    /// typed. Call-specific value arguments (issue #1331, generalized to
-    /// digit-bearing tokens — see <see cref="IsCallSpecificValueToken"/>)
-    /// are also excluded since they vary between invocations of the same
-    /// verb chain. Once a value token is encountered, the greedy walk
-    /// terminates — subsequent args (wrapped subcommands like <c>curl</c>
-    /// after <c>timeout 30</c>) are outside the approval intent.
+    /// typed. Call-specific value arguments are also excluded since they vary
+    /// between invocations of the same verb chain: digit-bearing tokens
+    /// (issue #1331, see <see cref="IsCallSpecificValueToken"/>), multi-line
+    /// quoted strings (issue #1402, see <see cref="ContainsLineBreak"/>), and
+    /// single-line quoted free text (issue #1406, see
+    /// <see cref="IsQuotedFreeTextArg"/>). Once such a token is encountered,
+    /// the greedy walk terminates — subsequent args (wrapped subcommands like
+    /// <c>curl</c> after <c>timeout 30</c>) are outside the approval intent.
     /// The result is fed back through
     /// <see cref="ShellTokenizer.NormalizeApprovalUnit"/> for path
     /// normalization, so this only needs to emit a clean token sequence.
@@ -547,6 +628,16 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
             // pattern's display. Like the digit rule above, hitting one
             // terminates the walk.
             if (ContainsLineBreak(arg.Raw))
+                break;
+
+            // Issue #1406: a single-line quoted operand whose text holds
+            // internal whitespace (a commit message, a ticket body, an inline
+            // note) is call-specific free text. Every unique value would
+            // otherwise become a new stored pattern that re-prompts. Same
+            // termination mechanism as the digit (#1331) and multi-line
+            // (#1402) rules. A path arg is exempt so a quoted path with a
+            // space keeps its directory scope (see IsQuotedFreeTextArg).
+            if (IsQuotedFreeTextArg(arg))
                 break;
 
             if (sb.Length > 0)
@@ -616,6 +707,58 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
         foreach (var c in token)
         {
             if (char.IsAsciiDigit(c))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when <paramref name="arg"/> is a quote-wrapped operand whose text
+    /// holds internal whitespace and is not a path (issue #1406). Such an
+    /// operand is call-specific free text — a commit message, a ticket body,
+    /// an inline note — that varies between invocations of the same verb
+    /// chain, so it must not enter the stored approval pattern. Like the
+    /// digit-bearing (#1331) and multi-line (#1402) rules, hitting one
+    /// terminates the reconstruction walk.
+    /// <para>
+    /// The rule is deliberately narrow so it never widens a grant:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>Only a single matching quote pair qualifies. An unquoted token
+    /// cannot hold internal whitespace — the shell splits it into separate
+    /// args — so a single-word quoted arg (<c>git commit -m "fix"</c>) has no
+    /// internal whitespace, stays in the pattern, and normalizes the same as
+    /// its unquoted form.</item>
+    /// <item>A path arg is exempt. Its directory is authorization state that
+    /// <see cref="ExtractCandidatesViaBashAnalysis"/> resolves separately from
+    /// the same parsed <c>Arg</c>, so a quoted path with a space
+    /// (<c>cat "my file.txt"</c>) keeps its scope. Only a value operand, never
+    /// a path, drops here.</item>
+    /// </list>
+    /// This rule only shapes the stored/display pattern. It does not touch the
+    /// gate candidate or the live authorization decision, which re-parse each
+    /// command and scope every path arg through the zone gate.
+    /// </summary>
+    private static bool IsQuotedFreeTextArg(ShellSyntaxTree.Arg arg)
+    {
+        if (arg.IsPath)
+            return false;
+
+        var raw = arg.Raw;
+
+        // A single matching quote pair around at least one inner character.
+        // The shortest droppable form is quote + whitespace + quote (length 3).
+        if (raw.Length < 3)
+            return false;
+
+        var quote = raw[0];
+        if (quote is not ('"' or '\'') || raw[^1] != quote)
+            return false;
+
+        for (var i = 1; i < raw.Length - 1; i++)
+        {
+            if (char.IsWhiteSpace(raw[i]))
                 return true;
         }
 
