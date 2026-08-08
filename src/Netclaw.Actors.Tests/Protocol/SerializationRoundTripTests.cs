@@ -584,76 +584,6 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
-    public void Durable_activity_dispatch_snapshot_round_trips_teams_approval_state_without_a_raw_nonce()
-    {
-        var snapshot = new DurableActivityDispatchSnapshot([])
-        {
-            TeamsApprovals =
-            [
-                new TeamsApprovalSnapshotEntry
-                {
-                    CallId = "call-1",
-                    CorrelationId = "correlation_123",
-                    NonceHash = new string('A', 64),
-                    RequesterSenderId = "user-1",
-                    RequesterPrincipal = PrincipalClassification.TrustedInternal,
-                    ExpiresAtUnixMilliseconds = 1_800_000_000_000,
-                    PromptId = "prompt-1",
-                    Decision = "approve"
-                }
-            ]
-        };
-
-        var result = RoundTrip(snapshot);
-
-        Assert.Equal(snapshot.TeamsApprovals, result.TeamsApprovals);
-        Assert.DoesNotContain("nonce_", Encoding.UTF8.GetString(Serialize(snapshot)), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Teams_proactive_destination_and_delivery_state_round_trip_without_message_content()
-    {
-        var destination = new TeamsProactiveDestinationCaptured
-        {
-            TenantId = "tenant-a",
-            ConversationId = "conversation-a",
-            Scope = 1,
-            ServiceUrl = "https://service.invalid/",
-            UserId = "user-a"
-        };
-        var delivery = new TeamsProactiveDeliveryRecorded
-        {
-            DeliveryKey = "reminder-a:123",
-            State = 2
-        };
-        var snapshot = new DurableActivityDispatchSnapshot([])
-        {
-            TeamsDestination = new TeamsProactiveDestinationSnapshotEntry
-            {
-                TenantId = destination.TenantId,
-                ConversationId = destination.ConversationId,
-                Scope = destination.Scope,
-                ServiceUrl = destination.ServiceUrl,
-                UserId = destination.UserId
-            },
-            TeamsProactiveDeliveries =
-            [
-                new TeamsProactiveDeliverySnapshotEntry
-                {
-                    DeliveryKey = delivery.DeliveryKey,
-                    State = delivery.State
-                }
-            ]
-        };
-
-        Assert.Equal(destination, RoundTrip(destination));
-        Assert.Equal(delivery, RoundTrip(delivery));
-        Assert.Equal(snapshot.TeamsDestination, RoundTrip(snapshot).TeamsDestination);
-        Assert.Equal(snapshot.TeamsProactiveDeliveries, RoundTrip(snapshot).TeamsProactiveDeliveries);
-        Assert.DoesNotContain("message body", Encoding.UTF8.GetString(Serialize(snapshot)), StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void Durable_activity_dispatch_default_payloads_deserialize_without_raw_activity_content()
     {
         const string activityId = "opaque-活動-id";
@@ -670,28 +600,7 @@ public sealed class SerializationRoundTripTests : TestKit
         Assert.Null(reserved.EvictedActivityFingerprint);
         Assert.Empty(snapshot.ActivityFingerprints);
         Assert.Empty(snapshotWithUnknownField.ActivityFingerprints);
-        Assert.Empty(snapshot.TeamsApprovals);
-        Assert.Empty(snapshotWithUnknownField.TeamsApprovals);
-        Assert.Null(snapshot.TeamsDestination);
-        Assert.Empty(snapshot.TeamsProactiveDeliveries);
-        Assert.Null(snapshotWithUnknownField.TeamsDestination);
-        Assert.Empty(snapshotWithUnknownField.TeamsProactiveDeliveries);
         Assert.DoesNotContain(activityId, Encoding.UTF8.GetString(serialized), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Teams_channel_activity_index_records_round_trip_without_raw_activity_ids()
-    {
-        const string fingerprint = "F046E9C6D25D3B4CBE37DEEF6320CA470BA62B2799457CF16B8C1C541E2666F1";
-        var entry = new DurableTeamsChannelActivityMapped(
-            fingerprint,
-            "teams~dGVuYW50~channel~Y29udmVyc2F0aW9u/cm9vdA",
-            null);
-        var snapshot = new DurableTeamsChannelActivityIndexSnapshot([entry]);
-
-        Assert.Equal(entry, RoundTrip(entry));
-        Assert.Equal(snapshot.Entries, RoundTrip(snapshot).Entries);
-        Assert.DoesNotContain("root", Encoding.UTF8.GetString(Serialize(entry)), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -704,6 +613,27 @@ public sealed class SerializationRoundTripTests : TestKit
 
         Assert.NotNull(ex);
         Assert.Contains("Unknown manifest", ex.Message);
+    }
+
+    [Fact]
+    public void Legacy_teams_manifests_decode_only_to_a_compatibility_envelope()
+    {
+        var serializer = new Serialization.NetclawProtobufSerializer((Akka.Actor.ExtendedActorSystem)Sys);
+        var legacy = new Serialization.Proto.TeamsProactiveDestinationCapturedProto
+        {
+            TenantId = "tenant-a",
+            ConversationId = "conversation-a",
+            Scope = 0,
+            ServiceUrl = "https://service.invalid/",
+            UserId = "user-a"
+        };
+
+        var recovered = Assert.IsType<LegacyChannelPersistenceEnvelope>(
+            serializer.FromBinary(legacy.ToByteArray(), "tpdc-v1"));
+
+        Assert.Equal("tpdc-v1", recovered.Manifest);
+        Assert.Equal(legacy.ToByteArray(), recovered.Payload);
+        Assert.Throws<ArgumentException>(() => serializer.Manifest(recovered));
     }
 
     [Fact]
@@ -1158,35 +1088,4 @@ public sealed class SerializationRoundTripTests : TestKit
         Assert.Equal(0L, result.TimestampMs);
     }
 
-    [Fact]
-    public void Teams_approval_pending_state_round_trips_without_a_raw_nonce()
-    {
-        var original = new TeamsApprovalPendingCreated
-        {
-            CallId = "call-1",
-            CorrelationId = "correlation_123",
-            NonceHash = new string('A', 64),
-            RequesterSenderId = "user-1",
-            RequesterPrincipal = PrincipalClassification.TrustedInternal,
-            ExpiresAtUnixMilliseconds = 1_800_000_000_000
-        };
-
-        var result = RoundTrip(original);
-
-        Assert.Equal(original, result);
-        Assert.DoesNotContain("nonce_", Encoding.UTF8.GetString(Serialize(original)), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Teams_approval_terminal_state_round_trips()
-    {
-        var original = new TeamsApprovalConsumed
-        {
-            CorrelationId = "correlation_123",
-            Decision = "approve",
-            ConsumedAtUnixMilliseconds = 1_800_000_000_001
-        };
-
-        Assert.Equal(original, RoundTrip(original));
-    }
 }

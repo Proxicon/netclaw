@@ -46,6 +46,8 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
     private const string SessionBackgroundJobsReapedManifest = "sbjr-v1";
     private const string PendingApprovalPromptTrackedManifest = "papt-v1";
     private const string PendingApprovalPromptClearedManifest = "papc-v1";
+    // Decode-only manifests written by pre-migration Teams actors. New Team
+    // writes use TeamsPersistenceSerializer and never enter this type map.
     private const string TeamsApprovalPendingCreatedManifest = "tapc-v1";
     private const string TeamsApprovalCardDeliveredManifest = "tacd-v1";
     private const string TeamsApprovalConsumedManifest = "taco-v1";
@@ -85,17 +87,9 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
         [typeof(SessionBackgroundJobsReaped)] = SessionBackgroundJobsReapedManifest,
         [typeof(Channels.PendingApprovalPromptTracked)] = PendingApprovalPromptTrackedManifest,
         [typeof(Channels.PendingApprovalPromptCleared)] = PendingApprovalPromptClearedManifest,
-        [typeof(Channels.TeamsApprovalPendingCreated)] = TeamsApprovalPendingCreatedManifest,
-        [typeof(Channels.TeamsApprovalCardDelivered)] = TeamsApprovalCardDeliveredManifest,
-        [typeof(Channels.TeamsApprovalConsumed)] = TeamsApprovalConsumedManifest,
-        [typeof(Channels.TeamsProactiveDestinationCaptured)] = TeamsProactiveDestinationCapturedManifest,
-        [typeof(Channels.TeamsProactiveDestinationInvalidated)] = TeamsProactiveDestinationInvalidatedManifest,
-        [typeof(Channels.TeamsProactiveDeliveryRecorded)] = TeamsProactiveDeliveryRecordedManifest,
         [typeof(Channels.DurableActivityDispatchReserved)] = DurableActivityDispatchReservedManifest,
         [typeof(Channels.DurableActivityDispatchReleased)] = DurableActivityDispatchReleasedManifest,
         [typeof(Channels.DurableActivityDispatchSnapshot)] = DurableActivityDispatchSnapshotManifest,
-        [typeof(Channels.DurableTeamsChannelActivityMapped)] = DurableTeamsChannelActivityMappedManifest,
-        [typeof(Channels.DurableTeamsChannelActivityIndexSnapshot)] = DurableTeamsChannelActivityIndexSnapshotManifest,
     }.ToFrozenDictionary();
 
     public override int Identifier => 150;
@@ -172,30 +166,26 @@ public sealed class NetclawProtobufSerializer : SerializerWithStringManifest
                 Proto.PendingApprovalPromptTrackedProto.Parser.ParseFrom(bytes)),
             PendingApprovalPromptClearedManifest => NetclawProtoMapper.FromProto(
                 Proto.PendingApprovalPromptClearedProto.Parser.ParseFrom(bytes)),
-            TeamsApprovalPendingCreatedManifest => NetclawProtoMapper.FromProto(
-                Proto.TeamsApprovalPendingCreatedProto.Parser.ParseFrom(bytes)),
-            TeamsApprovalCardDeliveredManifest => NetclawProtoMapper.FromProto(
-                Proto.TeamsApprovalCardDeliveredProto.Parser.ParseFrom(bytes)),
-            TeamsApprovalConsumedManifest => NetclawProtoMapper.FromProto(
-                Proto.TeamsApprovalConsumedProto.Parser.ParseFrom(bytes)),
-            TeamsProactiveDestinationCapturedManifest => NetclawProtoMapper.FromProto(
-                Proto.TeamsProactiveDestinationCapturedProto.Parser.ParseFrom(bytes)),
-            TeamsProactiveDestinationInvalidatedManifest => NetclawProtoMapper.FromProto(
-                Proto.TeamsProactiveDestinationInvalidatedProto.Parser.ParseFrom(bytes)),
-            TeamsProactiveDeliveryRecordedManifest => NetclawProtoMapper.FromProto(
-                Proto.TeamsProactiveDeliveryRecordedProto.Parser.ParseFrom(bytes)),
+            TeamsApprovalPendingCreatedManifest or TeamsApprovalCardDeliveredManifest
+                or TeamsApprovalConsumedManifest or TeamsProactiveDestinationCapturedManifest
+                or TeamsProactiveDestinationInvalidatedManifest or TeamsProactiveDeliveryRecordedManifest
+                or DurableTeamsChannelActivityMappedManifest or DurableTeamsChannelActivityIndexSnapshotManifest
+                => new LegacyChannelPersistenceEnvelope(manifest, bytes),
             DurableActivityDispatchReservedManifest => NetclawProtoMapper.FromProto(
                 Proto.DurableActivityDispatchReservedProto.Parser.ParseFrom(bytes)),
             DurableActivityDispatchReleasedManifest => NetclawProtoMapper.FromProto(
                 Proto.DurableActivityDispatchReleasedProto.Parser.ParseFrom(bytes)),
-            DurableActivityDispatchSnapshotManifest => NetclawProtoMapper.FromProto(
-                Proto.DurableActivityDispatchSnapshotProto.Parser.ParseFrom(bytes)),
-            DurableTeamsChannelActivityMappedManifest => NetclawProtoMapper.FromProto(
-                Proto.DurableTeamsChannelActivityMappedProto.Parser.ParseFrom(bytes)),
-            DurableTeamsChannelActivityIndexSnapshotManifest => NetclawProtoMapper.FromProto(
-                Proto.DurableTeamsChannelActivityIndexSnapshotProto.Parser.ParseFrom(bytes)),
+            DurableActivityDispatchSnapshotManifest => DecodeLegacyAwareSnapshot(bytes),
             _ => throw new ArgumentException(
                 $"Unknown manifest '{manifest}'. Add it to NetclawProtobufSerializer.")
         };
+    }
+
+    private static object DecodeLegacyAwareSnapshot(byte[] bytes)
+    {
+        var snapshot = Proto.DurableActivityDispatchSnapshotProto.Parser.ParseFrom(bytes);
+        return snapshot.TeamsApprovals.Count > 0 || snapshot.TeamsDestination is not null || snapshot.TeamsProactiveDeliveries.Count > 0
+            ? new LegacyChannelPersistenceEnvelope(DurableActivityDispatchSnapshotManifest, bytes)
+            : NetclawProtoMapper.FromProto(snapshot);
     }
 }

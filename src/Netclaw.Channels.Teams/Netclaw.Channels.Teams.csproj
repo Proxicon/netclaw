@@ -17,4 +17,13 @@
     <ProjectReference Include="..\Netclaw.Configuration\Netclaw.Configuration.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" />
+    <PackageReference Include="Grpc.Tools" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="Serialization\Protos\teams_persistence.proto" GrpcServices="None" />
+  </ItemGroup>
+
 </Project>

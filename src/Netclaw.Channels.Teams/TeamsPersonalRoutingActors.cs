@@ -14,6 +14,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
+using Netclaw.Actors.Serialization;
 using Netclaw.Actors.Sessions;
 using Netclaw.Channels;
 using Netclaw.Channels.Telemetry;
@@ -21,6 +22,7 @@ using Netclaw.Configuration;
 using Netclaw.Tools;
 using static Netclaw.Actors.Reminders.ReminderProtocol;
 using static Netclaw.Actors.Sessions.SessionProtocol;
+using LegacyProto = Netclaw.Actors.Serialization.Proto;
 
 namespace Netclaw.Channels.Teams;
 
@@ -582,12 +584,14 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private readonly Queue<string> _processedActivityOrder = new();
     private readonly Dictionary<string, TeamsPendingApproval> _pendingApprovals = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TeamsProactiveDeliveryState> _proactiveDeliveries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _proactiveDeliveryGenerations = new(StringComparer.Ordinal);
     private readonly Queue<string> _proactiveDeliveryOrder = new();
     private readonly Dictionary<string, IActorRef> _reminderDeliveryObservers = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _reminderTextDelivered = new(StringComparer.Ordinal);
     private TeamsOutboundDestination? _destination;
+    private long _destinationGeneration;
+    private bool _requiresMigrationSnapshot;
     private string? _processingActivityId;
-    private string? _activeReminderDeliveryKey;
-    private bool _activeReminderTextDelivered;
 
     public TeamsSessionBindingActor(SessionId sessionId, TeamsConversationDependencies dependencies)
     {
@@ -607,13 +611,22 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Recover<TeamsApprovalCardDelivered>(ApplyApprovalCardDelivered);
         Recover<TeamsApprovalConsumed>(ApplyApprovalConsumed);
         Recover<TeamsProactiveDestinationCaptured>(ApplyDestinationCaptured);
-        Recover<TeamsProactiveDestinationInvalidated>(_ => _destination = null);
         Recover<TeamsProactiveDeliveryRecorded>(ApplyProactiveDeliveryRecorded);
-        Recover<RecoveryCompleted>(_ => Self.Tell(new MarkRecoveredProactiveDeliveriesUnknown()));
+        Recover<LegacyChannelPersistenceEnvelope>(ApplyLegacyPersistence);
+        Recover<RecoveryCompleted>(_ =>
+        {
+            Self.Tell(new MarkRecoveredProactiveDeliveriesUnknown());
+            if (_requiresMigrationSnapshot)
+                Self.Tell(new SaveTeamsMigrationSnapshot());
+        });
         Recover<SnapshotOffer>(offer =>
         {
-            if (offer.Snapshot is DurableActivityDispatchSnapshot snapshot)
+            if (offer.Snapshot is TeamsBindingSnapshot snapshot)
                 ApplySnapshot(snapshot);
+            else if (offer.Snapshot is DurableActivityDispatchSnapshot legacySnapshot)
+                ApplySnapshot(new TeamsBindingSnapshot(legacySnapshot.ActivityFingerprints));
+            else if (offer.Snapshot is LegacyChannelPersistenceEnvelope legacyEnvelope)
+                ApplyLegacyPersistence(legacyEnvelope);
         });
 
         Context.SetReceiveTimeout(TimeSpan.FromHours(1));
@@ -628,6 +641,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Command<BeginTeamsReminderDispatch>(BeginReminderDispatch);
         CommandAsync<DispatchTeamsReminder>(DispatchReminderAsync);
         Command<MarkRecoveredProactiveDeliveriesUnknown>(_ => MarkRecoveredDeliveriesUnknown());
+        Command<SaveTeamsMigrationSnapshot>(_ => SaveMigrationSnapshot());
         CommandAsync<BindingOutput>(HandleOutputAsync);
         CommandAsync<DeliverTeamsApprovalCard>(DeliverApprovalCardAsync);
         Command<OutputStreamTerminated>(terminated =>
@@ -717,7 +731,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         if (!Equals(_destination, destination))
         {
-            Persist(ToCapturedDestination(destination), captured =>
+            var generation = _destination is null ? 1 : checked(_destinationGeneration + 1);
+            Persist(ToCapturedDestination(destination, generation), captured =>
             {
                 ApplyDestinationCaptured(captured);
                 RecordDestinationTelemetry("proactive_destination_captured");
@@ -827,7 +842,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             DeliveryKey = deliveryKey,
             State = (int)TeamsProactiveDeliveryState.Pending,
-            EvictedDeliveryKey = evicted
+            EvictedDeliveryKey = evicted,
+            DestinationGeneration = _destinationGeneration
         }, recorded =>
         {
             ApplyProactiveDeliveryRecorded(recorded);
@@ -840,7 +856,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Persist(new TeamsProactiveDeliveryRecorded
         {
             DeliveryKey = dispatch.DeliveryKey,
-            State = (int)TeamsProactiveDeliveryState.Sending
+            State = (int)TeamsProactiveDeliveryState.Sending,
+            DestinationGeneration = _proactiveDeliveryGenerations.GetValueOrDefault(dispatch.DeliveryKey, _destinationGeneration)
         }, recorded =>
         {
             ApplyProactiveDeliveryRecorded(recorded);
@@ -854,8 +871,6 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             var writer = await EnsurePipelineAsync(CancellationToken.None);
             var source = dispatch.Reminder.Source with { AckTarget = dispatch.ReplyTo };
-            _activeReminderDeliveryKey = dispatch.DeliveryKey;
-            _activeReminderTextDelivered = false;
             if (source.DeliveryObserver is { } observer)
                 _reminderDeliveryObservers[dispatch.DeliveryKey] = observer;
 
@@ -1047,13 +1062,18 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         if (!MatchesBinding(destination))
             throw new InvalidOperationException("The Teams proactive destination does not match its binding session.");
 
+        if (captured.Generation < 1)
+            throw new InvalidOperationException("The Teams proactive destination generation is invalid.");
+
         _destination = destination;
+        _destinationGeneration = captured.Generation;
     }
 
     private void ApplyProactiveDeliveryRecorded(TeamsProactiveDeliveryRecorded recorded)
     {
         if (!IsBoundedDeliveryKey(recorded.DeliveryKey)
-            || !Enum.IsDefined((TeamsProactiveDeliveryState)recorded.State))
+            || !Enum.IsDefined((TeamsProactiveDeliveryState)recorded.State)
+            || recorded.DestinationGeneration < 1)
         {
             throw new InvalidOperationException("The Teams proactive delivery state is invalid.");
         }
@@ -1063,7 +1083,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             if (!IsBoundedDeliveryKey(evicted)
                 || _proactiveDeliveryOrder.Count == 0
                 || !string.Equals(_proactiveDeliveryOrder.Peek(), evicted, StringComparison.Ordinal)
-                || !_proactiveDeliveries.Remove(evicted))
+                || !_proactiveDeliveries.Remove(evicted)
+                || !_proactiveDeliveryGenerations.Remove(evicted))
             {
                 throw new InvalidOperationException("The Teams proactive delivery retention state is invalid.");
             }
@@ -1074,6 +1095,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         if (_proactiveDeliveries.ContainsKey(recorded.DeliveryKey))
         {
             _proactiveDeliveries[recorded.DeliveryKey] = (TeamsProactiveDeliveryState)recorded.State;
+            _proactiveDeliveryGenerations[recorded.DeliveryKey] = recorded.DestinationGeneration;
+            ApplyDestinationInvalidation(recorded);
             return;
         }
 
@@ -1081,7 +1104,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             throw new InvalidOperationException("The Teams proactive delivery state exceeds its retention limit.");
 
         _proactiveDeliveries.Add(recorded.DeliveryKey, (TeamsProactiveDeliveryState)recorded.State);
+        _proactiveDeliveryGenerations.Add(recorded.DeliveryKey, recorded.DestinationGeneration);
         _proactiveDeliveryOrder.Enqueue(recorded.DeliveryKey);
+        ApplyDestinationInvalidation(recorded);
     }
 
     private bool MatchesBinding(TeamsOutboundDestination destination)
@@ -1109,7 +1134,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         !string.IsNullOrWhiteSpace(value)
         && Encoding.UTF8.GetByteCount(value) <= TeamsSessionIdentifierCodec.MaxRawIdentifierBytes;
 
-    private static TeamsProactiveDestinationCaptured ToCapturedDestination(TeamsOutboundDestination destination) => new()
+    private static TeamsProactiveDestinationCaptured ToCapturedDestination(TeamsOutboundDestination destination, long generation) => new()
     {
         TenantId = destination.TenantId,
         ConversationId = destination.ConversationId,
@@ -1118,20 +1143,129 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         RootActivityId = destination.RootActivityId,
         TeamId = destination.TeamId,
         ChannelId = destination.ChannelId,
-        UserId = destination.UserId
+        UserId = destination.UserId,
+        Generation = generation
     };
 
-    private static TeamsProactiveDestinationSnapshotEntry ToDestinationSnapshot(TeamsOutboundDestination destination) => new()
+    private void ApplyDestinationInvalidation(TeamsProactiveDeliveryRecorded recorded)
     {
-        TenantId = destination.TenantId,
-        ConversationId = destination.ConversationId,
-        Scope = (int)destination.Scope,
-        ServiceUrl = destination.ServiceUrl,
-        RootActivityId = destination.RootActivityId,
-        TeamId = destination.TeamId,
-        ChannelId = destination.ChannelId,
-        UserId = destination.UserId
-    };
+        if (recorded.InvalidatesDestination && _destinationGeneration == recorded.DestinationGeneration)
+        {
+            _destination = null;
+            RecordDestinationTelemetry("proactive_destination_invalidated");
+        }
+    }
+
+    private void ApplyLegacyPersistence(LegacyChannelPersistenceEnvelope legacy)
+    {
+        _requiresMigrationSnapshot = true;
+        switch (legacy.Manifest)
+        {
+            case "tapc-v1":
+            {
+                var value = LegacyProto.TeamsApprovalPendingCreatedProto.Parser.ParseFrom(legacy.Payload);
+                ApplyApprovalPendingCreated(new TeamsApprovalPendingCreated
+                {
+                    CallId = value.CallId,
+                    CorrelationId = value.CorrelationId,
+                    NonceHash = value.NonceHash,
+                    RequesterSenderId = value.HasRequesterSenderId ? value.RequesterSenderId : null,
+                    RequesterPrincipal = value.HasRequesterPrincipal ? (PrincipalClassification)value.RequesterPrincipal : null,
+                    ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds
+                });
+                break;
+            }
+            case "tacd-v1":
+            {
+                var value = LegacyProto.TeamsApprovalCardDeliveredProto.Parser.ParseFrom(legacy.Payload);
+                ApplyApprovalCardDelivered(new TeamsApprovalCardDelivered { CorrelationId = value.CorrelationId, PromptId = value.PromptId });
+                break;
+            }
+            case "taco-v1":
+            {
+                var value = LegacyProto.TeamsApprovalConsumedProto.Parser.ParseFrom(legacy.Payload);
+                ApplyApprovalConsumed(new TeamsApprovalConsumed
+                {
+                    CorrelationId = value.CorrelationId, Decision = value.Decision,
+                    ConsumedAtUnixMilliseconds = value.ConsumedAtUnixMilliseconds
+                });
+                break;
+            }
+            case "tpdc-v1":
+                ApplyLegacyDestination(LegacyProto.TeamsProactiveDestinationCapturedProto.Parser.ParseFrom(legacy.Payload));
+                break;
+            case "tpdi-v1":
+                _destination = null;
+                break;
+            case "tpdr-v1":
+            {
+                var value = LegacyProto.TeamsProactiveDeliveryRecordedProto.Parser.ParseFrom(legacy.Payload);
+                ApplyProactiveDeliveryRecorded(new TeamsProactiveDeliveryRecorded
+                {
+                    DeliveryKey = value.DeliveryKey,
+                    State = value.State,
+                    EvictedDeliveryKey = value.HasEvictedDeliveryKey ? value.EvictedDeliveryKey : null,
+                    DestinationGeneration = Math.Max(1, _destinationGeneration)
+                });
+                break;
+            }
+            case "dads-v1":
+                ApplyLegacySnapshot(LegacyProto.DurableActivityDispatchSnapshotProto.Parser.ParseFrom(legacy.Payload));
+                break;
+            default:
+                throw new InvalidOperationException("The legacy Team persistence manifest is not valid for a binding actor.");
+        }
+    }
+
+    private void ApplyLegacyDestination(LegacyProto.TeamsProactiveDestinationCapturedProto value) =>
+        ApplyDestinationCaptured(new TeamsProactiveDestinationCaptured
+        {
+            TenantId = value.TenantId,
+            ConversationId = value.ConversationId,
+            Scope = value.Scope,
+            ServiceUrl = value.ServiceUrl,
+            RootActivityId = value.HasRootActivityId ? value.RootActivityId : null,
+            TeamId = value.HasTeamId ? value.TeamId : null,
+            ChannelId = value.HasChannelId ? value.ChannelId : null,
+            UserId = value.HasUserId ? value.UserId : null,
+            Generation = _destination is null ? 1 : checked(_destinationGeneration + 1)
+        });
+
+    private void ApplyLegacySnapshot(LegacyProto.DurableActivityDispatchSnapshotProto value)
+    {
+        ApplySnapshot(new TeamsBindingSnapshot(value.ActivityFingerprints.ToArray())
+        {
+            Approvals = value.TeamsApprovals.Select(approval => new TeamsApprovalSnapshotEntry
+            {
+                CallId = approval.CallId,
+                CorrelationId = approval.CorrelationId,
+                NonceHash = approval.NonceHash,
+                RequesterSenderId = approval.HasRequesterSenderId ? approval.RequesterSenderId : null,
+                RequesterPrincipal = approval.HasRequesterPrincipal ? (PrincipalClassification)approval.RequesterPrincipal : null,
+                ExpiresAtUnixMilliseconds = approval.ExpiresAtUnixMilliseconds,
+                PromptId = approval.HasPromptId ? approval.PromptId : null,
+                Decision = approval.HasDecision ? approval.Decision : null
+            }).ToArray(),
+            Destination = value.TeamsDestination is null ? null : new TeamsProactiveDestinationCaptured
+            {
+                TenantId = value.TeamsDestination.TenantId,
+                ConversationId = value.TeamsDestination.ConversationId,
+                Scope = value.TeamsDestination.Scope,
+                ServiceUrl = value.TeamsDestination.ServiceUrl,
+                RootActivityId = value.TeamsDestination.HasRootActivityId ? value.TeamsDestination.RootActivityId : null,
+                TeamId = value.TeamsDestination.HasTeamId ? value.TeamsDestination.TeamId : null,
+                ChannelId = value.TeamsDestination.HasChannelId ? value.TeamsDestination.ChannelId : null,
+                UserId = value.TeamsDestination.HasUserId ? value.TeamsDestination.UserId : null,
+                Generation = 1
+            },
+            ProactiveDeliveries = value.TeamsProactiveDeliveries.Select(delivery => new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = delivery.DeliveryKey,
+                State = delivery.State,
+                DestinationGeneration = 1
+            }).ToArray()
+        });
+    }
 
     private static void RecordDestinationTelemetry(string code) =>
         ChannelTelemetry.For(ChannelType.Teams).RecordExtra(code);
@@ -1143,7 +1277,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             .Select(key => new TeamsProactiveDeliveryRecorded
             {
                 DeliveryKey = key,
-                State = (int)TeamsProactiveDeliveryState.DeliveryUnknown
+                State = (int)TeamsProactiveDeliveryState.DeliveryUnknown,
+                DestinationGeneration = _proactiveDeliveryGenerations[key]
             })
             .ToArray();
         if (interrupted.Length > 0)
@@ -1155,7 +1290,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Persist(new TeamsProactiveDeliveryRecorded
         {
             DeliveryKey = deliveryKey,
-            State = (int)TeamsProactiveDeliveryState.FailedRetryable
+            State = (int)TeamsProactiveDeliveryState.FailedRetryable,
+            DestinationGeneration = _proactiveDeliveryGenerations.GetValueOrDefault(deliveryKey, _destinationGeneration)
         }, recorded =>
         {
             ApplyProactiveDeliveryRecorded(recorded);
@@ -1171,19 +1307,22 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         });
     }
 
-    private void ApplySnapshot(DurableActivityDispatchSnapshot snapshot)
+    private void ApplySnapshot(TeamsBindingSnapshot snapshot)
     {
+        if (snapshot.MigrationVersion != TeamsBindingSnapshot.CurrentMigrationVersion)
+            throw new InvalidOperationException("The Teams binding snapshot version is not supported.");
         if (snapshot.ActivityFingerprints.Count > ProcessedActivityCapacity)
             throw new InvalidOperationException("The Teams processed activity snapshot exceeds its retention limit.");
-        if (snapshot.TeamsApprovals.Count > ApprovalCapacity)
+        if (snapshot.Approvals.Count > ApprovalCapacity)
             throw new InvalidOperationException("The Teams approval snapshot exceeds its retention limit.");
-        if (snapshot.TeamsProactiveDeliveries.Count > ProactiveDeliveryCapacity)
+        if (snapshot.ProactiveDeliveries.Count > ProactiveDeliveryCapacity)
             throw new InvalidOperationException("The Teams proactive delivery snapshot exceeds its retention limit.");
 
         _processedActivityIds.Clear();
         _processedActivityOrder.Clear();
         _pendingApprovals.Clear();
         _proactiveDeliveries.Clear();
+        _proactiveDeliveryGenerations.Clear();
         _proactiveDeliveryOrder.Clear();
         foreach (var fingerprint in snapshot.ActivityFingerprints)
         {
@@ -1194,7 +1333,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             _processedActivityOrder.Enqueue(fingerprint);
         }
 
-        foreach (var approval in snapshot.TeamsApprovals)
+        foreach (var approval in snapshot.Approvals)
         {
             ApplyApprovalPendingCreated(new TeamsApprovalPendingCreated
             {
@@ -1223,27 +1362,30 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             }
         }
 
-        if (snapshot.TeamsDestination is not null)
+        if (snapshot.Destination is not null)
         {
             ApplyDestinationCaptured(new TeamsProactiveDestinationCaptured
             {
-                TenantId = snapshot.TeamsDestination.TenantId,
-                ConversationId = snapshot.TeamsDestination.ConversationId,
-                Scope = snapshot.TeamsDestination.Scope,
-                ServiceUrl = snapshot.TeamsDestination.ServiceUrl,
-                RootActivityId = snapshot.TeamsDestination.RootActivityId,
-                TeamId = snapshot.TeamsDestination.TeamId,
-                ChannelId = snapshot.TeamsDestination.ChannelId,
-                UserId = snapshot.TeamsDestination.UserId
+                TenantId = snapshot.Destination.TenantId,
+                ConversationId = snapshot.Destination.ConversationId,
+                Scope = snapshot.Destination.Scope,
+                ServiceUrl = snapshot.Destination.ServiceUrl,
+                RootActivityId = snapshot.Destination.RootActivityId,
+                TeamId = snapshot.Destination.TeamId,
+                ChannelId = snapshot.Destination.ChannelId,
+                UserId = snapshot.Destination.UserId,
+                Generation = snapshot.Destination.Generation
             });
         }
 
-        foreach (var delivery in snapshot.TeamsProactiveDeliveries)
+        foreach (var delivery in snapshot.ProactiveDeliveries)
         {
             ApplyProactiveDeliveryRecorded(new TeamsProactiveDeliveryRecorded
             {
                 DeliveryKey = delivery.DeliveryKey,
-                State = delivery.State
+                State = delivery.State,
+                DestinationGeneration = delivery.DestinationGeneration,
+                InvalidatesDestination = delivery.InvalidatesDestination
             });
         }
     }
@@ -1251,29 +1393,39 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private void SaveSnapshotWhenDue()
     {
         if (!IsRecovering && LastSequenceNr > 0 && LastSequenceNr % SnapshotInterval == 0)
-        {
-            SaveSnapshot(new DurableActivityDispatchSnapshot(_processedActivityOrder.ToArray())
-            {
-                TeamsApprovals = _pendingApprovals.Values.Select(pending => new TeamsApprovalSnapshotEntry
-                {
-                    CallId = pending.CallId,
-                    CorrelationId = pending.CorrelationId,
-                    NonceHash = pending.NonceHash,
-                    RequesterSenderId = pending.RequesterSenderId,
-                    RequesterPrincipal = pending.RequesterPrincipal,
-                    ExpiresAtUnixMilliseconds = pending.ExpiresAtUnixMilliseconds,
-                    PromptId = pending.PromptId,
-                    Decision = pending.Decision
-                }).ToArray(),
-                TeamsDestination = _destination is null ? null : ToDestinationSnapshot(_destination),
-                TeamsProactiveDeliveries = _proactiveDeliveryOrder.Select(key => new TeamsProactiveDeliverySnapshotEntry
-                {
-                    DeliveryKey = key,
-                    State = (int)_proactiveDeliveries[key]
-                }).ToArray()
-            });
-        }
+            SaveSnapshot(CreateSnapshot());
     }
+
+    private void SaveMigrationSnapshot()
+    {
+        if (IsRecovering || !_requiresMigrationSnapshot)
+            return;
+
+        SaveSnapshot(CreateSnapshot());
+        _requiresMigrationSnapshot = false;
+    }
+
+    private TeamsBindingSnapshot CreateSnapshot() => new(_processedActivityOrder.ToArray())
+    {
+        Approvals = _pendingApprovals.Values.Select(pending => new TeamsApprovalSnapshotEntry
+        {
+            CallId = pending.CallId,
+            CorrelationId = pending.CorrelationId,
+            NonceHash = pending.NonceHash,
+            RequesterSenderId = pending.RequesterSenderId,
+            RequesterPrincipal = pending.RequesterPrincipal,
+            ExpiresAtUnixMilliseconds = pending.ExpiresAtUnixMilliseconds,
+            PromptId = pending.PromptId,
+            Decision = pending.Decision
+        }).ToArray(),
+        Destination = _destination is null ? null : ToCapturedDestination(_destination, _destinationGeneration),
+        ProactiveDeliveries = _proactiveDeliveryOrder.Select(key => new TeamsProactiveDeliveryRecorded
+        {
+            DeliveryKey = key,
+            State = (int)_proactiveDeliveries[key],
+            DestinationGeneration = _proactiveDeliveryGenerations[key]
+        }).ToArray()
+    };
 
     private async Task HandleOutputAsync(BindingOutput received)
     {
@@ -1322,7 +1474,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
         }
 
-        var reminderDeliveryKey = _activeReminderDeliveryKey;
+        var reminderDeliveryKey = received.Output.SourceReminderId?.Value;
+        if (reminderDeliveryKey is not null
+            && (!_proactiveDeliveries.TryGetValue(reminderDeliveryKey, out var reminderState)
+                || reminderState != TeamsProactiveDeliveryState.Sending))
+        {
+            reminderDeliveryKey = null;
+        }
 
         for (var index = 0; index < rendered.Chunks.Count; index++)
         {
@@ -1354,7 +1512,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         if (reminderDeliveryKey is not null)
         {
-            _activeReminderTextDelivered = true;
+            _reminderTextDelivered.Add(reminderDeliveryKey);
             CompleteReminderDelivery(reminderDeliveryKey, new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered));
         }
     }
@@ -1366,18 +1524,21 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
 
         var deliveryKey = reminderId.Value;
-        if (!_proactiveDeliveries.TryGetValue(deliveryKey, out var state)
-            || state != TeamsProactiveDeliveryState.Sending)
+        if (!_proactiveDeliveries.TryGetValue(deliveryKey, out var state))
             return;
 
-        if (!_activeReminderTextDelivered)
+        if (state != TeamsProactiveDeliveryState.Sending)
+        {
+            _reminderTextDelivered.Remove(deliveryKey);
+            return;
+        }
+
+        if (!_reminderTextDelivered.Remove(deliveryKey))
         {
             CompleteReminderFailure(deliveryKey, "Teams reminder completed without a delivered message.");
             return;
         }
 
-        _activeReminderDeliveryKey = null;
-        _activeReminderTextDelivered = false;
     }
 
     private void CompleteReminderDelivery(string deliveryKey, TeamsDeliveryResult result)
@@ -1390,18 +1551,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Persist(new TeamsProactiveDeliveryRecorded
         {
             DeliveryKey = deliveryKey,
-            State = (int)state
+            State = (int)state,
+            DestinationGeneration = _proactiveDeliveryGenerations.GetValueOrDefault(deliveryKey, _destinationGeneration),
+            InvalidatesDestination = state == TeamsProactiveDeliveryState.FailedPermanent
         }, recorded =>
         {
             ApplyProactiveDeliveryRecorded(recorded);
-            if (state == TeamsProactiveDeliveryState.FailedPermanent)
-            {
-                Persist(new TeamsProactiveDestinationInvalidated(), _ =>
-                {
-                    _destination = null;
-                    RecordDestinationTelemetry("proactive_destination_invalidated");
-                });
-            }
+            SaveSnapshotWhenDue();
 
             if (_reminderDeliveryObservers.Remove(deliveryKey, out var observer))
             {
@@ -1834,6 +1990,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         string DeliveryKey) : INoSerializationVerificationNeeded;
 
     private sealed record MarkRecoveredProactiveDeliveriesUnknown : INoSerializationVerificationNeeded;
+
+    private sealed record SaveTeamsMigrationSnapshot : INoSerializationVerificationNeeded;
 
     private sealed record OutputStreamTerminated(
         int Generation,
