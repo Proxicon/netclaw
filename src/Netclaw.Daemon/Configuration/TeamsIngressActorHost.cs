@@ -4,7 +4,9 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Akka.Actor;
+using Akka.Hosting;
 using Netclaw.Actors.Channels;
+using Netclaw.Actors.Hosting;
 using Netclaw.Channels.Teams;
 using Netclaw.Channels.Telemetry;
 
@@ -32,6 +34,7 @@ internal sealed class DeferredTeamsConversationIngressSink : ITeamsConversationI
 internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : IHostedService
 {
     private IActorRef? _actor;
+    private IActorRef? _reminderGateway;
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -41,6 +44,11 @@ internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : 
         _actor = actorSystem.ActorOf(
             Props.Create(() => new TeamsIngressActor(conversationSink, timeProvider)),
             "teams-ingress");
+        var reminderGateway = actorSystem.ActorOf(
+            Props.Create(() => new TeamsReminderGatewayActor(conversationSink)),
+            "teams-reminder-gateway");
+        _reminderGateway = reminderGateway;
+        ActorRegistry.For(actorSystem).Register<TeamsGatewayActorKey>(reminderGateway);
         return Task.CompletedTask;
     }
 
@@ -48,6 +56,8 @@ internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : 
     {
         _actor?.Tell(PoisonPill.Instance);
         _actor = null;
+        _reminderGateway?.Tell(PoisonPill.Instance);
+        _reminderGateway = null;
         return Task.CompletedTask;
     }
 

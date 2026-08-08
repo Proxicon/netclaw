@@ -46,6 +46,10 @@ internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) :
         {
             return new TeamsDeliveryResult(TeamsDeliveryStatus.RejectedTooLarge, ReasonCode: "output_too_large");
         }
+        catch (HttpRequestException exception) when (exception.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+        {
+            return new TeamsDeliveryResult(TeamsDeliveryStatus.InvalidDestination, ReasonCode: "sdk_destination_invalid");
+        }
         catch (HttpRequestException)
         {
             return new TeamsDeliveryResult(TeamsDeliveryStatus.Unavailable, ReasonCode: "sdk_unavailable");
@@ -75,13 +79,12 @@ internal interface ITeamsSdkReplyOperations
     Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken);
 }
 
-internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore contexts) : ITeamsSdkReplyOperations
+internal sealed class TeamsSdkReplyOperations(
+    Microsoft.Teams.Apps.App app,
+    TeamsSdkConversationContextStore contexts) : ITeamsSdkReplyOperations
 {
     public async Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken)
     {
-        if (!contexts.TryGet(message.Destination, out var context))
-            throw new HttpRequestException("The Teams outbound context is unavailable.");
-
         var activity = new MessageActivity(message.Text)
         {
             ReplyToId = message.ReplyToActivityId
@@ -122,18 +125,34 @@ internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore c
                 ?? throw new InvalidOperationException("The Teams approval card did not deserialize.");
             activity.Attachments = [new Attachment(card)];
         }
-        if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
+        if (contexts.TryGet(message.Destination, out var context))
         {
-            var update = await context.Api.Conversations.Activities.UpdateAsync(
-                message.Destination.ConversationId,
-                message.UpdateActivityId,
-                activity,
-                cancellationToken);
-            return update?.Id;
+            if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
+            {
+                var update = await context.Api.Conversations.Activities.UpdateAsync(
+                    message.Destination.ConversationId,
+                    message.UpdateActivityId,
+                    activity,
+                    cancellationToken);
+                return update?.Id;
+            }
+
+            var sent = await context.Send(activity, cancellationToken);
+            return sent.Id;
         }
 
-        var sent = await context.Send(activity, cancellationToken);
-        return sent.Id;
+        if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
+            throw new HttpRequestException("The Teams update context is unavailable.");
+
+        // The app owns authenticated client credentials. Unlike an inbound SDK
+        // context, it survives the original HTTP request and can send to the
+        // validated destination recovered by the binding actor.
+        var proactiveSent = await app.Send(
+            message.Destination.ConversationId,
+            activity,
+            serviceUrl: message.Destination.ServiceUrl,
+            cancellationToken: cancellationToken);
+        return proactiveSent.Id;
     }
 }
 

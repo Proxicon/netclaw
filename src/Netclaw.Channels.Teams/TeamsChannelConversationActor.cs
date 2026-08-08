@@ -46,6 +46,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
 
         Command<TeamsConversationIngress>(HandleIngress);
         CommandAsync<TeamsConversationApprovalAction>(HandleApprovalActionAsync);
+        Command<TeamsConversationReminder>(HandleReminder);
         CommandAsync<RouteChannelBinding>(RouteBindingAsync);
         Command<SaveSnapshotSuccess>(saved =>
         {
@@ -237,6 +238,32 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         {
             replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Failed));
         }
+    }
+
+    private void HandleReminder(TeamsConversationReminder reminder)
+    {
+        if (!TeamsSessionIdentifierCodec.TryParse(reminder.Reminder.SessionId, out var identifier, out _)
+            || identifier.Scope != TeamsConversationScope.Channel
+            || !TeamsSessionIdentifierCodec.TryCreatePersonal(
+                identifier.TenantId,
+                identifier.ConversationId,
+                out var expectedConversation,
+                out _)
+            || expectedConversation != _conversationId)
+        {
+            Sender.Tell(CommandNack.For(reminder.Reminder.SessionId, "Teams session does not match the channel conversation."));
+            return;
+        }
+
+        var binding = Context.Child(TeamsActorNames.Binding(reminder.Reminder.SessionId));
+        if (binding.IsNobody())
+        {
+            binding = Context.ActorOf(
+                TeamsSessionBindingActor.CreateProps(reminder.Reminder.SessionId, _dependencies),
+                TeamsActorNames.Binding(reminder.Reminder.SessionId));
+        }
+
+        binding.Forward(new TeamsBindingReminder(reminder.Reminder));
     }
 
     private bool IsExpectedConversation(TeamsInboundActivity activity)

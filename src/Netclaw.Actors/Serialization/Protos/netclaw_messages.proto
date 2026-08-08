@@ -365,6 +365,8 @@ message DurableActivityDispatchReleasedProto {
 message DurableActivityDispatchSnapshotProto {
   repeated string activity_fingerprints = 1;
   repeated TeamsApprovalSnapshotEntryProto teams_approvals = 2;
+  optional TeamsProactiveDestinationSnapshotEntryProto teams_destination = 3;
+  repeated TeamsProactiveDeliverySnapshotEntryProto teams_proactive_deliveries = 4;
 }
 
 message TeamsApprovalSnapshotEntryProto {
@@ -376,6 +378,46 @@ message TeamsApprovalSnapshotEntryProto {
   int64 expires_at_unix_milliseconds = 6;
   optional string prompt_id = 7;
   optional string decision = 8;
+}
+
+// ── Teams proactive reminder delivery ──
+// Fields are append-only. These records persist only bounded non-secret
+// destination and reminder state. Older binaries must not run against a
+// journal that contains the new manifests.
+
+message TeamsProactiveDestinationCapturedProto {
+  string tenant_id = 1;
+  string conversation_id = 2;
+  int32 scope = 3;
+  string service_url = 4;
+  optional string root_activity_id = 5;
+  optional string team_id = 6;
+  optional string channel_id = 7;
+  optional string user_id = 8;
+}
+
+message TeamsProactiveDestinationInvalidatedProto {}
+
+message TeamsProactiveDeliveryRecordedProto {
+  string delivery_key = 1;
+  int32 state = 2;
+  optional string evicted_delivery_key = 3;
+}
+
+message TeamsProactiveDestinationSnapshotEntryProto {
+  string tenant_id = 1;
+  string conversation_id = 2;
+  int32 scope = 3;
+  string service_url = 4;
+  optional string root_activity_id = 5;
+  optional string team_id = 6;
+  optional string channel_id = 7;
+  optional string user_id = 8;
+}
+
+message TeamsProactiveDeliverySnapshotEntryProto {
+  string delivery_key = 1;
+  int32 state = 2;
 }
 
 message DurableTeamsChannelActivityMappedProto {

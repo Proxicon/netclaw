@@ -48,6 +48,9 @@ internal static class NetclawProtoMapper
         TeamsApprovalPendingCreated v => ToProto(v),
         TeamsApprovalCardDelivered v => ToProto(v),
         TeamsApprovalConsumed v => ToProto(v),
+        TeamsProactiveDestinationCaptured v => ToProto(v),
+        TeamsProactiveDestinationInvalidated v => ToProto(v),
+        TeamsProactiveDeliveryRecorded v => ToProto(v),
         DurableActivityDispatchReserved v => ToProto(v),
         DurableActivityDispatchReleased v => ToProto(v),
         DurableActivityDispatchSnapshot v => ToProto(v),
@@ -862,18 +865,113 @@ internal static class NetclawProtoMapper
     internal static DurableActivityDispatchReleased FromProto(Proto.DurableActivityDispatchReleasedProto proto) => new(
         proto.ActivityFingerprint);
 
+    internal static Proto.TeamsProactiveDestinationCapturedProto ToProto(TeamsProactiveDestinationCaptured evt)
+    {
+        var proto = new Proto.TeamsProactiveDestinationCapturedProto
+        {
+            TenantId = evt.TenantId,
+            ConversationId = evt.ConversationId,
+            Scope = evt.Scope,
+            ServiceUrl = evt.ServiceUrl
+        };
+        if (evt.RootActivityId is not null) proto.RootActivityId = evt.RootActivityId;
+        if (evt.TeamId is not null) proto.TeamId = evt.TeamId;
+        if (evt.ChannelId is not null) proto.ChannelId = evt.ChannelId;
+        if (evt.UserId is not null) proto.UserId = evt.UserId;
+        return proto;
+    }
+
+    internal static TeamsProactiveDestinationCaptured FromProto(Proto.TeamsProactiveDestinationCapturedProto proto) => new()
+    {
+        TenantId = proto.TenantId,
+        ConversationId = proto.ConversationId,
+        Scope = proto.Scope,
+        ServiceUrl = proto.ServiceUrl,
+        RootActivityId = proto.HasRootActivityId ? proto.RootActivityId : null,
+        TeamId = proto.HasTeamId ? proto.TeamId : null,
+        ChannelId = proto.HasChannelId ? proto.ChannelId : null,
+        UserId = proto.HasUserId ? proto.UserId : null
+    };
+
+    internal static Proto.TeamsProactiveDestinationInvalidatedProto ToProto(TeamsProactiveDestinationInvalidated _) => new();
+
+    internal static TeamsProactiveDestinationInvalidated FromProto(Proto.TeamsProactiveDestinationInvalidatedProto _) => new();
+
+    internal static Proto.TeamsProactiveDeliveryRecordedProto ToProto(TeamsProactiveDeliveryRecorded evt)
+    {
+        var proto = new Proto.TeamsProactiveDeliveryRecordedProto
+        {
+            DeliveryKey = evt.DeliveryKey,
+            State = evt.State
+        };
+        if (evt.EvictedDeliveryKey is not null) proto.EvictedDeliveryKey = evt.EvictedDeliveryKey;
+        return proto;
+    }
+
+    internal static TeamsProactiveDeliveryRecorded FromProto(Proto.TeamsProactiveDeliveryRecordedProto proto) => new()
+    {
+        DeliveryKey = proto.DeliveryKey,
+        State = proto.State,
+        EvictedDeliveryKey = proto.HasEvictedDeliveryKey ? proto.EvictedDeliveryKey : null
+    };
+
     internal static Proto.DurableActivityDispatchSnapshotProto ToProto(DurableActivityDispatchSnapshot snapshot)
     {
         var proto = new Proto.DurableActivityDispatchSnapshotProto();
         proto.ActivityFingerprints.AddRange(snapshot.ActivityFingerprints);
         proto.TeamsApprovals.AddRange(snapshot.TeamsApprovals.Select(ToProto));
+        if (snapshot.TeamsDestination is not null)
+            proto.TeamsDestination = ToProto(snapshot.TeamsDestination);
+        proto.TeamsProactiveDeliveries.AddRange(snapshot.TeamsProactiveDeliveries.Select(ToProto));
         return proto;
     }
 
     internal static DurableActivityDispatchSnapshot FromProto(Proto.DurableActivityDispatchSnapshotProto proto) => new(
         proto.ActivityFingerprints.ToArray())
     {
-        TeamsApprovals = proto.TeamsApprovals.Select(FromProto).ToArray()
+        TeamsApprovals = proto.TeamsApprovals.Select(FromProto).ToArray(),
+        TeamsDestination = proto.TeamsDestination is null ? null : FromProto(proto.TeamsDestination),
+        TeamsProactiveDeliveries = proto.TeamsProactiveDeliveries.Select(FromProto).ToArray()
+    };
+
+    private static Proto.TeamsProactiveDestinationSnapshotEntryProto ToProto(TeamsProactiveDestinationSnapshotEntry entry)
+    {
+        var proto = new Proto.TeamsProactiveDestinationSnapshotEntryProto
+        {
+            TenantId = entry.TenantId,
+            ConversationId = entry.ConversationId,
+            Scope = entry.Scope,
+            ServiceUrl = entry.ServiceUrl
+        };
+        if (entry.RootActivityId is not null) proto.RootActivityId = entry.RootActivityId;
+        if (entry.TeamId is not null) proto.TeamId = entry.TeamId;
+        if (entry.ChannelId is not null) proto.ChannelId = entry.ChannelId;
+        if (entry.UserId is not null) proto.UserId = entry.UserId;
+        return proto;
+    }
+
+    private static TeamsProactiveDestinationSnapshotEntry FromProto(Proto.TeamsProactiveDestinationSnapshotEntryProto proto) => new()
+    {
+        TenantId = proto.TenantId,
+        ConversationId = proto.ConversationId,
+        Scope = proto.Scope,
+        ServiceUrl = proto.ServiceUrl,
+        RootActivityId = proto.HasRootActivityId ? proto.RootActivityId : null,
+        TeamId = proto.HasTeamId ? proto.TeamId : null,
+        ChannelId = proto.HasChannelId ? proto.ChannelId : null,
+        UserId = proto.HasUserId ? proto.UserId : null
+    };
+
+    private static Proto.TeamsProactiveDeliverySnapshotEntryProto ToProto(TeamsProactiveDeliverySnapshotEntry entry) => new()
+    {
+        DeliveryKey = entry.DeliveryKey,
+        State = entry.State
+    };
+
+    private static TeamsProactiveDeliverySnapshotEntry FromProto(Proto.TeamsProactiveDeliverySnapshotEntryProto proto) => new()
+    {
+        DeliveryKey = proto.DeliveryKey,
+        State = proto.State
     };
 
     private static Proto.TeamsApprovalSnapshotEntryProto ToProto(TeamsApprovalSnapshotEntry entry)

@@ -11,11 +11,13 @@ using Microsoft.Extensions.DependencyInjection;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
+using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Sessions;
 using Netclaw.Channels.Teams;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
 using Xunit;
+using static Netclaw.Actors.Reminders.ReminderProtocol;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Daemon.Tests.Configuration;
@@ -421,6 +423,153 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
     }
 
     [Fact]
+    public async Task Allowed_personal_destination_survives_binding_restart_for_later_output()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-proactive-restart");
+        var dependencies = CreateDependencies(pipeline, replyClient: replyClient);
+        var first = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-proactive-first");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity(
+                "activity-proactive",
+                "tenant-a",
+                "conversation-proactive-restart"))).Disposition);
+        ReceiveDispatchedMessage();
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-proactive-second");
+        recovered.Tell(new TeamsSessionBindingActor.BindingOutput(
+            new TextOutput("later reminder output") { SessionId = sessionId }));
+
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("conversation-proactive-restart", Assert.Single(replyClient.Messages).Destination.ConversationId);
+        Assert.Equal(TeamsConversationScope.Personal, Assert.Single(replyClient.Messages).Destination.Scope);
+    }
+
+    [Fact]
+    public async Task Rejected_personal_activity_cannot_create_a_destination()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-poisoning");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient, allowedUserIds: ["different-user"])));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Denied,
+            (await RouteAsync(actor, CreateActivity("activity-poisoning", "tenant-a", "conversation-poisoning"))).Disposition);
+
+        var telemetryBefore = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
+        actor.Tell(new TeamsSessionBindingActor.BindingOutput(
+            new TextOutput("must not deliver") { SessionId = sessionId }));
+        await AwaitAssertAsync(
+            () => Assert.Equal(telemetryBefore.RepliesFailed + 1, ChannelTelemetry.For(ChannelType.Teams).GetSnapshot().RepliesFailed),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Empty(replyClient.Messages);
+    }
+
+    [Fact]
+    public async Task Reminder_without_a_persisted_destination_is_rejected_without_a_delivery_attempt()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-reminder-missing");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(CreatePipeline(TestActor), replyClient: replyClient)));
+        var dispatcher = CreateTestProbe();
+
+        actor.Tell(
+            new TeamsBindingReminder(CreateReminder(sessionId, "reminder-missing:1")),
+            dispatcher.Ref);
+
+        var nack = await dispatcher.ExpectMsgAsync<CommandNack>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("destination", nack.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(replyClient.Messages);
+    }
+
+    [Fact]
+    public async Task Delivered_reminder_is_not_resent_after_binding_restart()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-reminder-idempotent");
+        var dependencies = CreateDependencies(pipeline, replyClient: replyClient);
+        var first = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-reminder-idempotent-first");
+        var observer = CreateTestProbe();
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity(
+                "activity-reminder-idempotent",
+                "tenant-a",
+                "conversation-reminder-idempotent"))).Disposition);
+        ReceiveOutputSubscriber();
+
+        const string deliveryKey = "reminder-idempotent:1";
+        first.Tell(new TeamsBindingReminder(CreateReminder(sessionId, deliveryKey, observer.Ref)));
+        ReceiveNextOutputSubscriber();
+        first.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("reminder reply") { SessionId = sessionId }));
+
+        var delivered = await observer.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(delivered.Delivered);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-reminder-idempotent-recovered");
+        var retryObserver = CreateTestProbe();
+        var dispatcher = CreateTestProbe();
+        recovered.Tell(new TeamsBindingReminder(CreateReminder(sessionId, deliveryKey, retryObserver.Ref)), dispatcher.Ref);
+
+        await dispatcher.ExpectMsgAsync<CommandAck>(cancellationToken: TestContext.Current.CancellationToken);
+        var repeatedDelivery = await retryObserver.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(repeatedDelivery.Delivered);
+        Assert.Single(replyClient.Messages);
+    }
+
+    [Fact]
+    public async Task Interrupted_sending_reminder_recovers_as_delivery_unknown_and_is_not_resent()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-reminder-interrupted");
+        var dependencies = CreateDependencies(pipeline, replyClient: replyClient);
+        var first = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-reminder-interrupted-first");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity(
+                "activity-reminder-interrupted",
+                "tenant-a",
+                "conversation-reminder-interrupted"))).Disposition);
+        ReceiveOutputSubscriber();
+
+        const string deliveryKey = "reminder-interrupted:1";
+        first.Tell(new TeamsBindingReminder(CreateReminder(sessionId, deliveryKey)));
+        ReceiveNextOutputSubscriber();
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies), "teams-reminder-interrupted-recovered");
+        var dispatcher = CreateTestProbe();
+        recovered.Tell(new TeamsBindingReminder(CreateReminder(sessionId, deliveryKey)), dispatcher.Ref);
+
+        var nack = await dispatcher.ExpectMsgAsync<CommandNack>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("operator review", nack.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(replyClient.Messages);
+    }
+
+    [Fact]
     public async Task Channel_output_for_a_root_and_reply_uses_the_same_canonical_thread_destination()
     {
         var pipeline = CreatePipeline(TestActor);
@@ -780,6 +929,28 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         null,
         promptActivityId,
         "https://service.invalid/");
+
+    private static DeliverTrustedSessionTurn CreateReminder(
+        SessionId sessionId,
+        string deliveryKey,
+        IActorRef? observer = null) => new(
+        sessionId,
+        "Run the scheduled reminder.",
+        new MessageSource
+        {
+            ChannelType = ChannelType.Teams,
+            SenderId = new SenderId("reminder-system"),
+            Audience = TrustAudience.Personal,
+            Boundary = TrustBoundary.Personal,
+            Principal = PrincipalClassification.VerifiedAutomation,
+            Provenance = new SourceProvenance(TransportAuthenticity.LocalProcess, PayloadTaint.Trusted)
+            {
+                SourceKind = new SourceKind("reminder")
+            },
+            ReceivedAt = TimeProvider.System.GetUtcNow(),
+            ReminderId = new ReminderId(deliveryKey),
+            DeliveryObserver = observer
+        });
 
     private static Task<TeamsBindingRouteResult> RouteAsync(
         IActorRef actor,
