@@ -570,6 +570,26 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
             const string errorMessage = "I encountered an error executing a tool. Please try again.";
             var category = msg.Cause is TimeoutException ? ErrorCategory.Timeout : ErrorCategory.ToolFailure;
+
+            // A partial parallel-batch failure leaves the tail assistant tool_calls
+            // message with unanswered call(s) — the sibling(s) that faulted. Close
+            // those out with synthetic tool-results BEFORE FailCurrentTurn appends the
+            // "I encountered an error" assistant reply. Otherwise that reply wedges
+            // between the tool_calls message and the rest of its results, which strict
+            // OpenAI-compatible providers (DeepSeek/Qwen/vLLM) reject on every later
+            // turn with 400 "insufficient tool messages following tool_calls".
+            if (ParkedToolBatchHistory.FindRedrivableAssistantMessage(_state.History, null) is not null)
+            {
+                var abandoned = BuildToolBatchAbandonedEvent(
+                    "Tool call was not completed — the tool run failed.");
+                Persist(abandoned, evt =>
+                {
+                    ApplyToolBatchAbandoned(evt);
+                    FailCurrentTurn(errorMessage, msg.Cause, category);
+                });
+                return;
+            }
+
             FailCurrentTurn(errorMessage, msg.Cause, category);
         });
 
@@ -4295,10 +4315,16 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             if (!_resolvedToolApprovals.TryGetValue(call.CallId.Value, out var resolved))
                 continue;
 
-            if (resolved.Decision == ApprovalDecision.ApprovedOnce)
+            if (resolved.Decision.IsApprovalGrant())
             {
-                // ApprovedOnce has no persisted grant. Pre-seed only this call
-                // so the re-drive skips the gate once without broadening approval.
+                // Pre-seed the one-time bypass for the just-approved call so the
+                // re-drive runs it once even when its durable grant (if any) does
+                // not cover every candidate verb — e.g. a piped command's standalone
+                // verbs (base64, head) are never persisted directory-scoped.
+                // ApprovedOnce has no durable grant at all; broader scopes still
+                // record their durable grant separately. This only authorizes the
+                // immediate re-drive, matching the live pipeline and the sub-agent.
+                // See https://github.com/netclaw-dev/netclaw/issues/1802.
                 preSeed[call.CallId.Value] = resolved.Pending.Patterns;
             }
 

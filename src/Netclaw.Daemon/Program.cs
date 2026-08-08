@@ -547,10 +547,8 @@ static void ConfigureDaemonServices(
     services.AddSingleton(effectivePolicyDefaults);
     services.AddSingleton<TrustContextDeriver>();
 
-    // Reminders — no config surface exposed. Settings live as private
-    // consts on ReminderManagerActor / ReminderExecutionActor /
-    // ReminderScheduleParser / ReminderHistoryStore. Library defaults
-    // cover AckTimeout, MaxRetryBackoff, and MaxDeliveryAttempts.
+    // Reminder limits stay private. Netclaw sets the library acknowledgement
+    // lease in WithReminderManager because an LLM attempt can take one hour.
     services.AddSingleton<ReminderDefinitionStore>();
     services.AddSingleton<ReminderHistoryStore>();
 
@@ -588,6 +586,11 @@ static void ConfigureDaemonServices(
         paths.SecretsPath,
         paths.KeysDirectory,
         paths.SqliteDbPath,
+        // SQLite sidecars mirror the shell indicator list — they hold the same
+        // raw page data as the DB and must not be writable through tools either.
+        paths.SqliteDbPath + "-wal",
+        paths.SqliteDbPath + "-shm",
+        paths.SqliteDbPath + "-journal",
         paths.PidFilePath,
         paths.LockFilePath,
         paths.RestartManifestPath,
@@ -610,6 +613,14 @@ static void ConfigureDaemonServices(
         paths.WebhooksDirectory,
         paths.KeysDirectory,
         paths.SqliteDbPath,
+        // SQLite sidecars hold raw page data (webhook secrets, OAuth tokens)
+        // and are reachable via the read-deny union, so they must be denied
+        // exactly like the DB itself. Shell's substring scan already catches
+        // them (command text contains "netclaw.db"); the path-boundary matcher
+        // in ToolPathPolicy does not, hence the explicit entries (#1724).
+        paths.SqliteDbPath + "-wal",
+        paths.SqliteDbPath + "-shm",
+        paths.SqliteDbPath + "-journal",
         paths.PidFilePath,
         paths.LockFilePath,
         paths.RestartManifestPath,
@@ -677,8 +688,8 @@ static void ConfigureDaemonServices(
         toolConfig,
         effectivePolicyDefaults,
         shellCommandPolicy,
-        fileApprovalMatcher,
         toolPathPolicy,
+        fileApprovalMatcher,
         featureGates,
         shellTrustZonePolicy,
         safeVerbs);
