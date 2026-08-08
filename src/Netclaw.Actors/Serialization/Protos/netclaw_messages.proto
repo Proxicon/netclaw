@@ -327,9 +327,11 @@ message PendingApprovalPromptClearedProto {
   string call_id = 1;
 }
 
-// ── Teams Adaptive Card approval state ──
-// Fields are append-only. Older binaries do not understand these manifests and
-// must not run against a journal that contains them.
+// ── Legacy Teams compatibility payloads ──
+// Decode-only after the Teams dual-read migration. The generic Actors mapper
+// and serializer must never write these messages or their manifests. They
+// remain solely so a Team actor can recover an existing journal, then write a
+// Teams-owned v2 snapshot. Remove only after the persistence retention window.
 
 message TeamsApprovalPendingCreatedProto {
   string call_id = 1;
@@ -380,10 +382,9 @@ message TeamsApprovalSnapshotEntryProto {
   optional string decision = 8;
 }
 
-// ── Teams proactive reminder delivery ──
-// Fields are append-only. These records persist only bounded non-secret
-// destination and reminder state. Older binaries must not run against a
-// journal that contains the new manifests.
+// ── Legacy Teams proactive reminder delivery ──
+// Decode-only compatibility records. New proactive state is in
+// teams_persistence.proto under Netclaw.Channels.Teams.
 
 message TeamsProactiveDestinationCapturedProto {
   string tenant_id = 1;

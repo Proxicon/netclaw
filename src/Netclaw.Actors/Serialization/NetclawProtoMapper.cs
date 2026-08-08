@@ -45,17 +45,9 @@ internal static class NetclawProtoMapper
         CursorAdvanced v => ToProto(v),
         PendingApprovalPromptTracked v => ToProto(v),
         PendingApprovalPromptCleared v => ToProto(v),
-        TeamsApprovalPendingCreated v => ToProto(v),
-        TeamsApprovalCardDelivered v => ToProto(v),
-        TeamsApprovalConsumed v => ToProto(v),
-        TeamsProactiveDestinationCaptured v => ToProto(v),
-        TeamsProactiveDestinationInvalidated v => ToProto(v),
-        TeamsProactiveDeliveryRecorded v => ToProto(v),
         DurableActivityDispatchReserved v => ToProto(v),
         DurableActivityDispatchReleased v => ToProto(v),
         DurableActivityDispatchSnapshot v => ToProto(v),
-        DurableTeamsChannelActivityMapped v => ToProto(v),
-        DurableTeamsChannelActivityIndexSnapshot v => ToProto(v),
         MemoriesDistilledV2 v => ToProto(v),
         _ => throw new ArgumentException($"No proto mapping for {obj.GetType().FullName}")
     };
@@ -788,60 +780,6 @@ internal static class NetclawProtoMapper
         CallId = proto.CallId
     };
 
-    internal static Proto.TeamsApprovalPendingCreatedProto ToProto(TeamsApprovalPendingCreated evt)
-    {
-        var proto = new Proto.TeamsApprovalPendingCreatedProto
-        {
-            CallId = evt.CallId,
-            CorrelationId = evt.CorrelationId,
-            NonceHash = evt.NonceHash,
-            ExpiresAtUnixMilliseconds = evt.ExpiresAtUnixMilliseconds
-        };
-        if (evt.RequesterSenderId is not null)
-            proto.RequesterSenderId = evt.RequesterSenderId;
-        if (evt.RequesterPrincipal is not null)
-            proto.RequesterPrincipal = (int)evt.RequesterPrincipal.Value;
-        return proto;
-    }
-
-    internal static TeamsApprovalPendingCreated FromProto(Proto.TeamsApprovalPendingCreatedProto proto) => new()
-    {
-        CallId = proto.CallId,
-        CorrelationId = proto.CorrelationId,
-        NonceHash = proto.NonceHash,
-        RequesterSenderId = proto.HasRequesterSenderId ? proto.RequesterSenderId : null,
-        RequesterPrincipal = proto.HasRequesterPrincipal
-            ? (Configuration.PrincipalClassification)proto.RequesterPrincipal
-            : null,
-        ExpiresAtUnixMilliseconds = proto.ExpiresAtUnixMilliseconds
-    };
-
-    internal static Proto.TeamsApprovalCardDeliveredProto ToProto(TeamsApprovalCardDelivered evt) => new()
-    {
-        CorrelationId = evt.CorrelationId,
-        PromptId = evt.PromptId
-    };
-
-    internal static TeamsApprovalCardDelivered FromProto(Proto.TeamsApprovalCardDeliveredProto proto) => new()
-    {
-        CorrelationId = proto.CorrelationId,
-        PromptId = proto.PromptId
-    };
-
-    internal static Proto.TeamsApprovalConsumedProto ToProto(TeamsApprovalConsumed evt) => new()
-    {
-        CorrelationId = evt.CorrelationId,
-        Decision = evt.Decision,
-        ConsumedAtUnixMilliseconds = evt.ConsumedAtUnixMilliseconds
-    };
-
-    internal static TeamsApprovalConsumed FromProto(Proto.TeamsApprovalConsumedProto proto) => new()
-    {
-        CorrelationId = proto.CorrelationId,
-        Decision = proto.Decision,
-        ConsumedAtUnixMilliseconds = proto.ConsumedAtUnixMilliseconds
-    };
-
     internal static Proto.DurableActivityDispatchReservedProto ToProto(DurableActivityDispatchReserved evt)
     {
         var proto = new Proto.DurableActivityDispatchReservedProto
@@ -865,175 +803,15 @@ internal static class NetclawProtoMapper
     internal static DurableActivityDispatchReleased FromProto(Proto.DurableActivityDispatchReleasedProto proto) => new(
         proto.ActivityFingerprint);
 
-    internal static Proto.TeamsProactiveDestinationCapturedProto ToProto(TeamsProactiveDestinationCaptured evt)
-    {
-        var proto = new Proto.TeamsProactiveDestinationCapturedProto
-        {
-            TenantId = evt.TenantId,
-            ConversationId = evt.ConversationId,
-            Scope = evt.Scope,
-            ServiceUrl = evt.ServiceUrl
-        };
-        if (evt.RootActivityId is not null) proto.RootActivityId = evt.RootActivityId;
-        if (evt.TeamId is not null) proto.TeamId = evt.TeamId;
-        if (evt.ChannelId is not null) proto.ChannelId = evt.ChannelId;
-        if (evt.UserId is not null) proto.UserId = evt.UserId;
-        return proto;
-    }
-
-    internal static TeamsProactiveDestinationCaptured FromProto(Proto.TeamsProactiveDestinationCapturedProto proto) => new()
-    {
-        TenantId = proto.TenantId,
-        ConversationId = proto.ConversationId,
-        Scope = proto.Scope,
-        ServiceUrl = proto.ServiceUrl,
-        RootActivityId = proto.HasRootActivityId ? proto.RootActivityId : null,
-        TeamId = proto.HasTeamId ? proto.TeamId : null,
-        ChannelId = proto.HasChannelId ? proto.ChannelId : null,
-        UserId = proto.HasUserId ? proto.UserId : null
-    };
-
-    internal static Proto.TeamsProactiveDestinationInvalidatedProto ToProto(TeamsProactiveDestinationInvalidated _) => new();
-
-    internal static TeamsProactiveDestinationInvalidated FromProto(Proto.TeamsProactiveDestinationInvalidatedProto _) => new();
-
-    internal static Proto.TeamsProactiveDeliveryRecordedProto ToProto(TeamsProactiveDeliveryRecorded evt)
-    {
-        var proto = new Proto.TeamsProactiveDeliveryRecordedProto
-        {
-            DeliveryKey = evt.DeliveryKey,
-            State = evt.State
-        };
-        if (evt.EvictedDeliveryKey is not null) proto.EvictedDeliveryKey = evt.EvictedDeliveryKey;
-        return proto;
-    }
-
-    internal static TeamsProactiveDeliveryRecorded FromProto(Proto.TeamsProactiveDeliveryRecordedProto proto) => new()
-    {
-        DeliveryKey = proto.DeliveryKey,
-        State = proto.State,
-        EvictedDeliveryKey = proto.HasEvictedDeliveryKey ? proto.EvictedDeliveryKey : null
-    };
-
     internal static Proto.DurableActivityDispatchSnapshotProto ToProto(DurableActivityDispatchSnapshot snapshot)
     {
         var proto = new Proto.DurableActivityDispatchSnapshotProto();
         proto.ActivityFingerprints.AddRange(snapshot.ActivityFingerprints);
-        proto.TeamsApprovals.AddRange(snapshot.TeamsApprovals.Select(ToProto));
-        if (snapshot.TeamsDestination is not null)
-            proto.TeamsDestination = ToProto(snapshot.TeamsDestination);
-        proto.TeamsProactiveDeliveries.AddRange(snapshot.TeamsProactiveDeliveries.Select(ToProto));
         return proto;
     }
 
     internal static DurableActivityDispatchSnapshot FromProto(Proto.DurableActivityDispatchSnapshotProto proto) => new(
-        proto.ActivityFingerprints.ToArray())
-    {
-        TeamsApprovals = proto.TeamsApprovals.Select(FromProto).ToArray(),
-        TeamsDestination = proto.TeamsDestination is null ? null : FromProto(proto.TeamsDestination),
-        TeamsProactiveDeliveries = proto.TeamsProactiveDeliveries.Select(FromProto).ToArray()
-    };
-
-    private static Proto.TeamsProactiveDestinationSnapshotEntryProto ToProto(TeamsProactiveDestinationSnapshotEntry entry)
-    {
-        var proto = new Proto.TeamsProactiveDestinationSnapshotEntryProto
-        {
-            TenantId = entry.TenantId,
-            ConversationId = entry.ConversationId,
-            Scope = entry.Scope,
-            ServiceUrl = entry.ServiceUrl
-        };
-        if (entry.RootActivityId is not null) proto.RootActivityId = entry.RootActivityId;
-        if (entry.TeamId is not null) proto.TeamId = entry.TeamId;
-        if (entry.ChannelId is not null) proto.ChannelId = entry.ChannelId;
-        if (entry.UserId is not null) proto.UserId = entry.UserId;
-        return proto;
-    }
-
-    private static TeamsProactiveDestinationSnapshotEntry FromProto(Proto.TeamsProactiveDestinationSnapshotEntryProto proto) => new()
-    {
-        TenantId = proto.TenantId,
-        ConversationId = proto.ConversationId,
-        Scope = proto.Scope,
-        ServiceUrl = proto.ServiceUrl,
-        RootActivityId = proto.HasRootActivityId ? proto.RootActivityId : null,
-        TeamId = proto.HasTeamId ? proto.TeamId : null,
-        ChannelId = proto.HasChannelId ? proto.ChannelId : null,
-        UserId = proto.HasUserId ? proto.UserId : null
-    };
-
-    private static Proto.TeamsProactiveDeliverySnapshotEntryProto ToProto(TeamsProactiveDeliverySnapshotEntry entry) => new()
-    {
-        DeliveryKey = entry.DeliveryKey,
-        State = entry.State
-    };
-
-    private static TeamsProactiveDeliverySnapshotEntry FromProto(Proto.TeamsProactiveDeliverySnapshotEntryProto proto) => new()
-    {
-        DeliveryKey = proto.DeliveryKey,
-        State = proto.State
-    };
-
-    private static Proto.TeamsApprovalSnapshotEntryProto ToProto(TeamsApprovalSnapshotEntry entry)
-    {
-        var proto = new Proto.TeamsApprovalSnapshotEntryProto
-        {
-            CallId = entry.CallId,
-            CorrelationId = entry.CorrelationId,
-            NonceHash = entry.NonceHash,
-            ExpiresAtUnixMilliseconds = entry.ExpiresAtUnixMilliseconds
-        };
-        if (entry.RequesterSenderId is not null)
-            proto.RequesterSenderId = entry.RequesterSenderId;
-        if (entry.RequesterPrincipal is not null)
-            proto.RequesterPrincipal = (int)entry.RequesterPrincipal.Value;
-        if (entry.PromptId is not null)
-            proto.PromptId = entry.PromptId;
-        if (entry.Decision is not null)
-            proto.Decision = entry.Decision;
-        return proto;
-    }
-
-    private static TeamsApprovalSnapshotEntry FromProto(Proto.TeamsApprovalSnapshotEntryProto proto) => new()
-    {
-        CallId = proto.CallId,
-        CorrelationId = proto.CorrelationId,
-        NonceHash = proto.NonceHash,
-        RequesterSenderId = proto.HasRequesterSenderId ? proto.RequesterSenderId : null,
-        RequesterPrincipal = proto.HasRequesterPrincipal
-            ? (Configuration.PrincipalClassification)proto.RequesterPrincipal
-            : null,
-        ExpiresAtUnixMilliseconds = proto.ExpiresAtUnixMilliseconds,
-        PromptId = proto.HasPromptId ? proto.PromptId : null,
-        Decision = proto.HasDecision ? proto.Decision : null
-    };
-
-    internal static Proto.DurableTeamsChannelActivityMappedProto ToProto(DurableTeamsChannelActivityMapped evt)
-    {
-        var proto = new Proto.DurableTeamsChannelActivityMappedProto
-        {
-            ActivityFingerprint = evt.ActivityFingerprint,
-            SessionId = evt.SessionId
-        };
-        if (evt.EvictedActivityFingerprint is not null)
-            proto.EvictedActivityFingerprint = evt.EvictedActivityFingerprint;
-        return proto;
-    }
-
-    internal static DurableTeamsChannelActivityMapped FromProto(Proto.DurableTeamsChannelActivityMappedProto proto) => new(
-        proto.ActivityFingerprint,
-        proto.SessionId,
-        proto.HasEvictedActivityFingerprint ? proto.EvictedActivityFingerprint : null);
-
-    internal static Proto.DurableTeamsChannelActivityIndexSnapshotProto ToProto(DurableTeamsChannelActivityIndexSnapshot snapshot)
-    {
-        var proto = new Proto.DurableTeamsChannelActivityIndexSnapshotProto();
-        proto.Entries.AddRange(snapshot.Entries.Select(ToProto));
-        return proto;
-    }
-
-    internal static DurableTeamsChannelActivityIndexSnapshot FromProto(Proto.DurableTeamsChannelActivityIndexSnapshotProto proto) => new(
-        proto.Entries.Select(FromProto).ToArray());
+        proto.ActivityFingerprints.ToArray());
 
     // ── MemoriesDistilledV2 / ProposedMemoryContext ──
 

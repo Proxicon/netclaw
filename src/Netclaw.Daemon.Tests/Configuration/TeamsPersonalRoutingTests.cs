@@ -7,6 +7,7 @@ using Akka.Actor;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Persistence.Hosting;
+using Akka.Serialization;
 using Microsoft.Extensions.DependencyInjection;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
@@ -14,6 +15,7 @@ using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Sessions;
 using Netclaw.Channels.Teams;
+using Netclaw.Channels.Teams.Serialization;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
 using Xunit;
@@ -27,7 +29,47 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
 {
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
-        builder.WithInMemoryJournal().WithInMemorySnapshotStore().WithNetclawSerialization();
+        builder.WithInMemoryJournal().WithInMemorySnapshotStore().WithNetclawSerialization().WithTeamsPersistenceSerialization();
+    }
+
+    [Fact]
+    public void Teams_persistence_records_use_the_teams_owned_v2_serializer()
+    {
+        var value = new TeamsProactiveDeliveryRecorded
+        {
+            DeliveryKey = "reminder-v2:1",
+            State = (int)TeamsProactiveDeliveryState.Sent,
+            DestinationGeneration = 1
+        };
+
+        var serializer = Sys.Serialization.FindSerializerFor(value);
+        var manifest = Assert.IsAssignableFrom<SerializerWithStringManifest>(serializer).Manifest(value);
+        var restored = Assert.IsType<TeamsProactiveDeliveryRecorded>(
+            Sys.Serialization.Deserialize(serializer.ToBinary(value), serializer.Identifier, manifest));
+
+        Assert.Equal(151, serializer.Identifier);
+        Assert.Equal("teams-delivery-recorded-v2", manifest);
+        Assert.Equal(value, restored);
+    }
+
+    [Fact]
+    public void Proactive_destination_resolution_is_explicit_and_fail_closed()
+    {
+        var session = CreateSessionId("tenant-a", "conversation-a");
+        var other = CreateSessionId("tenant-a", "conversation-b");
+        var current = new TeamsProactiveDestinationCandidate(session, TeamsConversationScope.Personal, 1, true);
+        var invalid = new TeamsProactiveDestinationCandidate(other, TeamsConversationScope.Personal, 1, false);
+
+        Assert.Equal(TeamsDestinationResolutionDisposition.Resolved,
+            TeamsProactiveDestinationResolver.Resolve(session, TeamsConversationScope.Personal, null, [current]).Disposition);
+        Assert.Equal(TeamsDestinationResolutionDisposition.Unavailable,
+            TeamsProactiveDestinationResolver.Resolve(session, TeamsConversationScope.Personal, null, [invalid]).Disposition);
+        Assert.Equal(TeamsDestinationResolutionDisposition.Rejected,
+            TeamsProactiveDestinationResolver.Resolve(session, TeamsConversationScope.Personal, other.Value, [current, new(other, TeamsConversationScope.Personal, 1, true)]).Disposition);
+        Assert.Equal(TeamsDestinationResolutionDisposition.Unavailable,
+            TeamsProactiveDestinationResolver.Resolve(session, TeamsConversationScope.Channel, null, [current]).Disposition);
+        Assert.Equal(TeamsDestinationResolutionDisposition.Ambiguous,
+            TeamsProactiveDestinationResolver.Resolve(session, TeamsConversationScope.Personal, null, [current, current]).Disposition);
     }
 
     [Fact]
@@ -514,7 +556,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : TestKi
         const string deliveryKey = "reminder-idempotent:1";
         first.Tell(new TeamsBindingReminder(CreateReminder(sessionId, deliveryKey, observer.Ref)));
         ReceiveNextOutputSubscriber();
-        first.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("reminder reply") { SessionId = sessionId }));
+        first.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("reminder reply")
+        {
+            SessionId = sessionId,
+            SourceReminderId = new ReminderId(deliveryKey)
+        }));
 
         var delivered = await observer.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(delivered.Delivered);
