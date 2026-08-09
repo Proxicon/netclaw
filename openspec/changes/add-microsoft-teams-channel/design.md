@@ -411,17 +411,42 @@ operator-review-only: a repeated unknown key is not automatically resent and
 is never reported as delivered. This prevents a false exactly-once claim during
 the external-send crash window.
 
-The daemon transport first uses a live inbound SDK context for ordinary replies.
-After that request has completed, proactive sends use the daemon SDK app and
-the validated persisted destination. Update operations still require a live
-context and are not treated as proactive sends. Safe telemetry records only
+The daemon transport uses the authenticated application client for output
+delivery. It does not cache an inbound SDK context, an HTTP context, a request
+service scope, a request cancellation token, or a request-bound client.
+Proactive sends use the daemon SDK app and the validated persisted destination.
+Update operations are not proactive sends. Safe telemetry records only
 classification codes for destination capture, missing destination, delivery
 attempt, success, retryable failure, and permanent invalidation. It never
 contains destination values, reminder content, SDK exceptions, or credentials.
 
+The binding actor resolves a reminder destination from its own durable state.
+The current session resolves its one valid destination. An explicit destination
+key must equal the canonical binding session. A missing, stale, invalidated,
+cross-session, cross-tenant, scope-mismatched, or ambiguous destination fails
+closed. The actor does not select a first, latest, or global destination.
+
+Each delivery record stores the destination generation that existed at
+reservation time. A changed validated inbound destination increments that
+generation. An unchanged destination does not increment it. The actor rejects
+a late output whose generation differs from the current destination. It records
+the outcome against the original delivery key. It does not post to the refreshed
+destination.
+
+Binding diagnostics are authoritative actor state. They expose only a health
+state, a migration state, bounded counts, capacity state, and safe reason
+codes. They do not expose Teams IDs, service URLs, contents, credentials,
+headers, tokens, or provider exception text.
+
 The new protobuf fields and manifests are append-only. Older binaries do not
 understand the PR 8 durable events and must not be rolled back against a journal
 containing them. Operators may instead disable Teams while retaining that state.
+Historical Teams manifests remain decode-only through the generic serializer.
+On recovery, the owning Teams actor converts valid legacy payloads and writes a
+Teams-owned v2 snapshot. A failed migration snapshot leaves the journal intact
+for a later restart retry. Compaction never deletes the newly saved sequence-1
+snapshot. Invalid or insufficient legacy destination state fails closed; it
+does not synthesize a destination.
 Offline tests cover destination recovery, missing-destination refusal,
 confirmed-delivery restart idempotency, and the `DeliveryUnknown` recovery
 policy. Personal and channel-thread tenant proactive sends remain live test

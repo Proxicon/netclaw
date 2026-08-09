@@ -6,7 +6,7 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-Implementation is incomplete but coherent. Live validation has not started.
+The architecture correction is in progress. Live validation has not started.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -27,8 +27,10 @@ The generic serializer reads legacy Teams manifests into a decode-only envelope;
 the Teams recovery actors convert that envelope and write only v2 snapshots.
 Destination generation is retained per delivery. A permanent delivery failure
 records its terminal state and matching-generation invalidation in one v2 event.
-Session output carries reminder correlation, and the daemon no longer caches an
-SDK request context. The Teams resolver foundation fails closed.
+Session output carries immutable per-delivery correlation. The daemon no longer
+caches an SDK request context. The binding actor resolves its own current or
+explicit canonical destination. It fails closed for unavailable and
+cross-session destinations. Actor-owned diagnostics expose safe bounded state.
 
 ## Responsibility map
 
@@ -41,44 +43,61 @@ SDK request context. The Teams resolver foundation fails closed.
 
 ## Legacy migration table
 
-| Legacy manifests | Decode owner | v2 write path | Migration behavior | Removal condition |
-| --- | --- | --- | --- | --- |
-| `tapc-v1`, `tacd-v1`, `taco-v1` | generic envelope, Teams binding actor | Teams approval v2 manifests | next binding snapshot is v2 | legacy persistence retention window ends |
-| `tpdc-v1`, `tpdi-v1`, `tpdr-v1` | generic envelope, Teams binding actor | Teams destination/delivery v2 manifests | next binding snapshot is v2 | legacy persistence retention window ends |
-| `dads-v1` with Teams fields | generic envelope, Teams binding actor | `teams-binding-snapshot-v2` | converted during recovery | legacy persistence retention window ends |
-| `dtcam-v1`, `dtcais-v1` | generic envelope, Teams channel actor | Teams channel map/snapshot v2 manifests | next channel snapshot is v2 | legacy persistence retention window ends |
+| Legacy manifest/type | Legacy payload shape | Decode owner | Teams v2 write path | Conversion and trigger | Unsupported/lossy behavior |
+| --- | --- | --- | --- | --- | --- |
+| `tapc-v1`, `tacd-v1`, `taco-v1` | approval pending, card locator, terminal decision | generic `LegacyChannelPersistenceEnvelope`; binding actor | approval v2 records and `teams-binding-snapshot-v2` | `ApplyLegacyPersistence`; recovery completion saves a v2 snapshot | invalid approval values fail recovery |
+| `tpdc-v1`, `tpdi-v1`, `tpdr-v1` | destination capture, invalidation, delivery state | generic envelope; binding actor | destination/delivery v2 records and binding snapshot | `ApplyLegacyDestination` and `ApplyProactiveDeliveryRecorded`; recovery completion saves v2 | no destination values are invented; invalid or mismatched destinations fail recovery |
+| `dads-v1` with Teams fields | activity fingerprints, approvals, destination, deliveries | generic envelope; binding actor | `teams-binding-snapshot-v2` | `ApplyLegacySnapshot`; recovery completion saves v2 | a payload without Teams fields remains the generic activity snapshot; invalid Teams fields fail recovery |
+| `dtcam-v1`, `dtcais-v1` | channel activity map or index entries | generic envelope; channel conversation actor | channel map/snapshot v2 | `ApplyLegacyPersistence`; recovery completion saves v2 | invalid fingerprints or canonical channel sessions fail recovery |
 
-## Proven checkpoint validation
+## Migration and restart proof
 
-- Focused Teams routing/persistence tests: 27 passed.
-- Focused Actors serialization tests: 42 passed.
-- Fresh checkpoint builds passed with zero warnings and errors: Actors, Teams,
-  Daemon, and Daemon.Tests. Rerun the documented full gate before merge.
+The deterministic migration matrix is complete in
+`TeamsPersonalRoutingTests`. It builds historical protobuf payloads with the
+real legacy manifests, decodes them through `NetclawProtobufSerializer`, and
+seeds the persistence test journal or snapshot store at explicit sequence
+numbers. No fixture constructs a pre-converted v2 record.
+
+- Journal-only legacy state recovers approval, destination, delivery, and
+  routing state; the generated binding snapshot is `TeamsBindingSnapshot` v1;
+  a restart suppresses the already routed activity.
+- Legacy snapshot only, snapshot plus later legacy events, and legacy plus
+  later v2 events all recover in order, compact to a Teams-owned v2 snapshot,
+  and restart from that snapshot.
+- Legacy channel index records compact to `TeamsChannelActivityIndexSnapshot`
+  and survive restart.
+- Forced migration snapshot failures leave binding migration health `Failed`.
+  Repeated restarts retry from retained legacy journal records without state
+  multiplication. A later successful save retains even a sequence-1 snapshot;
+  compaction now deletes older snapshots only when one exists.
+- Empty or insufficient legacy destination/snapshot payloads remain
+  decode-only envelopes and cannot be emitted by the generic serializer. New
+  Teams events and snapshots resolve only to serializer 151 v2 manifests.
+
+## Current local validation
+
+- Focused Teams routing/persistence tests: 41 passed, including the legacy
+  migration and restart matrix.
+- The fresh Daemon.Tests build passed with zero warnings and errors.
 - `dotnet slopwatch analyze`: 0 issues.
 - `git diff --check`: passed.
 
 ## Known incomplete gates
 
-- Actor-integrated known-destination resolution and zero/one/multiple behavior.
-- Authoritative migration and proactive diagnostics.
 - End-to-end request-context disposal proof.
-- Legacy journal/snapshot migration, failure/retry, crash, concurrency, and
-  snapshot-compaction matrices.
-- OpenSpec completion, full channel/reminder regressions, and architecture audit.
+- Crash, concurrency, retention, and broader snapshot-compaction matrices.
+- Full channel/reminder regressions and the architecture audit.
 - Push CI and dedicated personal/channel/negative live validation.
 
 ## Resume order
 
 1. Read this checkpoint and inspect the branch diff.
 2. Do not redesign or repeat completed migration work.
-3. Complete resolver integration and tests.
-4. Complete authoritative diagnostics and tests.
-5. Complete request-context disposal proof.
-6. Complete migration, crash, concurrency, and snapshot matrices.
-7. Complete OpenSpec.
-8. Run full regressions and architecture audit.
-9. Push corrections and wait for CI.
-10. Run dedicated live proactive validation only after the architecture gate passes.
+3. Complete the request-context disposal proof.
+4. Complete crash, concurrency, retention, and broader snapshot matrices.
+5. Run full regressions and the architecture audit.
+6. Push corrections and wait for CI.
+7. Run dedicated live proactive validation only after the architecture gate passes.
 
 ## Prohibited shortcuts
 

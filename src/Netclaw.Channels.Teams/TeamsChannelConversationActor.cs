@@ -62,7 +62,8 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         Command<SaveSnapshotSuccess>(saved =>
         {
             DeleteMessages(saved.Metadata.SequenceNr);
-            DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr - 1));
+            if (saved.Metadata.SequenceNr > 1)
+                DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr - 1));
         });
         Command<SaveSnapshotFailure>(_ =>
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("channel_activity_index_snapshot_failed"));
