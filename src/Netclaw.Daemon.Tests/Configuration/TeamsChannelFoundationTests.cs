@@ -1273,6 +1273,71 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_accepts_a_parameterized_html_rendering_wrapper_for_a_bot_mentioned_channel_root()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Text = "<at>synthetic bot</at> hello";
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "<at>synthetic bot</at>"
+        }];
+        activity.Attachments = [new TeamsAttachment("text/html; charset=utf-8", JsonDocument.Parse("\"<div>synthetic rendering metadata</div>\"").RootElement.Clone())];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("teams_text_rendering_wrapper_ignored", result.ReasonCode);
+        Assert.Equal(" hello", result.Activity!.Text);
+        Assert.True(result.Activity.IsMentioned);
+        Assert.Equal("root", result.Activity.Reply!.RootActivityId);
+        Assert.Empty(result.Activity.Attachments);
+    }
+
+    [Fact]
+    public void Translator_does_not_treat_a_user_only_mention_as_a_bot_mention()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Text = "<at>synthetic user</at> hello";
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:user" },
+            Text = "<at>synthetic user</at>"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.False(result.Activity!.IsMentioned);
+        Assert.Equal("<at>synthetic user</at> hello", result.Activity.Text);
+    }
+
+    [Theory]
+    [InlineData("text/html; charset=utf-16")]
+    [InlineData("text/html; profile=untrusted")]
+    public void Attachment_classifier_rejects_html_rendering_parameters_other_than_utf8_charset(string contentType)
+    {
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+            contentType,
+            HasName: false,
+            ContentUrl: null,
+            HasContentUrl: false,
+            ContentKind: TeamsAttachmentContentKind.NonEmptyText));
+
+        Assert.Equal(TeamsAttachmentClassification.UnsupportedAttachmentShape, result.Classification);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+    }
+
+    [Fact]
     public void Translator_does_not_duplicate_canonical_text_when_it_has_a_formatted_text_wrapper()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);

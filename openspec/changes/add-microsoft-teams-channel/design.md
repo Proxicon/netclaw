@@ -420,6 +420,17 @@ classification codes for destination capture, missing destination, delivery
 attempt, success, retryable failure, and permanent invalidation. It never
 contains destination values, reminder content, SDK exceptions, or credentials.
 
+#### Channel-root HTML rendering metadata (2026-08-09)
+
+The SDK can represent an ordinary bot-mentioned channel-root message with a
+scalar nonempty HTML rendering wrapper whose media type carries the standard
+UTF-8 charset parameter. This wrapper is accepted only when it has no name,
+content URL, or embedded reference; it is ignored after translation and never
+becomes model-visible content. The canonical activity text remains the sole
+user text. The classifier rejects every other parameter, structured content,
+empty upload shell, file-download-info, Graph/SharePoint/OneDrive reference,
+named attachment, URL, or mixed unsupported attachment before routing.
+
 The binding actor resolves a reminder destination from its own durable state.
 The current session resolves its one valid destination. An explicit destination
 key must equal the canonical binding session. A missing, stale, invalidated,
