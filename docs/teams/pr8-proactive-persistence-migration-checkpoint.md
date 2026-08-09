@@ -6,9 +6,9 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-The merged-dev architecture gate and personal live matrix passed. Channel-root
-live validation exposed a translation drift and remains pending the focused
-correction's CI and live rerun.
+The merged-dev architecture gate and personal live matrix passed. The focused
+channel-root correction merged, but its dedicated live rerun still rejected a
+bot-mentioned channel root before routing. Release progression must stop.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -182,20 +182,45 @@ missing-target state, and capacity pressure. Its single-owner binding model has
 no ambiguous current-target state. The DTO never contains destination values,
 request values, content, credentials, tokens, headers, or provider exceptions.
 
+## Post-merge channel-root live rerun evidence
+
+The live rerun tested merged `dev` after correction PR #14. The Teams and
+Daemon builds passed, and strict OpenSpec validation passed. A fresh owner-only
+isolated state reused only the protected configuration, identity, and local key
+ring. It did not copy journals, snapshots, sessions, reminders, or prior live
+state.
+
+Local and public readiness checks passed. Empty unauthenticated message posts
+were rejected. The personal regression smoke returned its requested exact
+reply without an attachment rejection.
+
+A new root with the required bot mention and exact channel-root test label
+reached the daemon. Safe channel telemetry recorded one received event, zero
+routed events, zero replies, and one `attachment_shape_rejected` outcome. The
+activity did not reach ACL evaluation, canonical-root capture, or reply
+delivery. The correction therefore does not cover the live channel-root
+attachment representation.
+
+No channel reminder, restart, second-root, known-destination, negative, or
+attachment-upload test ran after that baseline failure. The daemon and the
+existing Dev Tunnel were stopped. The original local state was unchanged. The
+isolated evidence state remains owner-only for diagnosis and is not source
+control content.
+
 ## Known incomplete gates
 
-- The focused channel-root translation correction must pass CI and merge to
-  `dev`.
-- The blocked channel-root, channel proactive, second-root, negative, and
-  attachment tenant matrix must pass without weakening the attachment or ACL
-  policy.
+- The live channel-root translation defect must be corrected without weakening
+  the attachment or ACL policy.
+- The channel proactive, restart, second-root, negative, and attachment tenant
+  matrix must pass after a channel-root baseline succeeds.
 
 ## Resume order
 
 1. Read this checkpoint and inspect the branch diff.
 2. Do not redesign or repeat completed migration work.
-3. Wait for the required CI workflows after the branch push.
-4. Run dedicated live proactive validation only after CI passes.
+3. Correct the unsupported live channel-root attachment representation.
+4. Run focused automated proof, CI, and then the dedicated live proactive
+   validation again.
 
 ## Prohibited shortcuts
 

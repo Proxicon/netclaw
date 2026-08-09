@@ -174,9 +174,10 @@ targets while preserving evidence.
   `FailedPermanent`/`DeliveryUnknown` state transitions and choose/document the
   explicit `DeliveryUnknown` recovery policy.
 - [ ] 8.3 Complete the CI-gated live channel proactive matrix. Personal
-  capture, delivery, and restart recovery passed. A valid bot-mentioned
-  channel root exposed parameterized HTML rendering-wrapper drift and is fixed
-  by the focused translation correction; channel live rerun remains pending.
+  capture, delivery, and restart recovery passed. Correction PR #14 merged,
+  but its dedicated live rerun still classified a bot-mentioned channel root
+  as `attachment_shape_rejected` before routing. Channel live validation is
+  release-blocked until the live representation is corrected fail-closed.
 
 ## PR 9 — App package and operations
 
