@@ -4,6 +4,9 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Collections.Immutable;
+using System.Net;
+using System.Text;
+using System.Text.Json;
 using Akka.Actor;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
@@ -11,7 +14,17 @@ using Akka.Persistence;
 using Akka.Persistence.Hosting;
 using Akka.Serialization;
 using Google.Protobuf;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
+using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.Entities;
+using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
@@ -22,10 +35,17 @@ using Netclaw.Channels.Teams;
 using Netclaw.Channels.Teams.Serialization;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
+using Netclaw.Daemon.Configuration;
 using Xunit;
 using static Netclaw.Actors.Reminders.ReminderProtocol;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 using LegacyProto = Netclaw.Actors.Serialization.Proto;
+using TeamsAccount = Microsoft.Teams.Api.Account;
+using TeamsChannel = Microsoft.Teams.Api.Channel;
+using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
+using TeamsConversation = Microsoft.Teams.Api.Conversation;
+using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
+using TeamsTeam = Microsoft.Teams.Api.Team;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -80,6 +100,101 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
 
         Assert.Equal(7, restored.LastDestinationGeneration);
         Assert.Equal(value.ProactiveDeliveries, restored.ProactiveDeliveries);
+    }
+
+    [Fact]
+    public async Task Http_personal_capture_survives_request_scope_disposal_and_uses_the_app_level_reply_client()
+    {
+        var requestLifetime = new RequestLifetimeProbe();
+        var replyClient = new RequestIndependentReplyClient(requestLifetime);
+        await using var app = await BuildRequestIndependenceHostAsync(requestLifetime, replyClient);
+        var sessionId = CreateSessionId("tenant-a", "request-personal");
+        using var inboundCancellation = new CancellationTokenSource();
+        using var request = CreateTeamsActivityRequest(CreateSdkPersonalMessage("request-personal", "request-personal-activity"));
+        using var response = await app.GetTestClient().SendAsync(request, inboundCancellation.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        ReceiveOutputSubscriber();
+        response.Dispose();
+        inboundCancellation.Cancel();
+        await AwaitAssertAsync(() => Assert.True(requestLifetime.AllDisposed), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(ActorRegistry.For(Sys).TryGet<TeamsGatewayActorKey>(out var gateway));
+        gateway.Tell(CreateReminder(sessionId, "request-personal:1"));
+        var subscriber = ReceiveNextOutputSubscriber();
+        subscriber.Tell(new TextOutput("reply after request disposal")
+        {
+            SessionId = sessionId,
+            SourceReminderId = new ReminderId("request-personal:1")
+        });
+
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var delivery = Assert.Single(replyClient.Messages);
+        Assert.Equal(TeamsConversationScope.Personal, delivery.Destination.Scope);
+        Assert.Equal("request-personal", delivery.Destination.ConversationId);
+        Assert.Equal("user-a", delivery.Destination.UserId);
+        Assert.Equal("https://request-service.invalid/", delivery.Destination.ServiceUrl);
+        Assert.Equal("reply after request disposal", delivery.Text);
+        Assert.True(requestLifetime.AllDisposed);
+    }
+
+    [Fact]
+    public async Task Http_channel_root_capture_survives_request_scope_disposal_without_a_top_level_fallback()
+    {
+        var requestLifetime = new RequestLifetimeProbe();
+        var replyClient = new RequestIndependentReplyClient(requestLifetime);
+        await using var app = await BuildRequestIndependenceHostAsync(requestLifetime, replyClient, includeChannel: true);
+        const string conversationId = "request-channel;messageid=request-root";
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel(
+            "tenant-a", conversationId, "request-root", out var sessionId, out _));
+        using var request = CreateTeamsActivityRequest(CreateSdkChannelRootMessage(conversationId, "request-root"));
+        using var response = await app.GetTestClient().SendAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        ReceiveOutputSubscriber();
+        response.Dispose();
+        await AwaitAssertAsync(() => Assert.True(requestLifetime.AllDisposed), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.True(ActorRegistry.For(Sys).TryGet<TeamsGatewayActorKey>(out var gateway));
+        gateway.Tell(CreateReminder(sessionId, "request-channel:1"));
+        var subscriber = ReceiveNextOutputSubscriber();
+        subscriber.Tell(new TextOutput("channel reply after request disposal")
+        {
+            SessionId = sessionId,
+            SourceReminderId = new ReminderId("request-channel:1")
+        });
+
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var delivery = Assert.Single(replyClient.Messages);
+        Assert.Equal(TeamsConversationScope.Channel, delivery.Destination.Scope);
+        Assert.Equal(conversationId, delivery.Destination.ConversationId);
+        Assert.Equal("request-root", delivery.Destination.RootActivityId);
+        Assert.Equal("team-a", delivery.Destination.TeamId);
+        Assert.Equal("channel-a", delivery.Destination.ChannelId);
+        Assert.Equal("request-root", delivery.ReplyToActivityId);
+        Assert.True(requestLifetime.AllDisposed);
+    }
+
+    [Fact]
+    public async Task Cancelled_http_request_captures_no_destination_and_later_generic_delivery_fails_closed()
+    {
+        var requestLifetime = new RequestLifetimeProbe();
+        var replyClient = new RequestIndependentReplyClient(requestLifetime);
+        await using var app = await BuildRequestIndependenceHostAsync(requestLifetime, replyClient);
+        var sessionId = CreateSessionId("tenant-a", "request-cancelled");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        using var request = CreateTeamsActivityRequest(CreateSdkPersonalMessage("request-cancelled", "request-cancelled-activity"));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            app.GetTestClient().SendAsync(request, cancellation.Token));
+
+        Assert.True(ActorRegistry.For(Sys).TryGet<TeamsGatewayActorKey>(out var gateway));
+        var dispatcher = CreateTestProbe();
+        gateway.Tell(CreateReminder(sessionId, "request-cancelled:1"), dispatcher.Ref);
+        var nack = await dispatcher.ExpectMsgAsync<CommandNack>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("destination", nack.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(replyClient.Messages);
     }
 
     [Fact]
@@ -917,6 +1032,9 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var diagnostics = await GetDiagnosticsAsync(recovered);
         Assert.Equal(TeamsProactiveHealthState.Unavailable, diagnostics.Health);
         Assert.Equal(1, diagnostics.PermanentFailureCount);
+        Assert.Equal(1, diagnostics.TerminalDeliveryCount);
+        Assert.Equal(1, diagnostics.InvalidatedDestinationCount);
+        Assert.Equal(1, diagnostics.MissingTargetCount);
 
         recovered.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("duplicate completion")
         {
@@ -1080,6 +1198,9 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var diagnostics = await GetDiagnosticsAsync(first);
         Assert.Equal(TeamsProactiveHealthState.Available, diagnostics.Health);
         Assert.Equal(1, diagnostics.PermanentFailureCount);
+        Assert.Equal(1, diagnostics.TerminalDeliveryCount);
+        Assert.Equal(0, diagnostics.InvalidatedDestinationCount);
+        Assert.Equal(0, diagnostics.MissingTargetCount);
 
         Watch(first);
         first.Tell(PoisonPill.Instance);
@@ -1363,6 +1484,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Equal("proactive_destination_missing", missing.ReasonCode);
         Assert.Equal(0, missing.PersonalDestinationCount);
         Assert.Equal(0, missing.ChannelDestinationCount);
+        Assert.Equal(1, missing.MissingTargetCount);
+        Assert.Equal(0, missing.InvalidatedDestinationCount);
+        Assert.Equal(0, missing.TerminalDeliveryCount);
+        Assert.Equal(0, missing.AmbiguousTargetCount);
+        Assert.False(missing.HasInvalidRecoveredState);
 
         Assert.Equal(
             TeamsBindingRouteDisposition.Accepted,
@@ -1378,6 +1504,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Equal(TeamsProactiveHealthState.Available, available.Health);
         Assert.Equal(1, available.PersonalDestinationCount);
         Assert.Equal(0, available.ChannelDestinationCount);
+        Assert.Equal(0, available.MissingTargetCount);
+        Assert.Equal(0, available.InvalidatedDestinationCount);
+        Assert.Equal(0, available.TerminalDeliveryCount);
+        Assert.Equal(0, available.AmbiguousTargetCount);
+        Assert.False(available.HasInvalidRecoveredState);
         Assert.Null(available.ReasonCode);
         Assert.DoesNotContain("tenant-a", available.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("conversation-proactive-diagnostics", available.ToString(), StringComparison.Ordinal);
@@ -1991,6 +2122,105 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             new NetclawPaths(Path.Combine(Path.GetTempPath(), $"teams-routing-{Guid.NewGuid():N}")));
     }
 
+    private async Task<WebApplication> BuildRequestIndependenceHostAsync(
+        RequestLifetimeProbe requestLifetime,
+        RequestIndependentReplyClient replyClient,
+        bool includeChannel = false)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "tenant-a",
+            ["Teams:ClientId"] = "test-client",
+            ["Teams:ClientSecret"] = "test-secret",
+            ["Teams:AllowDirectMessages"] = "true",
+            ["Teams:AllowedUserIds:0"] = "user-a",
+            ["Teams:MentionOnly"] = includeChannel ? "true" : "false",
+            ["Teams:BotId"] = "bot",
+            ["Teams:AllowedTeamIds:0"] = "team-a",
+            ["Teams:AllowedChannelIds:0"] = "channel-a"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.Services.AddSingleton<ActorSystem>(Sys);
+        builder.Services.AddSingleton<ISessionPipeline>(CreatePipeline(TestActor));
+        builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+        builder.Services.AddSingleton(requestLifetime);
+        builder.Services.AddScoped<RequestScopeSentinel>();
+        builder.AddTeamsIngress();
+        builder.Services.RemoveAll<ITeamsReplyClient>();
+        builder.Services.AddSingleton<ITeamsReplyClient>(replyClient);
+        builder.Services.PostConfigure<AuthorizationOptions>(options =>
+            options.AddPolicy(
+                HostApplicationBuilderExtensions.TeamsTokenAuthConstants.AuthorizationPolicy,
+                policy => policy.RequireAssertion(_ => true)));
+
+        var app = builder.Build();
+        app.Use(async (context, next) =>
+        {
+            _ = context.RequestServices.GetRequiredService<RequestScopeSentinel>();
+            await next();
+        });
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.UseRateLimiter();
+        app.UseTeamsIngress();
+        app.MapTeamsActivityEndpoint();
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        return app;
+    }
+
+    private static HttpRequestMessage CreateTeamsActivityRequest(MessageActivity activity)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, TeamsActivityEndpointExtensions.ActivityPath)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(activity), Encoding.UTF8, "application/json")
+        };
+        request.Headers.TryAddWithoutValidation(
+            "Authorization",
+            "Bearer eyJhbGciOiJub25lIn0.eyJ0aWQiOiJ0ZW5hbnQtYSJ9.");
+        return request;
+    }
+
+    private static MessageActivity CreateSdkPersonalMessage(string conversationId, string activityId) => new("request input")
+    {
+        Id = activityId,
+        From = new TeamsAccount { Id = "user-a" },
+        Conversation = new TeamsConversation
+        {
+            Id = conversationId,
+            TenantId = "tenant-a",
+            Type = TeamsConversationType.Personal
+        },
+        ServiceUrl = "https://request-service.invalid/"
+    };
+
+    private static MessageActivity CreateSdkChannelRootMessage(string conversationId, string rootActivityId) => new("<at>bot</at> request input")
+    {
+        Id = rootActivityId,
+        From = new TeamsAccount { Id = "user-a" },
+        Recipient = new TeamsAccount { Id = "28:bot" },
+        Conversation = new TeamsConversation
+        {
+            Id = conversationId,
+            TenantId = "tenant-a",
+            Type = TeamsConversationType.Channel
+        },
+        ChannelData = new TeamsChannelData
+        {
+            Team = new TeamsTeam { Id = "team-a" },
+            Channel = new TeamsChannel { Id = "channel-a" }
+        },
+        Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "<at>bot</at>"
+        }],
+        ServiceUrl = "https://request-service.invalid/"
+    };
+
     private static TeamsConversationDependencies CreateDependencies(
         ISessionPipeline pipeline,
         bool allowDirectMessages = true,
@@ -2014,6 +2244,46 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     {
         public Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken = default) =>
             Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "synthetic-activity"));
+    }
+
+    private sealed class RequestLifetimeProbe
+    {
+        private int _created;
+        private int _disposed;
+
+        public bool AllDisposed => Volatile.Read(ref _created) > 0
+            && Volatile.Read(ref _created) == Volatile.Read(ref _disposed);
+
+        public void Created() => Interlocked.Increment(ref _created);
+
+        public void Disposed() => Interlocked.Increment(ref _disposed);
+    }
+
+    private sealed class RequestScopeSentinel : IDisposable
+    {
+        private readonly RequestLifetimeProbe _probe;
+
+        public RequestScopeSentinel(RequestLifetimeProbe probe)
+        {
+            _probe = probe;
+            _probe.Created();
+        }
+
+        public void Dispose() => _probe.Disposed();
+    }
+
+    private sealed class RequestIndependentReplyClient(RequestLifetimeProbe requestLifetime) : ITeamsReplyClient
+    {
+        public List<TeamsOutboundMessage> Messages { get; } = [];
+
+        public Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken = default)
+        {
+            if (!requestLifetime.AllDisposed)
+                throw new ObjectDisposedException("request_scope", "The reply client must not run during the inbound request.");
+
+            Messages.Add(message);
+            return Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "request-independent-activity"));
+        }
     }
 
     private sealed class RecordingTeamsReplyClient(params TeamsDeliveryResult[] results) : ITeamsReplyClient

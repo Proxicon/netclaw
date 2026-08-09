@@ -76,7 +76,7 @@ numbers. No fixture constructs a pre-converted v2 record.
 
 ## Current local validation
 
-- Focused Teams routing/persistence tests: 54 passed, including the legacy
+- Focused Teams routing/persistence tests: 57 passed, including the legacy
   migration/restart matrix and the Proof Pass 2 crash, concurrency, generation,
   snapshot, and retention matrix.
 - The fresh Daemon.Tests build passed with zero warnings and errors.
@@ -104,6 +104,24 @@ future-generation snapshots. Sequence-64 snapshot compaction retains the
 destination generation, terminal delivery idempotency record, and durable
 duplicate state. An invalidated snapshot retains its last generation so the
 next authenticated capture advances rather than reusing terminal history.
+
+## Proof Pass 3 request-independence and diagnostics evidence
+
+The production TestServer route exercises `UseTeams`, SDK request parsing,
+translation, `TeamsIngressActorHost`, and durable binding capture. Its test
+authorization seam changes only policy validation; it does not bypass the SDK
+handler or actor route. After the response and request-scoped sentinel are
+disposed, a generic reminder forwarded through the registered Teams gateway
+delivers through the app-level reply-client seam using the persisted personal
+or canonical channel-root destination. A cancelled HTTP request creates no
+destination; later generic delivery fails closed without an outbound call.
+
+`GetTeamsBindingProactiveDiagnostics` is binding-actor-owned and derives only
+safe bounded state: feature/migration health, destination and invalidation
+presence, pending and terminal retention, retryable/permanent/unknown state,
+missing-target state, and capacity pressure. Its single-owner binding model has
+no ambiguous current-target state. The DTO never contains destination values,
+request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 

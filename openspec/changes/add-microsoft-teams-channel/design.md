@@ -459,6 +459,25 @@ state, a migration state, bounded counts, capacity state, and safe reason
 codes. They do not expose Teams IDs, service URLs, contents, credentials,
 headers, tokens, or provider exception text.
 
+`GetTeamsBindingProactiveDiagnostics` queries the recovered binding actor
+directly. Its reply derives destination presence, invalidation, pending,
+terminal retention, retryable/permanent/unknown delivery state, missing-target
+state, and capacity pressure from that actor's durable state. A binding has at
+most one current destination, so its ambiguous-target count is structurally
+zero. Invalid recovered durable state fails actor recovery closed rather than
+returning unsafe state. The DTO contains only enums, bounded integers, booleans,
+and approved reason codes.
+
+The inbound SDK callback translates immediately to `TeamsInboundActivity` and
+awaits `TeamsIngressActorHost.SubmitAsync`; neither the translated contract nor
+the actor dependencies accept an HTTP context, request scope/provider, SDK
+context, or request cancellation token beyond that ingress attempt. The
+TestServer proof disposes the completed response, scoped sentinel, and inbound
+cancellation source before a generic reminder reaches the registered Teams
+gateway. The later send succeeds through a singleton app-level reply-client
+seam using only the durable destination and immutable reminder correlation.
+The same proof covers personal and canonical channel-root destinations.
+
 The new protobuf fields and manifests are append-only. Older binaries do not
 understand the PR 8 durable events and must not be rolled back against a journal
 containing them. Operators may instead disable Teams while retaining that state.
