@@ -104,7 +104,14 @@ public sealed record TeamsBindingProactiveDiagnostics(
     int UnknownDeliveryCount,
     int RetainedDeliveryCount,
     bool HasCapacityPressure,
-    string? ReasonCode = null) : INoSerializationVerificationNeeded;
+    string? ReasonCode = null) : INoSerializationVerificationNeeded
+{
+    public int TerminalDeliveryCount { get; init; }
+    public int InvalidatedDestinationCount { get; init; }
+    public int MissingTargetCount { get; init; }
+    public int AmbiguousTargetCount { get; init; }
+    public bool HasInvalidRecoveredState { get; init; }
+}
 
 public sealed record GetTeamsBindingProactiveDiagnostics : INoSerializationVerificationNeeded
 {
@@ -1525,6 +1532,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         var retryable = _proactiveDeliveries.Values.Count(state => state == TeamsProactiveDeliveryState.FailedRetryable);
         var permanent = _proactiveDeliveries.Values.Count(state => state == TeamsProactiveDeliveryState.FailedPermanent);
         var unknown = _proactiveDeliveries.Values.Count(state => state == TeamsProactiveDeliveryState.DeliveryUnknown);
+        var terminal = _proactiveDeliveries.Values.Count(state => state is TeamsProactiveDeliveryState.Sent
+            or TeamsProactiveDeliveryState.FailedPermanent
+            or TeamsProactiveDeliveryState.DeliveryUnknown);
+        var invalidated = _destination is null && _destinationGeneration > 0 ? 1 : 0;
+        var missingTarget = _destination is null ? 1 : 0;
         var hasCapacityPressure = _proactiveDeliveryOrder.Count >= ProactiveDeliveryCapacity;
 
         if (!_dependencies.Options.Enabled)
@@ -1540,7 +1552,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 unknown,
                 _proactiveDeliveryOrder.Count,
                 hasCapacityPressure,
-                "teams_disabled");
+                "teams_disabled")
+            {
+                TerminalDeliveryCount = terminal,
+                InvalidatedDestinationCount = invalidated,
+                MissingTargetCount = missingTarget
+            };
         }
 
         if (hasCapacityPressure)
@@ -1556,7 +1573,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 unknown,
                 _proactiveDeliveryOrder.Count,
                 true,
-                "proactive_delivery_capacity_reached");
+                "proactive_delivery_capacity_reached")
+            {
+                TerminalDeliveryCount = terminal,
+                InvalidatedDestinationCount = invalidated,
+                MissingTargetCount = missingTarget
+            };
         }
 
         if (_destination is null)
@@ -1572,7 +1594,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 unknown,
                 _proactiveDeliveryOrder.Count,
                 false,
-                "proactive_destination_missing");
+                "proactive_destination_missing")
+            {
+                TerminalDeliveryCount = terminal,
+                InvalidatedDestinationCount = invalidated,
+                MissingTargetCount = missingTarget
+            };
         }
 
         return new TeamsBindingProactiveDiagnostics(
@@ -1585,7 +1612,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             permanent,
             unknown,
             _proactiveDeliveryOrder.Count,
-            false);
+            false)
+        {
+            TerminalDeliveryCount = terminal,
+            InvalidatedDestinationCount = invalidated,
+            MissingTargetCount = missingTarget
+        };
     }
 
     private TeamsBindingSnapshot CreateSnapshot() => new(_processedActivityOrder.ToArray())

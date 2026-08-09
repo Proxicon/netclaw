@@ -93,6 +93,38 @@ exception text.
 - **THEN** the response reports availability and bounded counts
 - **AND** it does not include destination values
 
+#### Scenario: Diagnostics expose only bounded delivery state
+
+- **WHEN** a binding reports proactive diagnostics
+- **THEN** it reports bounded destination, invalidation, pending, terminal,
+  retryable, permanent, unknown, missing-target, and capacity state
+- **AND** its ambiguous-target count is zero because one binding owns at most one
+  current destination
+- **AND** it does not report raw identifiers, content, credentials, request data,
+  or provider exception text
+
+### Requirement: Proactive delivery is independent of the inbound HTTP request
+
+The authenticated `/api/messages` request SHALL translate its SDK activity into
+Netclaw-owned immutable ingress data before actor routing. The binding SHALL
+retain only validated durable destination state; it SHALL not retain an HTTP
+context, request service scope, request cancellation token, SDK activity/context,
+or request-bound client. Later delivery SHALL use the daemon application-level
+Teams client and the persisted destination.
+
+#### Scenario: A personal request completes before a reminder delivery
+
+- **GIVEN** an authenticated allowed personal activity captures a destination
+- **WHEN** the HTTP response and its request scope are disposed
+- **THEN** a later generic reminder delivers to that persisted personal destination
+
+#### Scenario: A channel-root request completes before a reminder delivery
+
+- **GIVEN** an authenticated allowed channel-root activity captures a destination
+- **WHEN** the HTTP response and its request scope are disposed
+- **THEN** a later generic reminder replies to the captured canonical root
+- **AND** it does not fall back to a top-level or different-root post
+
 ### Requirement: Legacy Teams proactive state migrates fail closed
 
 The Teams channel SHALL decode historical Teams persistence manifests only for
