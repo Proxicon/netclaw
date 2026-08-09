@@ -6,7 +6,9 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-The local automated architecture gate passed. CI and live validation have not started.
+The merged-dev architecture gate and personal live matrix passed. Channel-root
+live validation exposed a translation drift and remains pending the focused
+correction's CI and live rerun.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -86,6 +88,33 @@ numbers. No fixture constructs a pre-converted v2 record.
 - `git diff --check`, copyright-header verification, and strict OpenSpec
   validation passed.
 
+## Live channel-root translation drift and correction
+
+The initial dedicated live validation established personal destination capture,
+one-time proactive delivery, and restart recovery. A bot-mentioned channel root
+authenticated and reached the daemon but was rejected as
+`unsupported_attachment_shape` before routing or reply generation.
+
+The saved tenant fixtures covered channel roots and HTML rendering wrappers
+independently, but not their combined current SDK representation. A new
+sanitized fixture captures the structural distinction: a channel-root activity
+can carry a scalar nonempty HTML rendering wrapper with a standard UTF-8
+charset parameter. It is transport rendering metadata, not a model-visible
+attachment, because it has no name, content URL, or embedded reference; the
+canonical activity text remains the only model-visible text.
+
+The classifier now accepts only `text/html` with no parameters or with UTF-8
+charset parameters, in addition to the pre-existing scalar/no-name/no-URL/
+no-reference requirements. Unknown parameters, structured content, names,
+URLs, embedded references, file-download-info, Graph, SharePoint, OneDrive,
+empty upload shells, and mixed unsupported attachments remain fail-closed.
+
+The test project now links directly to the OpenSpec fixture directory and
+requires an explicit matrix entry for every JSON fixture. Focused tenant-
+evidence and Teams foundation coverage passed after the correction. The live
+channel root, proactive delivery, second-root isolation, and attachment smoke
+remain pending until the focused correction passes CI and is merged.
+
 ## Proof Pass 4 full-regression and architecture-audit evidence
 
 The branch tip was checked against current `proxicon/dev`. The current dev tip
@@ -155,8 +184,11 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 
-- The required CI workflows must pass after the branch push.
-- Dedicated personal, channel-root, and negative tenant validation must pass.
+- The focused channel-root translation correction must pass CI and merge to
+  `dev`.
+- The blocked channel-root, channel proactive, second-root, negative, and
+  attachment tenant matrix must pass without weakening the attachment or ACL
+  policy.
 
 ## Resume order
 
