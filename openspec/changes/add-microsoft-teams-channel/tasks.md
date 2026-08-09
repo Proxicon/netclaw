@@ -174,10 +174,16 @@ targets while preserving evidence.
   `FailedPermanent`/`DeliveryUnknown` state transitions and choose/document the
   explicit `DeliveryUnknown` recovery policy.
 - [ ] 8.3 Complete the CI-gated live channel proactive matrix. Personal
-  capture, delivery, and restart recovery passed. A valid bot-mentioned
-  channel root exposed a non-Graph embedded rendering-reference drift in its
-  HTML JSON-string wrapper and is fixed by the focused translation correction;
-  channel live rerun remains pending.
+  capture, delivery, and restart recovery passed. Channel translation is fixed.
+  A privacy-safe live comparison proved the runner used the directory object
+  identity where the authenticated activity and authoritative directory expose
+  a distinct internal Teams identity. The protected runner now resolves that
+  identity fail-closed; all ACL dimensions matched and the channel-root SDK
+  reply was visible in the same root. The first same-root reminder request then
+  stopped at `tool_not_allowed_for_audience_profile` with no reminder created.
+  Obtain explicit authorization for the intended channel audience/profile
+  before resuming restart/no-resend, second-root, and attachment validation; do
+  not weaken production ACL or tool policy for the test.
 
 ## PR 9 — App package and operations
 
