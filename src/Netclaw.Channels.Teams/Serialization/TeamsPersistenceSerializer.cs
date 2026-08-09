@@ -173,7 +173,11 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
 
     private static Proto.TeamsBindingSnapshotProto ToProto(TeamsBindingSnapshot value)
     {
-        var proto = new Proto.TeamsBindingSnapshotProto { MigrationVersion = value.MigrationVersion };
+        var proto = new Proto.TeamsBindingSnapshotProto
+        {
+            MigrationVersion = value.MigrationVersion,
+            LastDestinationGeneration = value.LastDestinationGeneration
+        };
         proto.ActivityFingerprints.AddRange(value.ActivityFingerprints);
         proto.Approvals.AddRange(value.Approvals.Select(ToProto));
         if (value.Destination is not null) proto.Destination = ToProto(value.Destination);
@@ -185,6 +189,7 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         Approvals = value.Approvals.Select(FromProto).ToArray(),
         Destination = value.Destination is null ? null : FromProto(value.Destination),
+        LastDestinationGeneration = value.LastDestinationGeneration,
         ProactiveDeliveries = value.ProactiveDeliveries.Select(FromProto).ToArray(),
         MigrationVersion = value.MigrationVersion
     };

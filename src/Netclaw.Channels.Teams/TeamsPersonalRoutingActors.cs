@@ -792,7 +792,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         if (!Equals(_destination, destination))
         {
-            var generation = _destination is null ? 1 : checked(_destinationGeneration + 1);
+            var generation = _destinationGeneration == 0 ? 1 : checked(_destinationGeneration + 1);
             Persist(ToCapturedDestination(destination, generation), captured =>
             {
                 ApplyDestinationCaptured(captured);
@@ -897,14 +897,17 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
         }
 
-        var evicted = _proactiveDeliveryOrder.Count == ProactiveDeliveryCapacity
-            ? _proactiveDeliveryOrder.Peek()
-            : null;
+        if (_proactiveDeliveryOrder.Count >= ProactiveDeliveryCapacity)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("proactive_delivery_capacity_reached");
+            replyTo.Tell(CommandNack.For(_sessionId, "Teams proactive delivery capacity is reached."));
+            return;
+        }
+
         Persist(new TeamsProactiveDeliveryRecorded
         {
             DeliveryKey = deliveryKey,
             State = (int)TeamsProactiveDeliveryState.Pending,
-            EvictedDeliveryKey = evicted,
             DestinationGeneration = _destinationGeneration
         }, recorded =>
         {
@@ -915,6 +918,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private void BeginReminderDispatch(BeginTeamsReminderDispatch dispatch)
     {
+        if (!_proactiveDeliveries.TryGetValue(dispatch.DeliveryKey, out var state)
+            || state is not (TeamsProactiveDeliveryState.Pending or TeamsProactiveDeliveryState.FailedRetryable))
+        {
+            return;
+        }
+
         Persist(new TeamsProactiveDeliveryRecorded
         {
             DeliveryKey = dispatch.DeliveryKey,
@@ -1126,6 +1135,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         if (captured.Generation < 1)
             throw new InvalidOperationException("The Teams proactive destination generation is invalid.");
+        if (_destination is not null && captured.Generation <= _destinationGeneration)
+            throw new InvalidOperationException("The Teams proactive destination generation must advance.");
 
         _destination = destination;
         _destinationGeneration = captured.Generation;
@@ -1139,6 +1150,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             throw new InvalidOperationException("The Teams proactive delivery state is invalid.");
         }
+        if (_destinationGeneration > 0 && recorded.DestinationGeneration > _destinationGeneration)
+            throw new InvalidOperationException("The Teams proactive delivery references an unknown destination generation.");
 
         if (recorded.EvictedDeliveryKey is { } evicted)
         {
@@ -1409,6 +1422,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         _proactiveDeliveries.Clear();
         _proactiveDeliveryGenerations.Clear();
         _proactiveDeliveryOrder.Clear();
+        if (snapshot.LastDestinationGeneration < 0)
+            throw new InvalidOperationException("The Teams proactive destination snapshot generation is invalid.");
+        _destination = null;
+        _destinationGeneration = snapshot.LastDestinationGeneration;
         foreach (var fingerprint in snapshot.ActivityFingerprints)
         {
             EnsureValidFingerprint(fingerprint);
@@ -1449,6 +1466,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         if (snapshot.Destination is not null)
         {
+            if (snapshot.LastDestinationGeneration > 0
+                && snapshot.LastDestinationGeneration != snapshot.Destination.Generation)
+            {
+                throw new InvalidOperationException("The Teams proactive destination snapshot generation is inconsistent.");
+            }
             ApplyDestinationCaptured(new TeamsProactiveDestinationCaptured
             {
                 TenantId = snapshot.Destination.TenantId,
@@ -1580,6 +1602,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             Decision = pending.Decision
         }).ToArray(),
         Destination = _destination is null ? null : ToCapturedDestination(_destination, _destinationGeneration),
+        LastDestinationGeneration = _destinationGeneration,
         ProactiveDeliveries = _proactiveDeliveryOrder.Select(key => new TeamsProactiveDeliveryRecorded
         {
             DeliveryKey = key,
@@ -1636,20 +1659,22 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
 
         var reminderDeliveryKey = received.Output.SourceReminderId?.Value;
-        if (reminderDeliveryKey is not null
-            && (!_proactiveDeliveries.TryGetValue(reminderDeliveryKey, out var reminderState)
-                || reminderState != TeamsProactiveDeliveryState.Sending))
+        if (reminderDeliveryKey is not null)
         {
-            reminderDeliveryKey = null;
-        }
+            if (!_proactiveDeliveries.TryGetValue(reminderDeliveryKey, out var reminderState)
+                || reminderState != TeamsProactiveDeliveryState.Sending)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("proactive_delivery_completion_ignored");
+                return;
+            }
 
-        if (reminderDeliveryKey is not null
-            && _proactiveDeliveryGenerations[reminderDeliveryKey] != _destinationGeneration)
-        {
-            CompleteReminderFailure(
-                reminderDeliveryKey,
-                "The Teams proactive destination changed before delivery completed.");
-            return;
+            if (_proactiveDeliveryGenerations[reminderDeliveryKey] != _destinationGeneration)
+            {
+                CompleteReminderFailure(
+                    reminderDeliveryKey,
+                    "The Teams proactive destination changed before delivery completed.");
+                return;
+            }
         }
 
         for (var index = 0; index < rendered.Chunks.Count; index++)

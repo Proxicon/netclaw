@@ -66,6 +66,8 @@ message TeamsBindingSnapshotProto {
   optional TeamsProactiveDestinationCapturedProto destination = 3;
   repeated TeamsProactiveDeliveryRecordedProto proactive_deliveries = 4;
   int32 migration_version = 5;
+  // Retains the invalidated generation when no destination is currently valid.
+  int64 last_destination_generation = 6;
 }
 
 message TeamsChannelActivityMappedProto {
