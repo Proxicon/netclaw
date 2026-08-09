@@ -173,6 +173,10 @@ targets while preserving evidence.
 - [x] 8.2 Implement `Pending`/`Sending`/`Sent`/`FailedRetryable`/
   `FailedPermanent`/`DeliveryUnknown` state transitions and choose/document the
   explicit `DeliveryUnknown` recovery policy.
+- [ ] 8.3 Complete the CI-gated live channel proactive matrix. Personal
+  capture, delivery, and restart recovery passed. A valid bot-mentioned
+  channel root exposed parameterized HTML rendering-wrapper drift and is fixed
+  by the focused translation correction; channel live rerun remains pending.
 
 ## PR 9 — App package and operations
 

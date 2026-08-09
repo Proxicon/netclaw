@@ -83,7 +83,7 @@ public static class TeamsTenantEvidenceMappings
     {
         ArgumentNullException.ThrowIfNull(evidence);
 
-        return string.Equals(evidence.ContentType, "text/html", StringComparison.OrdinalIgnoreCase)
+        return IsTextHtmlRenderingContentType(evidence.ContentType)
                && !evidence.HasName
                && !evidence.HasContentUrl
                && string.IsNullOrWhiteSpace(evidence.ContentUrl)
@@ -135,8 +135,32 @@ public static class TeamsTenantEvidenceMappings
         => string.Equals(contentType, "application/vnd.microsoft.teams.file.download.info", StringComparison.OrdinalIgnoreCase)
            || string.Equals(contentType, "application/vnd.microsoft.teams.file.download.info+json", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Teams can add the standard UTF-8 charset parameter to its ordinary HTML
+    /// rendering metadata. Only that parameter is accepted; the caller still
+    /// requires scalar nonempty content with no name, URL, or content reference.
+    /// </summary>
+    private static bool IsTextHtmlRenderingContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+            return false;
+
+        var parts = contentType.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        return parts is [var mediaType, .. var parameters]
+               && string.Equals(mediaType, "text/html", StringComparison.OrdinalIgnoreCase)
+               && parameters.All(IsUtf8CharsetParameter);
+    }
+
+    private static bool IsUtf8CharsetParameter(string parameter)
+    {
+        var separatorIndex = parameter.IndexOf('=', StringComparison.Ordinal);
+        return separatorIndex > 0
+               && string.Equals(parameter[..separatorIndex].Trim(), "charset", StringComparison.OrdinalIgnoreCase)
+               && string.Equals(parameter[(separatorIndex + 1)..].Trim().Trim('"'), "utf-8", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsKnownGraphBackedUploadShell(TeamsAttachmentEvidence evidence)
-        => string.Equals(evidence.ContentType, "text/html", StringComparison.OrdinalIgnoreCase)
+        => IsTextHtmlRenderingContentType(evidence.ContentType)
            && !evidence.HasName
            && !evidence.HasContentUrl
            && !evidence.HasEmbeddedContentReference

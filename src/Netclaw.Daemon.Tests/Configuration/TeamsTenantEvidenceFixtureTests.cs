@@ -5,8 +5,19 @@
 // -----------------------------------------------------------------------
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Teams.Api;
+using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.Entities;
 using Netclaw.Channels.Teams;
+using Netclaw.Daemon.Configuration;
 using Xunit;
+using TeamsAccount = Microsoft.Teams.Api.Account;
+using TeamsAttachment = Microsoft.Teams.Api.Attachment;
+using TeamsChannel = Microsoft.Teams.Api.Channel;
+using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
+using TeamsConversation = Microsoft.Teams.Api.Conversation;
+using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
+using TeamsTeam = Microsoft.Teams.Api.Team;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -87,6 +98,93 @@ public sealed class TeamsTenantEvidenceFixtureTests
     }
 
     [Fact]
+    public void Channel_root_formatted_wrapper_with_a_charset_parameter_is_inline_rendering_metadata()
+    {
+        var attachment = Load("channel-root-formatted-wrapper.json")["attachments"]![0]!;
+
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+            attachment["contentType"]!.GetValue<string>(),
+            HasName: false,
+            ContentUrl: null,
+            HasContentUrl: false,
+            ContentKind: TeamsAttachmentContentKind.NonEmptyText));
+
+        Assert.Equal(TeamsAttachmentClassification.InlineTextRendering, result.Classification);
+        Assert.Null(result.ReasonCode);
+    }
+
+    [Theory]
+    [InlineData("personal-message.json", TeamsConversationScope.Personal, false)]
+    [InlineData("channel-root-message.json", TeamsConversationScope.Channel, false)]
+    [InlineData("channel-reply-message.json", TeamsConversationScope.Channel, false)]
+    [InlineData("channel-second-root-message.json", TeamsConversationScope.Channel, false)]
+    [InlineData("channel-root-formatted-wrapper.json", TeamsConversationScope.Channel, true)]
+    public void Complete_message_fixtures_translate_with_the_expected_scope_root_and_mention(
+        string fixtureName,
+        TeamsConversationScope expectedScope,
+        bool expectedBotMention)
+    {
+        var fixture = Load(fixtureName);
+        var translator = CreateTranslator();
+
+        var result = translator.Translate(CreateSdkMessage(fixture), "TENANT_TEST_001");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal(expectedScope, result.Activity!.Trust.Scope);
+        Assert.Equal(expectedBotMention, result.Activity.IsMentioned);
+        Assert.Empty(result.Activity.Attachments);
+        if (expectedScope == TeamsConversationScope.Channel)
+        {
+            Assert.True(TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(ConversationId(fixture), out var rootActivityId));
+            Assert.Equal(rootActivityId, result.Activity.Reply!.RootActivityId);
+        }
+    }
+
+    [Theory]
+    [InlineData("single-bot-mention.json", " harmless probe")]
+    [InlineData("bot-plus-user-mention.json", " @synthetic-user harmless probe")]
+    [InlineData("double-bot-mention.json", "  harmless probe")]
+    public void Mention_fixtures_recognize_only_the_configured_bot_and_preserve_canonical_text(
+        string fixtureName,
+        string expectedText)
+    {
+        var result = CreateTranslator().Translate(CreateSdkMessage(Load(fixtureName), TeamsConversationScope.Channel), "TENANT_TEST_001");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.True(result.Activity!.IsMentioned);
+        Assert.Equal(expectedText, result.Activity.Text);
+    }
+
+    [Fact]
+    public void Tenant_evidence_directory_requires_an_explicit_fixture_matrix_entry()
+    {
+        var expected = new[]
+        {
+            "adaptive-card-action-execute.json",
+            "attachment-shell.json",
+            "bot-message-update-address.json",
+            "bot-plus-user-mention.json",
+            "channel-reply-message.json",
+            "channel-root-formatted-wrapper.json",
+            "channel-root-message.json",
+            "channel-second-root-message.json",
+            "double-bot-mention.json",
+            "message-delete.json",
+            "message-update.json",
+            "personal-message.json",
+            "proactive-destination.json",
+            "single-bot-mention.json"
+        };
+
+        var actual = Directory.EnumerateFiles(FixtureDirectory, "*.json")
+            .Select(Path.GetFileName)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
     public void Action_execute_and_outbound_address_fixtures_preserve_only_required_non_secret_fields()
     {
         var invoke = Load("adaptive-card-action-execute.json");
@@ -130,6 +228,80 @@ public sealed class TeamsTenantEvidenceFixtureTests
     }
 
     private static string ConversationId(JsonNode fixture) => fixture["conversation"]!["id"]!.GetValue<string>();
+
+    private static TeamsSdkActivityTranslator CreateTranslator() => new(new TeamsChannelOptions
+    {
+        TenantId = "TENANT_TEST_001",
+        BotId = "BOT_TEST_001"
+    }, TimeProvider.System);
+
+    private static MessageActivity CreateSdkMessage(JsonNode fixture, TeamsConversationScope? fallbackScope = null)
+    {
+        var conversation = fixture["conversation"];
+        var scope = conversation?["conversationType"]?.GetValue<string>() switch
+        {
+            "channel" => TeamsConversationScope.Channel,
+            "personal" => TeamsConversationScope.Personal,
+            _ => fallbackScope ?? TeamsConversationScope.Personal
+        };
+        var activityId = fixture["id"]?.GetValue<string>() ?? "ACTIVITY_DEFAULT_TEST_001";
+        var conversationId = conversation?["id"]?.GetValue<string>()
+            ?? (scope == TeamsConversationScope.Channel
+                ? $"CONVERSATION_DEFAULT_TEST_001;messageid={activityId}"
+                : "CONVERSATION_DEFAULT_TEST_001");
+        var activity = new MessageActivity(fixture["text"]?.GetValue<string>() ?? "harmless synthetic text")
+        {
+            Id = activityId,
+            From = new TeamsAccount { Id = fixture["from"]?["id"]?.GetValue<string>() ?? "USER_TEST_001" },
+            Recipient = new TeamsAccount { Id = fixture["recipient"]?["id"]?.GetValue<string>() ?? "28:BOT_TEST_001" },
+            ServiceUrl = "https://service.invalid/",
+            Conversation = new TeamsConversation
+            {
+                Id = conversationId,
+                TenantId = conversation?["tenantId"]?.GetValue<string>() ?? "TENANT_TEST_001",
+                Type = scope == TeamsConversationScope.Channel ? TeamsConversationType.Channel : TeamsConversationType.Personal
+            }
+        };
+
+        if (scope == TeamsConversationScope.Channel)
+        {
+            activity.ChannelData = new TeamsChannelData
+            {
+                Team = new TeamsTeam { Id = fixture["channelData"]?["team"]?["id"]?.GetValue<string>() ?? "TEAM_TEST_001" },
+                Channel = new TeamsChannel { Id = fixture["channelData"]?["channel"]?["id"]?.GetValue<string>() ?? "CHANNEL_TEST_001" }
+            };
+        }
+
+        if (fixture["entities"] is JsonArray entities)
+        {
+            activity.Entities = entities
+                .Select(entity => new MentionEntity
+                {
+                    Type = entity!["type"]!.GetValue<string>(),
+                    Text = entity["text"]!.GetValue<string>(),
+                    Mentioned = new TeamsAccount { Id = entity["mentioned"]!["id"]!.GetValue<string>() }
+                })
+                .Cast<IEntity>()
+                .ToArray();
+        }
+
+        if (fixture["attachments"] is JsonArray attachments)
+        {
+            activity.Attachments = attachments.Select(attachment =>
+            {
+                object? content = attachment!["content"] is { } node
+                    ? JsonSerializer.Deserialize<JsonElement>(node.ToJsonString()).Clone()
+                    : null;
+                return new TeamsAttachment(attachment["contentType"]!.GetValue<string>(), content)
+                {
+                    Name = attachment["name"]?.GetValue<string>(),
+                    ContentUrl = attachment["contentUrl"]?.GetValue<string>()
+                };
+            }).ToArray();
+        }
+
+        return activity;
+    }
 
     private static JsonNode Load(string name)
         => JsonNode.Parse(File.ReadAllText(Path.Combine(FixtureDirectory, name)))!;
