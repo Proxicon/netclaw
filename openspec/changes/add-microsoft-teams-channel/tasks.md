@@ -173,6 +173,11 @@ targets while preserving evidence.
 - [x] 8.2 Implement `Pending`/`Sending`/`Sent`/`FailedRetryable`/
   `FailedPermanent`/`DeliveryUnknown` state transitions and choose/document the
   explicit `DeliveryUnknown` recovery policy.
+- [ ] 8.3 Complete live Teams proactive validation. Personal capture,
+  one-time delivery, and restart recovery passed in the authorized tenant on
+  2026-08-09. A bot-mentioned channel-root activity was rejected during
+  translation as `unsupported_attachment_shape` before routing, so channel
+  proactive validation and release progression are blocked pending a fix.
 
 ## PR 9 — App package and operations
 

@@ -6,7 +6,9 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-The local automated architecture gate passed. CI and live validation have not started.
+The automated architecture gate and merged-dev CI passed. Live validation
+established the personal proactive path, but exposed a channel-root ingress
+defect; release progression is stopped pending a fix.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -86,6 +88,41 @@ numbers. No fixture constructs a pre-converted v2 record.
 - `git diff --check`, copyright-header verification, and strict OpenSpec
   validation passed.
 
+## Dedicated live validation evidence (2026-08-09)
+
+The merged dev build was run with a fresh owner-only state directory, the
+existing authorized app identity, least-privilege reminder-only tool access,
+and the existing development tunnel. Local and public readiness passed; an
+unauthenticated messages request was rejected rather than routed.
+
+- Personal destination capture and the normal personal reply passed.
+- A normal one-time personal reminder delivered exactly once after its inbound
+  request had completed.
+- A second personal reminder survived a clean daemon restart with the same
+  isolated state, delivered once, and was not re-queued after a further restart.
+- Safe telemetry showed no pending or failed reminders after the confirmed
+  personal deliveries and contained no destination values or message payloads.
+- The operator-facing workflow does not expose the binding's internal
+  proactive-diagnostics query; the bounded health telemetry was used instead.
+- Known-destination selection, duplicate/retry injection, permanent
+  invalidation, and missing/ambiguous target cases were not run live because
+  there is no safe normal operator workflow to induce them. Their automated
+  proof remains the authority for this checkpoint.
+
+### Channel-root blocker
+
+A new bot-mentioned channel root reached the live daemon, but safe telemetry
+recorded one received event, zero routed events, and zero replies. Translation
+rejected the activity as `unsupported_attachment_shape` before channel ACL
+evaluation, canonical-root capture, or reply generation. No outbound Teams
+operation was attempted. This blocks channel-root capture and proactive
+delivery validation and is a release-stopping product defect, not a tunnel or
+personal-proactive failure.
+
+The daemon and tunnel were stopped after the failure. The original local state
+and configuration were not changed; the isolated evidence state remains
+owner-only for diagnosis.
+
 ## Proof Pass 4 full-regression and architecture-audit evidence
 
 The branch tip was checked against current `proxicon/dev`. The current dev tip
@@ -155,8 +192,9 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 
-- The required CI workflows must pass after the branch push.
-- Dedicated personal, channel-root, and negative tenant validation must pass.
+- Channel-root ingress must accept the supported bot-mentioned root activity
+  without weakening attachment or ACL policy, then the blocked live channel and
+  negative validation matrix must be rerun.
 
 ## Resume order
 
