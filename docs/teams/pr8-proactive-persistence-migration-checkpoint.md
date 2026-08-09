@@ -6,9 +6,10 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-The merged-dev architecture gate and personal live matrix passed. Channel-root
-live validation exposed a translation drift and remains pending the focused
-correction's CI and live rerun.
+The merged-dev architecture gate and personal live matrix passed. The focused
+channel-root translation corrections are merged, and the channel ACL identity
+has been reconciled without weakening exact/default-deny policy. A later live
+gate remains: the channel audience/profile currently forbids reminder tools.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -112,8 +113,49 @@ empty upload shells, and mixed unsupported attachments remain fail-closed.
 The test project now links directly to the OpenSpec fixture directory and
 requires an explicit matrix entry for every JSON fixture. Focused tenant-
 evidence and Teams foundation coverage passed after the correction. The live
-channel root, proactive delivery, second-root isolation, and attachment smoke
-remain pending until the focused correction passes CI and is merged.
+channel root now passes translation and reply delivery. Channel proactive
+delivery, restart/no-resend, second-root isolation, and attachment smoke remain
+pending on an explicitly authorized channel audience/profile configuration.
+
+## Live channel ACL identity reconciliation
+
+Merged `dev` at `116d03d5` was exercised with a fresh owner-only state and a
+bounded HMAC comparison keyed by a random mode-600 local key. The trace exposed
+no identifiers. Tenant, sender, and channel matched exactly. Only team failed:
+the protected runner had selected the authoritative directory object identity,
+while the authenticated activity matched the same authoritative team's
+distinct internal Teams identity. There was no whitespace, case, partial, or
+other canonicalization equivalence.
+
+This is configuration class A, not a translator or ACL-policy defect. The
+protected runner now resolves exactly one approved team and channel through the
+authenticated directory, converts the directory object to its internal Teams
+identity, and fails closed on zero, multiple, missing, or unavailable results.
+It does not learn or store an allow-list value from inbound traffic. Production
+ACL code remains exact, tenant-bound, mention-gated, and default-deny.
+
+A second fresh state proved all four configured/translated dimensions matched
+exactly with one valid, nonduplicate candidate each. The ordered lifecycle was
+`channel_root_received`, `channel_root_translated`, `channel_acl_allowed`,
+`destination_captured`, `channel_root_routed`, two processing/final
+`session_output_received` and `binding_output_correlated` pairs,
+`outbound_request_created`, `sdk_send_started`, `sdk_send_completed`,
+`provider_result_mapped`, `actor_result_received`, and terminal
+`reply_terminal`. The provider category was `success`, and the exact requested
+reply appeared in the same root.
+
+The first same-root reminder request then failed with the closed category
+`tool_not_allowed_for_audience_profile`; the bot explicitly reported that no
+reminder was created. Server-side state showed zero pending reminders and no
+reminder files. Per the terminal-gate rule, restart/no-resend, second-root, and
+attachment cases did not run. Do not broaden audience or tool policy merely to
+make the live test pass; use the established authorization process to approve
+the intended channel profile before resuming.
+
+The daemon and tunnel stopped cleanly. Temporary HMAC/lifecycle source was
+removed, Slopwatch reported zero issues, and the repository returned clean.
+The safe comparison trace and ephemeral key remain mode 600 outside Git for
+audit. No production-code correction was made or committed.
 
 ## Proof Pass 4 full-regression and architecture-audit evidence
 
