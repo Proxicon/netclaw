@@ -26,28 +26,4 @@ public sealed record DurableActivityDispatchReleased(
 /// binding. The snapshot permits journal compaction without losing retention.
 /// </summary>
 public sealed record DurableActivityDispatchSnapshot(
-    IReadOnlyList<string> ActivityFingerprints) : INetclawSerializableMessage
-{
-    /// <summary>
-    /// Teams bindings retain this approval state when snapshot compaction
-    /// removes the corresponding journal events. Other channel bindings use
-    /// the empty default.
-    /// </summary>
-    public IReadOnlyList<TeamsApprovalSnapshotEntry> TeamsApprovals { get; init; } = Array.Empty<TeamsApprovalSnapshotEntry>();
-}
-
-/// <summary>
-/// Stores the Teams channel conversation owner's reversible routing target for
-/// a fixed activity fingerprint. Session IDs are canonical encoded values; raw
-/// Teams identifiers are never persisted by this index.
-/// </summary>
-public sealed record DurableTeamsChannelActivityMapped(
-    string ActivityFingerprint,
-    string SessionId,
-    string? EvictedActivityFingerprint) : INetclawSerializableMessage;
-
-/// <summary>
-/// Snapshot of the bounded Teams channel activity routing index.
-/// </summary>
-public sealed record DurableTeamsChannelActivityIndexSnapshot(
-    IReadOnlyList<DurableTeamsChannelActivityMapped> Entries) : INetclawSerializableMessage;
+    IReadOnlyList<string> ActivityFingerprints) : INetclawSerializableMessage;

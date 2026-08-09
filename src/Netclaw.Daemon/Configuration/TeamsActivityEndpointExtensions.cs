@@ -40,7 +40,6 @@ internal static class TeamsActivityEndpointExtensions
                 options.TenantId!));
         builder.AddTeams(appBuilder, routing: false);
         builder.Services.AddSingleton<TeamsSdkActivityTranslator>();
-        builder.Services.AddSingleton<TeamsSdkConversationContextStore>();
         builder.Services.AddSingleton<ITeamsSdkReplyOperations, TeamsSdkReplyOperations>();
         builder.Services.AddSingleton<ITeamsReplyClient, TeamsSdkReplyClient>();
         builder.Services.AddSingleton<TeamsOutputRenderer>();
@@ -74,7 +73,6 @@ internal static class TeamsActivityEndpointExtensions
         var teamsApp = app.UseTeams(routing: false);
         var translator = app.Services.GetRequiredService<TeamsSdkActivityTranslator>();
         var ingress = app.Services.GetRequiredService<TeamsIngressActorHost>();
-        var contexts = app.Services.GetRequiredService<TeamsSdkConversationContextStore>();
         teamsApp.OnActivity(async (context, cancellationToken) =>
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventReceived("activity");
@@ -87,14 +85,12 @@ internal static class TeamsActivityEndpointExtensions
                 RecordTranslationTelemetry(result);
                 if (result.ApprovalAction is { } approvalAction)
                 {
-                    contexts.Capture(approvalAction, context);
                     var approvalResult = await ingress.SubmitApprovalAsync(approvalAction, cancellationToken);
                     ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
                         $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
                 }
                 else
                 {
-                    contexts.Capture(result.Activity!, context);
                     var routeResult = await ingress.SubmitAsync(result.Activity!, cancellationToken);
                     if (routeResult.Disposition != TeamsIngressRouteDisposition.Routed)
                         ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped($"ingress_{routeResult.Disposition.ToString().ToLowerInvariant()}");
