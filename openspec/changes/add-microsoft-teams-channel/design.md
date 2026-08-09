@@ -111,8 +111,8 @@ down by offline fixture tests:
 - Formatted text can expose a distinct non-empty `text/html` rendering beside
   canonical activity text. The SDK materializes its scalar content as either a
   CLR string or JSON string element. The translator ignores that markup as
-  metadata only. It requires no name, URL, embedded reference, or structured
-  content.
+  metadata only. It requires no name, direct content URL, thumbnail URL,
+  Graph/provider reference, or structured content.
   The canonical activity text is the only model-visible text.
 - Teams SDK plain reply delivery worked in the originating thread. The earlier
   non-SDK connector/test-harness path did not prove production delivery.
@@ -422,14 +422,27 @@ contains destination values, reminder content, SDK exceptions, or credentials.
 
 #### Channel-root HTML rendering metadata (2026-08-09)
 
-The SDK can represent an ordinary bot-mentioned channel-root message with a
-scalar nonempty HTML rendering wrapper whose media type carries the standard
-UTF-8 charset parameter. This wrapper is accepted only when it has no name,
-content URL, or embedded reference; it is ignored after translation and never
-becomes model-visible content. The canonical activity text remains the sole
-user text. The classifier rejects every other parameter, structured content,
-empty upload shell, file-download-info, Graph/SharePoint/OneDrive reference,
-named attachment, URL, or mixed unsupported attachment before routing.
+One local, owner-only, single-use SDK-boundary capture recorded the second PR 8
+channel-root rejection without retaining message text, identifiers, URLs, or
+payload content. The attachment was one non-null `text/html` JSON-string
+wrapper with nonempty bounded scalar length, no name, direct content URL,
+thumbnail URL, card, file-download metadata, provider metadata, or unknown
+properties. It carried a non-Graph embedded rendering reference. The activity
+also had a second non-mention SDK entity and no channel-data object; neither is
+an attachment-classifier input. The previous sanitized fixture instead had a
+parameterized wrapper with no embedded rendering reference and one entity.
+
+The exact rejecting predicate was therefore the generic embedded-reference
+flag, not the media-type parameter, entity count, or channel data. A bounded
+`text/html` scalar wrapper is now rendering metadata when it has no name,
+direct content URL, thumbnail URL, structured content, or Graph/provider
+reference. This does not accept attachments generally: empty HTML upload
+shells, file-download-info, Graph/SharePoint/OneDrive references, direct URLs,
+named or thumbnail-bearing attachments, binary/structured/unknown content, and
+mixed unsupported entries still fail closed before routing. The wrapper is
+ignored after translation and never becomes model-visible content; canonical
+activity text remains the sole user text. The temporary capture code was
+removed before commit and its owner-only local fingerprint remains outside Git.
 
 The binding actor resolves a reminder destination from its own durable state.
 The current session resolves its one valid destination. An explicit destination
