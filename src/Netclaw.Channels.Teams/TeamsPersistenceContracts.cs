@@ -90,6 +90,7 @@ public sealed record TeamsBindingSnapshot(
     public const int CurrentMigrationVersion = 1;
     public IReadOnlyList<TeamsApprovalSnapshotEntry> Approvals { get; init; } = Array.Empty<TeamsApprovalSnapshotEntry>();
     public TeamsProactiveDestinationCaptured? Destination { get; init; }
+    public long LastDestinationGeneration { get; init; }
     public IReadOnlyList<TeamsProactiveDeliveryRecorded> ProactiveDeliveries { get; init; } = Array.Empty<TeamsProactiveDeliveryRecorded>();
     public int MigrationVersion { get; init; } = CurrentMigrationVersion;
 }

@@ -59,6 +59,30 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public void Binding_snapshot_roundtrips_the_last_invalidated_destination_generation()
+    {
+        var value = new TeamsBindingSnapshot([])
+        {
+            LastDestinationGeneration = 7,
+            ProactiveDeliveries = [new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = "snapshot-roundtrip:1",
+                State = (int)TeamsProactiveDeliveryState.FailedPermanent,
+                DestinationGeneration = 7,
+                InvalidatesDestination = true
+            }]
+        };
+
+        var serializer = Sys.Serialization.FindSerializerFor(value);
+        var manifest = Assert.IsAssignableFrom<SerializerWithStringManifest>(serializer).Manifest(value);
+        var restored = Assert.IsType<TeamsBindingSnapshot>(
+            Sys.Serialization.Deserialize(serializer.ToBinary(value), serializer.Identifier, manifest));
+
+        Assert.Equal(7, restored.LastDestinationGeneration);
+        Assert.Equal(value.ProactiveDeliveries, restored.ProactiveDeliveries);
+    }
+
+    [Fact]
     public void Proactive_destination_resolution_is_explicit_and_fail_closed()
     {
         var session = CreateSessionId("tenant-a", "conversation-a");
@@ -751,6 +775,483 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Destination_generations_start_at_one_ignore_identical_refreshes_and_bind_new_deliveries()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-generation");
+        var persistenceId = BindingPersistenceId(sessionId);
+        var dependencies = CreateDependencies(CreatePipeline(TestActor), enabled: true);
+        var actor = CreateBindingActor(sessionId, dependencies, "generation-policy");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("generation-first", "tenant-a", "conversation-generation", "https://generation-first.invalid/"))).Disposition);
+        ReceiveOutputSubscriber();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "generation:1")));
+        ReceiveNextOutputSubscriber();
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("generation-identical", "tenant-a", "conversation-generation", "https://generation-first.invalid/"))).Disposition);
+        ReceiveNextOutputSubscriber();
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("generation-refresh", "tenant-a", "conversation-generation", "https://generation-second.invalid/"))).Disposition);
+        ReceiveNextOutputSubscriber();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "generation:2")));
+        ReceiveNextOutputSubscriber();
+
+        var events = await ReadJournalAsync(persistenceId);
+        var captures = events.OfType<TeamsProactiveDestinationCaptured>().ToArray();
+        Assert.Equal(2, captures.Length);
+        Assert.Equal([1, 2], captures.Select(capture => capture.Generation));
+        var reservations = events.OfType<TeamsProactiveDeliveryRecorded>()
+            .Where(recorded => recorded.State == (int)TeamsProactiveDeliveryState.Pending)
+            .ToDictionary(recorded => recorded.DeliveryKey, StringComparer.Ordinal);
+        Assert.Equal(1, reservations["generation:1"].DestinationGeneration);
+        Assert.Equal(2, reservations["generation:2"].DestinationGeneration);
+
+        Watch(actor);
+        actor.Tell(PoisonPill.Instance);
+        ExpectTerminated(actor, cancellationToken: TestContext.Current.CancellationToken);
+        var recovered = CreateBindingActor(sessionId, dependencies, "generation-policy-recovered");
+        Assert.Equal(TeamsProactiveHealthState.Available, (await GetDiagnosticsAsync(recovered)).Health);
+    }
+
+    [Fact]
+    public async Task Generation_overflow_fails_closed_without_wraparound()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-generation-overflow");
+        var persistenceId = BindingPersistenceId(sessionId);
+        await SeedSnapshotAsync(persistenceId, 1, CreateBindingSnapshot(
+            "conversation-generation-overflow",
+            "https://generation-max.invalid/",
+            long.MaxValue));
+
+        var observer = CreateTestProbe();
+        var dependencies = CreateDependencies(CreatePipeline(TestActor));
+        Sys.ActorOf(Props.Create(() => new StopOnRecoveryFailureParent(
+            TeamsSessionBindingActor.CreateProps(sessionId, dependencies), observer.Ref)), "generation-overflow-parent");
+        var binding = await observer.ExpectMsgAsync<IActorRef>(cancellationToken: TestContext.Current.CancellationToken);
+        Watch(binding);
+        binding.Tell(new TeamsBindingIngress(
+            CreateActivity("generation-overflow-refresh", "tenant-a", "conversation-generation-overflow", "https://generation-overflow.invalid/"),
+            TestContext.Current.CancellationToken));
+        ExpectTerminated(binding, cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Stale_completion_updates_only_its_old_delivery_and_never_posts_or_invalidates_the_refreshed_generation()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "conversation-stale-matrix");
+        var persistenceId = BindingPersistenceId(sessionId);
+        var dependencies = CreateDependencies(CreatePipeline(TestActor), replyClient: replyClient, enabled: true);
+        var actor = CreateBindingActor(sessionId, dependencies, "stale-matrix");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("stale-first", "tenant-a", "conversation-stale-matrix", "https://stale-first.invalid/"))).Disposition);
+        ReceiveOutputSubscriber();
+        var observer = CreateTestProbe();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "stale-matrix:1", observer.Ref)));
+        ReceiveNextOutputSubscriber();
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("stale-refresh", "tenant-a", "conversation-stale-matrix", "https://stale-second.invalid/"))).Disposition);
+        ReceiveNextOutputSubscriber();
+
+        actor.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("late success")
+        {
+            SessionId = sessionId,
+            SourceReminderId = new ReminderId("stale-matrix:1")
+        }));
+        Assert.False((await observer.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken)).Delivered);
+        Assert.Empty(replyClient.Messages);
+
+        var events = await ReadJournalAsync(persistenceId);
+        var stale = events.OfType<TeamsProactiveDeliveryRecorded>().Last(recorded => recorded.DeliveryKey == "stale-matrix:1");
+        Assert.Equal((int)TeamsProactiveDeliveryState.FailedRetryable, stale.State);
+        Assert.Equal(1, stale.DestinationGeneration);
+        Assert.False(stale.InvalidatesDestination);
+        Assert.Equal(2, events.OfType<TeamsProactiveDestinationCaptured>().Last().Generation);
+
+        Watch(actor);
+        actor.Tell(PoisonPill.Instance);
+        ExpectTerminated(actor, cancellationToken: TestContext.Current.CancellationToken);
+        var recovered = CreateBindingActor(sessionId, dependencies, "stale-matrix-recovered");
+        var diagnostics = await GetDiagnosticsAsync(recovered);
+        Assert.Equal(TeamsProactiveHealthState.Available, diagnostics.Health);
+        Assert.Equal(1, diagnostics.RetryableFailureCount);
+        Assert.Equal(0, diagnostics.PermanentFailureCount);
+    }
+
+    [Fact]
+    public async Task Atomic_permanent_failure_invalidates_only_the_matching_generation_and_survives_restart()
+    {
+        var replyClient = new RecordingTeamsReplyClient(new TeamsDeliveryResult(TeamsDeliveryStatus.InvalidDestination));
+        var sessionId = CreateSessionId("tenant-a", "conversation-atomic-permanent");
+        var persistenceId = BindingPersistenceId(sessionId);
+        var dependencies = CreateDependencies(CreatePipeline(TestActor), replyClient: replyClient, enabled: true);
+        var actor = CreateBindingActor(sessionId, dependencies, "atomic-permanent");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("atomic-first", "tenant-a", "conversation-atomic-permanent"))).Disposition);
+        ReceiveOutputSubscriber();
+        var observer = CreateTestProbe();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "atomic-permanent:1", observer.Ref)));
+        ReceiveNextOutputSubscriber();
+        actor.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("permanent failure")
+        {
+            SessionId = sessionId,
+            SourceReminderId = new ReminderId("atomic-permanent:1")
+        }));
+        Assert.False((await observer.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken)).Delivered);
+
+        var events = await ReadJournalAsync(persistenceId);
+        var terminal = events.OfType<TeamsProactiveDeliveryRecorded>().Last(recorded => recorded.DeliveryKey == "atomic-permanent:1");
+        Assert.Equal((int)TeamsProactiveDeliveryState.FailedPermanent, terminal.State);
+        Assert.Equal(1, terminal.DestinationGeneration);
+        Assert.True(terminal.InvalidatesDestination);
+        Assert.Single(events.OfType<TeamsProactiveDeliveryRecorded>(), recorded =>
+            recorded.DeliveryKey == "atomic-permanent:1" && recorded.InvalidatesDestination);
+
+        Watch(actor);
+        actor.Tell(PoisonPill.Instance);
+        ExpectTerminated(actor, cancellationToken: TestContext.Current.CancellationToken);
+        var recovered = CreateBindingActor(sessionId, dependencies, "atomic-permanent-recovered");
+        var diagnostics = await GetDiagnosticsAsync(recovered);
+        Assert.Equal(TeamsProactiveHealthState.Unavailable, diagnostics.Health);
+        Assert.Equal(1, diagnostics.PermanentFailureCount);
+
+        recovered.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("duplicate completion")
+        {
+            SessionId = sessionId,
+            SourceReminderId = new ReminderId("atomic-permanent:1")
+        }));
+        var afterDuplicate = await ReadJournalAsync(persistenceId);
+        Assert.Single(afterDuplicate.OfType<TeamsProactiveDeliveryRecorded>(), recorded =>
+            recorded.DeliveryKey == "atomic-permanent:1" && recorded.InvalidatesDestination);
+    }
+
+    [Fact]
+    public async Task Concurrent_reminder_outputs_complete_by_delivery_key_and_late_completions_are_ignored()
+    {
+        var replyClient = new RecordingTeamsReplyClient(
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered),
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Cancelled));
+        var sessionId = CreateSessionId("tenant-a", "conversation-concurrent-reminders");
+        var persistenceId = BindingPersistenceId(sessionId);
+        var actor = CreateBindingActor(sessionId, CreateDependencies(CreatePipeline(TestActor), replyClient: replyClient), "concurrent-reminders");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("concurrent-first", "tenant-a", "conversation-concurrent-reminders"))).Disposition);
+        ReceiveOutputSubscriber();
+        var observerA = CreateTestProbe();
+        var observerB = CreateTestProbe();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "concurrent:a", observerA.Ref)));
+        ReceiveNextOutputSubscriber();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "concurrent:b", observerB.Ref)));
+        ReceiveNextOutputSubscriber();
+
+        actor.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("B")
+        {
+            SessionId = sessionId, SourceReminderId = new ReminderId("concurrent:b")
+        }));
+        actor.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("A")
+        {
+            SessionId = sessionId, SourceReminderId = new ReminderId("concurrent:a")
+        }));
+        Assert.True((await observerB.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken)).Delivered);
+        Assert.False((await observerA.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken)).Delivered);
+        Assert.Equal(2, replyClient.Messages.Count);
+
+        actor.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("late A")
+        {
+            SessionId = sessionId, SourceReminderId = new ReminderId("concurrent:a")
+        }));
+        await AwaitAssertAsync(() => Assert.Equal(2, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+        var terminal = (await ReadJournalAsync(persistenceId)).OfType<TeamsProactiveDeliveryRecorded>()
+            .Where(recorded => recorded.State is (int)TeamsProactiveDeliveryState.Sent or (int)TeamsProactiveDeliveryState.FailedRetryable)
+            .GroupBy(recorded => recorded.DeliveryKey)
+            .ToDictionary(group => group.Key, group => group.Last().State, StringComparer.Ordinal);
+        Assert.Equal((int)TeamsProactiveDeliveryState.Sent, terminal["concurrent:b"]);
+        Assert.Equal((int)TeamsProactiveDeliveryState.FailedRetryable, terminal["concurrent:a"]);
+    }
+
+    [Fact]
+    public async Task Delivery_capacity_preserves_terminal_idempotency_and_invalid_snapshots_fail_closed()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-delivery-capacity");
+        var persistenceId = BindingPersistenceId(sessionId);
+        var retained = Enumerable.Range(0, TeamsSessionBindingActor.ProactiveDeliveryCapacity)
+            .Select(index => new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = $"retained:{index}",
+                State = (int)TeamsProactiveDeliveryState.Sent,
+                DestinationGeneration = 1
+            }).ToArray();
+        await SeedSnapshotAsync(persistenceId, 1, CreateBindingSnapshot(
+            "conversation-delivery-capacity",
+            "https://capacity.invalid/",
+            1,
+            retained));
+
+        var dependencies = CreateDependencies(CreatePipeline(TestActor), enabled: true);
+        var actor = CreateBindingActor(sessionId, dependencies, "delivery-capacity");
+        Assert.True((await GetDiagnosticsAsync(actor)).HasCapacityPressure);
+        var existingObserver = CreateTestProbe();
+        var existingDispatcher = CreateTestProbe();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "retained:0", existingObserver.Ref)), existingDispatcher.Ref);
+        await existingDispatcher.ExpectMsgAsync<CommandAck>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True((await existingObserver.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken)).Delivered);
+        var fullDispatcher = CreateTestProbe();
+        actor.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "new-at-capacity")), fullDispatcher.Ref);
+        var nack = await fullDispatcher.ExpectMsgAsync<CommandNack>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("capacity", nack.Reason, StringComparison.OrdinalIgnoreCase);
+
+        var invalidPersistenceId = BindingPersistenceId(CreateSessionId("tenant-a", "conversation-delivery-overcapacity"));
+        await SeedSnapshotAsync(invalidPersistenceId, 1, CreateBindingSnapshot(
+            "conversation-delivery-overcapacity",
+            "https://overcapacity.invalid/",
+            1,
+            retained.Append(new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = "overflow", State = (int)TeamsProactiveDeliveryState.Sent, DestinationGeneration = 1
+            }).ToArray()));
+        var stopObserver = CreateTestProbe();
+        var invalidSession = CreateSessionId("tenant-a", "conversation-delivery-overcapacity");
+        Sys.ActorOf(Props.Create(() => new StopOnRecoveryFailureParent(
+            TeamsSessionBindingActor.CreateProps(invalidSession, dependencies),
+            stopObserver.Ref)), "delivery-overcapacity-parent");
+        var invalidBinding = await stopObserver.ExpectMsgAsync<IActorRef>(cancellationToken: TestContext.Current.CancellationToken);
+        Watch(invalidBinding);
+        ExpectTerminated(invalidBinding, cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Interrupted_dispatch_has_no_partial_permanent_invalidation_after_restart()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-before-atomic");
+        var dependencies = CreateDependencies(CreatePipeline(TestActor), enabled: true);
+        var first = CreateBindingActor(sessionId, dependencies, "before-atomic-first");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity("before-atomic-activity", "tenant-a", "conversation-before-atomic"))).Disposition);
+        ReceiveOutputSubscriber();
+        first.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "before-atomic:1")));
+        ReceiveNextOutputSubscriber();
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = CreateBindingActor(sessionId, dependencies, "before-atomic-recovered");
+        TeamsBindingProactiveDiagnostics? diagnostics = null;
+        await AwaitAssertAsync(() =>
+        {
+            diagnostics = GetDiagnosticsAsync(recovered).GetAwaiter().GetResult();
+            Assert.Equal(1, diagnostics.UnknownDeliveryCount);
+        }, cancellationToken: TestContext.Current.CancellationToken);
+        Assert.NotNull(diagnostics);
+        Assert.Equal(TeamsProactiveHealthState.Available, diagnostics.Health);
+        Assert.Equal(0, diagnostics.PermanentFailureCount);
+        Assert.Equal(1, diagnostics.UnknownDeliveryCount);
+    }
+
+    [Fact]
+    public async Task Journal_only_stale_permanent_failure_is_terminal_without_invalidating_newer_destination()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-journal-stale-permanent");
+        var persistenceId = BindingPersistenceId(sessionId);
+        await SeedJournalAsync(persistenceId,
+            CreateDestination("conversation-journal-stale-permanent", "https://journal-first.invalid/", 1),
+            new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = "journal-stale:1",
+                State = (int)TeamsProactiveDeliveryState.Sending,
+                DestinationGeneration = 1
+            },
+            CreateDestination("conversation-journal-stale-permanent", "https://journal-second.invalid/", 2),
+            new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = "journal-stale:1",
+                State = (int)TeamsProactiveDeliveryState.FailedPermanent,
+                DestinationGeneration = 1,
+                InvalidatesDestination = true
+            });
+
+        var dependencies = CreateDependencies(CreatePipeline(TestActor), enabled: true);
+        var first = CreateBindingActor(sessionId, dependencies, "journal-stale-permanent-first");
+        var diagnostics = await GetDiagnosticsAsync(first);
+        Assert.Equal(TeamsProactiveHealthState.Available, diagnostics.Health);
+        Assert.Equal(1, diagnostics.PermanentFailureCount);
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+        var recovered = CreateBindingActor(sessionId, dependencies, "journal-stale-permanent-recovered");
+        diagnostics = await GetDiagnosticsAsync(recovered);
+        Assert.Equal(TeamsProactiveHealthState.Available, diagnostics.Health);
+        Assert.Equal(1, diagnostics.PermanentFailureCount);
+    }
+
+    [Fact]
+    public async Task Snapshot_recovery_preserves_atomic_permanent_invalidation_without_reapplying_it()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-snapshot-permanent");
+        var persistenceId = BindingPersistenceId(sessionId);
+        await SeedSnapshotAsync(persistenceId, 4, new TeamsBindingSnapshot([])
+        {
+            LastDestinationGeneration = 1,
+            ProactiveDeliveries = [new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = "snapshot-permanent:1",
+                State = (int)TeamsProactiveDeliveryState.FailedPermanent,
+                DestinationGeneration = 1,
+                InvalidatesDestination = true
+            }]
+        });
+
+        var dependencies = CreateDependencies(CreatePipeline(TestActor), enabled: true);
+        var first = CreateBindingActor(sessionId, dependencies, "snapshot-permanent-first");
+        var diagnostics = await GetDiagnosticsAsync(first);
+        Assert.Equal(TeamsProactiveHealthState.Unavailable, diagnostics.Health);
+        Assert.Equal(1, diagnostics.PermanentFailureCount);
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+        var recovered = CreateBindingActor(sessionId, dependencies, "snapshot-permanent-recovered");
+        diagnostics = await GetDiagnosticsAsync(recovered);
+        Assert.Equal(TeamsProactiveHealthState.Unavailable, diagnostics.Health);
+        Assert.Equal(1, diagnostics.PermanentFailureCount);
+        Assert.Empty(await ReadJournalAsync(persistenceId));
+    }
+
+    [Fact]
+    public async Task Invalidated_snapshot_advances_before_a_new_destination_is_reserved()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-snapshot-recapture");
+        var persistenceId = BindingPersistenceId(sessionId);
+        await SeedSnapshotAsync(persistenceId, 4, new TeamsBindingSnapshot([])
+        {
+            LastDestinationGeneration = 1,
+            ProactiveDeliveries = [new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = "snapshot-recapture:1",
+                State = (int)TeamsProactiveDeliveryState.FailedPermanent,
+                DestinationGeneration = 1,
+                InvalidatesDestination = true
+            }]
+        });
+
+        var actor = CreateBindingActor(
+            sessionId,
+            CreateDependencies(CreatePipeline(TestActor), enabled: true),
+            "snapshot-recapture");
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity(
+                "snapshot-recapture-activity",
+                "tenant-a",
+                "conversation-snapshot-recapture",
+                "https://recaptured.invalid/"))).Disposition);
+        ReceiveOutputSubscriber();
+
+        var capture = Assert.Single((await ReadJournalAsync(persistenceId)).OfType<TeamsProactiveDestinationCaptured>());
+        Assert.Equal(2, capture.Generation);
+    }
+
+    [Fact]
+    public async Task Compaction_snapshot_retains_generation_and_terminal_idempotency_state()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-compaction-state");
+        var persistenceId = BindingPersistenceId(sessionId);
+        var replyClient = new RecordingTeamsReplyClient();
+        var dependencies = CreateDependencies(
+            CreatePipeline(Sys.ActorOf(DiscardActor.Create())),
+            enabled: true,
+            replyClient: replyClient);
+        var first = CreateBindingActor(sessionId, dependencies, "compaction-state-first");
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity(
+                "compaction-0",
+                "tenant-a",
+                "conversation-compaction-state"))).Disposition);
+        first.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "compaction-delivery:1")));
+        await AwaitAssertAsync(() => Assert.Contains(
+                ReadJournalAsync(persistenceId).GetAwaiter().GetResult().OfType<TeamsProactiveDeliveryRecorded>(),
+                recorded => recorded.DeliveryKey == "compaction-delivery:1"
+                    && recorded.State == (int)TeamsProactiveDeliveryState.Sending),
+            cancellationToken: TestContext.Current.CancellationToken);
+        first.Tell(new TeamsSessionBindingActor.BindingOutput(new TextOutput("compaction delivery")
+        {
+            SessionId = sessionId,
+            SourceReminderId = new ReminderId("compaction-delivery:1")
+        }));
+        await AwaitAssertAsync(() => Assert.Contains(
+                ReadJournalAsync(persistenceId).GetAwaiter().GetResult().OfType<TeamsProactiveDeliveryRecorded>(),
+                recorded => recorded.DeliveryKey == "compaction-delivery:1"
+                    && recorded.State == (int)TeamsProactiveDeliveryState.Sent),
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        for (var index = 1; index < 60; index++)
+        {
+            Assert.Equal(TeamsBindingRouteDisposition.Accepted,
+                (await RouteAsync(first, CreateActivity(
+                    $"compaction-{index}",
+                    "tenant-a",
+                    "conversation-compaction-state"))).Disposition);
+        }
+
+        var snapshot = await WaitForBindingSnapshotAsync(persistenceId);
+        Assert.Equal(TeamsBindingSnapshot.CurrentMigrationVersion, snapshot.MigrationVersion);
+        Assert.Equal(60, snapshot.ActivityFingerprints.Count);
+        Assert.Equal(1, snapshot.Destination?.Generation);
+        Assert.Equal("conversation-compaction-state", snapshot.Destination?.ConversationId);
+        Assert.Contains(snapshot.ProactiveDeliveries, recorded =>
+            recorded.DeliveryKey == "compaction-delivery:1"
+                && recorded.State == (int)TeamsProactiveDeliveryState.Sent);
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+        var recovered = CreateBindingActor(sessionId, dependencies, "compaction-state-recovered");
+        Assert.Equal(TeamsBindingRouteDisposition.Duplicate,
+            (await RouteAsync(recovered, CreateActivity(
+                "compaction-59",
+                "tenant-a",
+                "conversation-compaction-state"))).Disposition);
+        Assert.Equal(TeamsProactiveHealthState.Available, (await GetDiagnosticsAsync(recovered)).Health);
+        var dispatcher = CreateTestProbe();
+        var observer = CreateTestProbe();
+        recovered.Tell(new TeamsBindingReminder(CreateReminder(sessionId, "compaction-delivery:1", observer.Ref)), dispatcher.Ref);
+        await dispatcher.ExpectMsgAsync<CommandAck>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True((await observer.ExpectMsgAsync<ReminderDeliveryResult>(cancellationToken: TestContext.Current.CancellationToken)).Delivered);
+        Assert.Single(replyClient.Messages);
+    }
+
+    [Fact]
+    public async Task Snapshot_with_a_future_delivery_generation_fails_closed()
+    {
+        var sessionId = CreateSessionId("tenant-a", "conversation-future-delivery-generation");
+        var persistenceId = BindingPersistenceId(sessionId);
+        await SeedSnapshotAsync(persistenceId, 1, CreateBindingSnapshot(
+            "conversation-future-delivery-generation",
+            "https://future-generation.invalid/",
+            1,
+            [new TeamsProactiveDeliveryRecorded
+            {
+                DeliveryKey = "future-generation:1",
+                State = (int)TeamsProactiveDeliveryState.Sent,
+                DestinationGeneration = 2
+            }]));
+
+        var observer = CreateTestProbe();
+        Sys.ActorOf(Props.Create(() => new StopOnRecoveryFailureParent(
+            TeamsSessionBindingActor.CreateProps(sessionId, CreateDependencies(CreatePipeline(TestActor))), observer.Ref)),
+            "future-generation-parent");
+        var binding = await observer.ExpectMsgAsync<IActorRef>(cancellationToken: TestContext.Current.CancellationToken);
+        Watch(binding);
+        ExpectTerminated(binding, cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task Personal_output_posts_one_reply_to_the_verified_personal_destination()
     {
         var pipeline = CreatePipeline(TestActor);
@@ -1304,6 +1805,30 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     private static string BindingPersistenceId(SessionId sessionId) =>
         "teams-personal-binding-" + Uri.EscapeDataString(sessionId.Value);
 
+    private static TeamsBindingSnapshot CreateBindingSnapshot(
+        string conversationId,
+        string serviceUrl,
+        long generation,
+        IReadOnlyList<TeamsProactiveDeliveryRecorded>? deliveries = null) => new([])
+    {
+        Destination = CreateDestination(conversationId, serviceUrl, generation),
+        LastDestinationGeneration = generation,
+        ProactiveDeliveries = deliveries ?? Array.Empty<TeamsProactiveDeliveryRecorded>()
+    };
+
+    private static TeamsProactiveDestinationCaptured CreateDestination(
+        string conversationId,
+        string serviceUrl,
+        long generation) => new()
+    {
+        TenantId = "tenant-a",
+        ConversationId = conversationId,
+        Scope = (int)TeamsConversationScope.Personal,
+        ServiceUrl = serviceUrl,
+        UserId = "user-a",
+        Generation = generation
+    };
+
     private async Task SeedJournalAsync(string persistenceId, params object[] payloads) =>
         await SeedJournalAsync(persistenceId, 1, payloads);
 
@@ -1327,6 +1852,25 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             new SnapshotMetadata(persistenceId, sequenceNumber, DateTime.UtcNow),
             snapshot), writer.Ref);
         await writer.ExpectMsgAsync<SaveSnapshotSuccess>(cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    private async Task<IReadOnlyList<object>> ReadJournalAsync(string persistenceId)
+    {
+        var reader = CreateTestProbe();
+        JournalActorRef.Tell(new ReplayMessages(
+            1,
+            long.MaxValue,
+            long.MaxValue,
+            persistenceId,
+            reader.Ref), reader.Ref);
+        var messages = new List<object>();
+        while (true)
+        {
+            var message = await reader.ExpectMsgAsync<object>(cancellationToken: TestContext.Current.CancellationToken);
+            if (message is RecoverySuccess)
+                return messages;
+            messages.Add(Assert.IsType<ReplayedMessage>(message).Persistent.Payload);
+        }
     }
 
     private async Task<TSnapshot> WaitForSnapshotAsync<TSnapshot>(string persistenceId)

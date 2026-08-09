@@ -76,16 +76,38 @@ numbers. No fixture constructs a pre-converted v2 record.
 
 ## Current local validation
 
-- Focused Teams routing/persistence tests: 41 passed, including the legacy
-  migration and restart matrix.
+- Focused Teams routing/persistence tests: 54 passed, including the legacy
+  migration/restart matrix and the Proof Pass 2 crash, concurrency, generation,
+  snapshot, and retention matrix.
 - The fresh Daemon.Tests build passed with zero warnings and errors.
 - `dotnet slopwatch analyze`: 0 issues.
 - `git diff --check`: passed.
 
+## Proof Pass 2 state-machine evidence
+
+Proof Pass 2 establishes the remaining offline state-machine properties without
+claiming live Teams validation. Generation one is the first accepted capture;
+an identical capture is idempotent and a changed validated destination advances
+the generation with checked overflow. Each reservation retains that generation.
+Late output for an older generation is recorded only against its original key,
+does not post to the refreshed destination, and cannot invalidate the newer
+generation.
+
+The `TeamsProactiveDeliveryRecorded` terminal event atomically contains both
+`FailedPermanent` and matching-generation invalidation. Recovery before that
+event leaves no partial permanent state; recovery after it preserves the
+terminal record and removes only the matching destination. Immutable delivery
+keys correlate concurrent outputs independently; late terminal completions are
+ignored. The binding retains 1,024 delivery records, rejects a new key at
+capacity, preserves `Sent` idempotency evidence, and rejects oversized or
+future-generation snapshots. Sequence-64 snapshot compaction retains the
+destination generation, terminal delivery idempotency record, and durable
+duplicate state. An invalidated snapshot retains its last generation so the
+next authenticated capture advances rather than reusing terminal history.
+
 ## Known incomplete gates
 
 - End-to-end request-context disposal proof.
-- Crash, concurrency, retention, and broader snapshot-compaction matrices.
 - Full channel/reminder regressions and the architecture audit.
 - Push CI and dedicated personal/channel/negative live validation.
 

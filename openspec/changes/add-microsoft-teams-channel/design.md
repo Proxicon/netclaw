@@ -433,6 +433,27 @@ a late output whose generation differs from the current destination. It records
 the outcome against the original delivery key. It does not post to the refreshed
 destination.
 
+The first valid capture is generation one. Overflow is fail-closed through a
+checked increment. A `FailedPermanent` delivery event includes the destination
+invalidation flag, so terminal classification and matching-generation
+invalidation commit together. Recovery from that event therefore cannot expose
+the invalidated destination between two durable writes. An event for an older
+generation remains terminal for its own key but cannot invalidate a newer
+capture.
+
+Snapshots retain `LastDestinationGeneration` even when invalidation has removed
+the destination record. A recovered binding advances from that retained value
+on its next accepted capture, preventing an old terminal delivery generation
+from being reused.
+
+Reminder correlation is the immutable delivery key carried by session output;
+there is no binding-wide active reminder key. Terminal or unknown keys ignore
+late output. The binding retains at most 1,024 delivery records, including
+terminal records required to suppress duplicate sends. It rejects a new key at
+capacity rather than evicting that idempotency evidence. Snapshots retain the
+destination generation and every retained delivery record; recovery rejects
+oversized records and delivery generations newer than the captured destination.
+
 Binding diagnostics are authoritative actor state. They expose only a health
 state, a migration state, bounded counts, capacity state, and safe reason
 codes. They do not expose Teams IDs, service URLs, contents, credentials,

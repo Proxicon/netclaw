@@ -29,6 +29,55 @@ without sending a message or performing Graph discovery.
 - **THEN** output for the old reservation does not post to the refreshed destination
 - **AND** the result remains associated with the original delivery identity
 
+### Requirement: Proactive generations and terminal outcomes are crash-safe
+
+The binding SHALL assign generation one to its first accepted destination.
+An unchanged accepted destination SHALL keep its generation; a changed accepted
+destination SHALL durably advance it without rollover. Each delivery record
+SHALL retain the generation at reservation time. Output for a stale generation
+SHALL not post to the newer destination and SHALL only update the original
+delivery record according to the stale-result policy.
+
+A `FailedPermanent` result for the current generation SHALL record both the
+terminal delivery state and destination invalidation in one durable event. A
+permanent result for an older generation SHALL not invalidate a newer one.
+
+#### Scenario: An invalid destination result commits atomically
+
+- **GIVEN** a delivery is sending to the current destination generation
+- **WHEN** Teams reports that destination invalid
+- **THEN** one durable delivery event records `FailedPermanent` and invalidates
+  that same generation
+- **AND** recovery never exposes that generation as available
+
+#### Scenario: A stale permanent result cannot revoke a refresh
+
+- **GIVEN** a delivery belongs to generation N
+- **AND** an accepted activity refreshes the binding to generation N+1
+- **WHEN** the delivery records a permanent result for generation N
+- **THEN** generation N+1 remains available after recovery
+
+### Requirement: Proactive correlation and retention are bounded
+
+The binding SHALL correlate reminder output by immutable delivery key, not by
+a single mutable active-delivery field. A terminal or unknown key SHALL ignore
+late output. It SHALL retain at most 1,024 delivery records, including terminal
+records required to suppress duplicate sends. A new key at capacity SHALL fail
+closed; an existing `Sent` key remains idempotently acknowledged. Recovery
+SHALL reject a snapshot that exceeds the bound or references a generation newer
+than its captured destination.
+
+Snapshots SHALL retain the last destination generation even after invalidation,
+and all bounded delivery records needed for delivery state and terminal duplicate
+suppression. A later accepted capture SHALL advance from that retained generation.
+
+#### Scenario: Concurrent completions remain isolated
+
+- **GIVEN** two reminder deliveries are sending
+- **WHEN** their outputs arrive in either order
+- **THEN** each completion changes only its matching delivery record
+- **AND** a late duplicate completion causes no post or additional transition
+
 ### Requirement: Proactive diagnostics use authoritative binding state
 
 The Teams binding actor SHALL provide proactive diagnostics from its recovered
