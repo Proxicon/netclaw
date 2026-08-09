@@ -1439,7 +1439,7 @@ public sealed class TeamsChannelFoundationTests
         activity.Conversation!.Id = "conversation";
         activity.Attachments =
         [
-            new TeamsAttachment { ContentType = TeamsContentType.Html, Content = "<pre>normal text</pre>" },
+            new TeamsAttachment { ContentType = TeamsContentType.Html, Content = "<pre><a href=\"https://rendering.invalid/metadata\">normal text</a></pre>" },
             new TeamsAttachment { ContentType = TeamsContentType.Text, Content = "untrusted inline attachment" }
         ];
 
@@ -1447,6 +1447,45 @@ public sealed class TeamsChannelFoundationTests
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
         Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_rejects_an_html_wrapper_with_a_thumbnail_url_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = "<pre>normal text</pre>",
+            ThumbnailUrl = "https://rendering.invalid/thumbnail"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
+    public void Translator_rejects_an_html_wrapper_with_an_embedded_graph_reference_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Conversation!.Id = "conversation";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = "<pre><a href=\"https://graph.microsoft.com/v1.0/synthetic\">normal text</a></pre>"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("graph_backed_attachment_unsupported", result.ReasonCode);
         Assert.Null(result.Activity);
     }
 

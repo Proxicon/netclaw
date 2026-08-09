@@ -129,8 +129,10 @@ final reply for that completion path; retry logic SHALL remain bounded.
 The Teams channel SHALL accept plain activity text. It SHALL accept a formatted
 text rendering only when the SDK attachment has a non-empty `text/html` scalar
 (a CLR string or SDK JSON string element),
-no name, no content URL, no embedded reference, and no structured content.
-The HTTP body limit bounds this rendering. The translator SHALL ignore wrapper
+no name, no direct content URL or thumbnail URL, no Graph/provider embedded
+reference, and no structured content. A non-Graph navigation reference inside
+that otherwise bounded scalar rendering wrapper is formatting metadata, not an
+attachment URL. The HTTP body limit bounds this rendering. The translator SHALL ignore wrapper
 markup and use only canonical activity text for model input.
 
 The tenant-backed upload fixture has an empty `text/html` shell. That shell
