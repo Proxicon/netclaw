@@ -22,7 +22,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Fixtures/Teams/TenantEvidence/**/*">
+    <None Remove="Fixtures/Teams/TenantEvidence/**/*" />
+    <None Include="../../openspec/changes/add-microsoft-teams-channel/fixtures/tenant-evidence/**/*.json">
+      <Link>Fixtures/Teams/TenantEvidence/%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
