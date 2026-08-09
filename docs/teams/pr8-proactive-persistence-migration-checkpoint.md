@@ -6,7 +6,7 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-The architecture correction is in progress. Live validation has not started.
+The local automated architecture gate passed. CI and live validation have not started.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -76,12 +76,42 @@ numbers. No fixture constructs a pre-converted v2 record.
 
 ## Current local validation
 
-- Focused Teams routing/persistence tests: 57 passed, including the legacy
-  migration/restart matrix and the Proof Pass 2 crash, concurrency, generation,
-  snapshot, and retention matrix.
-- The fresh Daemon.Tests build passed with zero warnings and errors.
+- Full Actors regression: 2,869 passed with no skips.
+- Actors reminder, proactive, and serialization regression: 272 passed.
+- Full Daemon regression: 1,123 passed with no skips.
+- Teams-only Daemon regression: 172 passed.
+- All required Actors, Teams, Daemon, and Daemon.Tests builds passed with zero
+  warnings and zero errors.
 - `dotnet slopwatch analyze`: 0 issues.
-- `git diff --check`: passed.
+- `git diff --check`, copyright-header verification, and strict OpenSpec
+  validation passed.
+
+## Proof Pass 4 full-regression and architecture-audit evidence
+
+The branch tip was checked against current `proxicon/dev`. The current dev tip
+is an ancestor of this branch. The audit required no rebase.
+
+Generic Actors retains only channel-neutral dispatch, reminder contracts, and a
+decode-only legacy envelope. Its serializer cannot emit historical Teams
+manifests. Teams owns all active persistence contracts, protobuf definitions,
+serializer mappings, recovery conversion, destinations, delivery state, and
+binding diagnostics.
+
+The SDK package and SDK types occur only in the daemon Teams transport boundary
+and its tests. The Teams project contains no scheduler or timer engine. It
+receives generic reminder delivery messages through the registered gateway.
+The full Actors regression includes other supported channel behavior.
+
+The audit verified these durable rules:
+
+- A reminder persists `Pending` before it persists `Sending`.
+- A captured generation remains bound to its delivery key.
+- A changed destination blocks an old-generation completion from delivery.
+- A permanent result persists its terminal state and invalidation in one record.
+- Recovery changes an uncertain in-flight send to `DeliveryUnknown`.
+- Capacity rejects a new delivery key without deleting terminal evidence.
+- Diagnostics derive from the binding owner and exclude destination values,
+  request state, content, credentials, headers, tokens, and provider exceptions.
 
 ## Proof Pass 2 state-machine evidence
 
@@ -125,19 +155,15 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 
-- End-to-end request-context disposal proof.
-- Full channel/reminder regressions and the architecture audit.
-- Push CI and dedicated personal/channel/negative live validation.
+- The required CI workflows must pass after the branch push.
+- Dedicated personal, channel-root, and negative tenant validation must pass.
 
 ## Resume order
 
 1. Read this checkpoint and inspect the branch diff.
 2. Do not redesign or repeat completed migration work.
-3. Complete the request-context disposal proof.
-4. Complete crash, concurrency, retention, and broader snapshot matrices.
-5. Run full regressions and the architecture audit.
-6. Push corrections and wait for CI.
-7. Run dedicated live proactive validation only after the architecture gate passes.
+3. Wait for the required CI workflows after the branch push.
+4. Run dedicated live proactive validation only after CI passes.
 
 ## Prohibited shortcuts
 
