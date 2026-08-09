@@ -294,7 +294,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 attachment.ContentUrl is not null,
                 hasEmbeddedContentReference,
                 hasEmbeddedGraphBackedContentReference,
-                contentKind);
+                contentKind,
+                attachment.ThumbnailUrl is not null);
 
             var classification = TeamsTenantEvidenceMappings.ClassifyAttachment(evidence);
             if (classification.Classification == TeamsAttachmentClassification.InlineTextRendering)

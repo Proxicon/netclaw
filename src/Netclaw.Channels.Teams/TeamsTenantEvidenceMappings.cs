@@ -86,8 +86,13 @@ public static class TeamsTenantEvidenceMappings
         return IsTextHtmlRenderingContentType(evidence.ContentType)
                && !evidence.HasName
                && !evidence.HasContentUrl
+               && !evidence.HasThumbnailUrl
                && string.IsNullOrWhiteSpace(evidence.ContentUrl)
-               && !evidence.HasEmbeddedContentReference
+               // Teams can place an ordinary navigation reference inside its
+               // scalar HTML rendering wrapper. It is not an attachment URL:
+               // the wrapper remains safe only when there is no attachment
+               // metadata and no known Graph-backed provider reference.
+               && !evidence.HasEmbeddedGraphBackedContentReference
                && evidence.ContentKind == TeamsAttachmentContentKind.NonEmptyText;
     }
 
@@ -209,6 +214,7 @@ public sealed record TeamsAttachmentEvidence(
     bool HasContentUrl,
     bool HasEmbeddedContentReference = false,
     bool HasEmbeddedGraphBackedContentReference = false,
-    TeamsAttachmentContentKind ContentKind = TeamsAttachmentContentKind.Missing);
+    TeamsAttachmentContentKind ContentKind = TeamsAttachmentContentKind.Missing,
+    bool HasThumbnailUrl = false);
 
 public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);

@@ -113,12 +113,46 @@ public sealed class TeamsTenantEvidenceFixtureTests
         Assert.Null(result.ReasonCode);
     }
 
+    [Fact]
+    public void Channel_root_live_wrapper_variant_with_a_non_graph_rendering_reference_is_inline_rendering_metadata()
+    {
+        var attachment = Load("channel-root-live-wrapper-variant.json")["attachments"]![0]!;
+
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+            attachment["contentType"]!.GetValue<string>(),
+            HasName: false,
+            ContentUrl: null,
+            HasContentUrl: false,
+            HasEmbeddedContentReference: true,
+            HasEmbeddedGraphBackedContentReference: false,
+            ContentKind: TeamsAttachmentContentKind.NonEmptyText));
+
+        Assert.Equal(TeamsAttachmentClassification.InlineTextRendering, result.Classification);
+        Assert.Null(result.ReasonCode);
+    }
+
+    [Fact]
+    public void Channel_root_live_wrapper_variant_preserves_the_canonical_mentioned_root_without_model_visible_wrapper_content()
+    {
+        var fixture = Load("channel-root-live-wrapper-variant.json");
+
+        var result = CreateTranslator().Translate(CreateSdkMessage(fixture), "TENANT_TEST_001");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.True(result.Activity!.IsMentioned);
+        Assert.Equal("ACTIVITY_ROOT_LIVE_WRAPPER_VARIANT_TEST_001", result.Activity.Reply!.RootActivityId);
+        Assert.Equal(" harmless live-wrapper channel root probe", result.Activity.Text);
+        Assert.Empty(result.Activity.Attachments);
+        Assert.DoesNotContain("rendering metadata", result.Activity.Text, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("personal-message.json", TeamsConversationScope.Personal, false)]
     [InlineData("channel-root-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-reply-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-second-root-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-root-formatted-wrapper.json", TeamsConversationScope.Channel, true)]
+    [InlineData("channel-root-live-wrapper-variant.json", TeamsConversationScope.Channel, true)]
     public void Complete_message_fixtures_translate_with_the_expected_scope_root_and_mention(
         string fixtureName,
         TeamsConversationScope expectedScope,
@@ -166,6 +200,7 @@ public sealed class TeamsTenantEvidenceFixtureTests
             "bot-plus-user-mention.json",
             "channel-reply-message.json",
             "channel-root-formatted-wrapper.json",
+            "channel-root-live-wrapper-variant.json",
             "channel-root-message.json",
             "channel-second-root-message.json",
             "double-bot-mention.json",
@@ -263,26 +298,29 @@ public sealed class TeamsTenantEvidenceFixtureTests
             }
         };
 
-        if (scope == TeamsConversationScope.Channel)
+        if (scope == TeamsConversationScope.Channel && fixture["channelData"] is JsonObject channelData)
         {
             activity.ChannelData = new TeamsChannelData
             {
-                Team = new TeamsTeam { Id = fixture["channelData"]?["team"]?["id"]?.GetValue<string>() ?? "TEAM_TEST_001" },
-                Channel = new TeamsChannel { Id = fixture["channelData"]?["channel"]?["id"]?.GetValue<string>() ?? "CHANNEL_TEST_001" }
+                Team = new TeamsTeam { Id = channelData["team"]?["id"]?.GetValue<string>() ?? "TEAM_TEST_001" },
+                Channel = new TeamsChannel { Id = channelData["channel"]?["id"]?.GetValue<string>() ?? "CHANNEL_TEST_001" }
             };
         }
 
         if (fixture["entities"] is JsonArray entities)
         {
-            activity.Entities = entities
-                .Select(entity => new MentionEntity
-                {
-                    Type = entity!["type"]!.GetValue<string>(),
-                    Text = entity["text"]!.GetValue<string>(),
-                    Mentioned = new TeamsAccount { Id = entity["mentioned"]!["id"]!.GetValue<string>() }
-                })
-                .Cast<IEntity>()
-                .ToArray();
+            activity.Entities = entities.Select(entity =>
+            {
+                var type = entity!["type"]!.GetValue<string>();
+                return type == "mention"
+                    ? new MentionEntity
+                    {
+                        Type = type,
+                        Text = entity["text"]!.GetValue<string>(),
+                        Mentioned = new TeamsAccount { Id = entity["mentioned"]!["id"]!.GetValue<string>() }
+                    }
+                    : new Entity(type);
+            }).Cast<IEntity>().ToArray();
         }
 
         if (fixture["attachments"] is JsonArray attachments)
