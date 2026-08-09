@@ -4,6 +4,8 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Akka.Actor;
+using Netclaw.Actors.Protocol;
+using static Netclaw.Actors.Sessions.SessionProtocol;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Telemetry;
 
@@ -19,6 +21,42 @@ public interface ITeamsConversationIngressSink
 
     ValueTask<TeamsApprovalActionResult> RouteApprovalAsync(TeamsApprovalAction action, CancellationToken cancellationToken)
         => ValueTask.FromResult(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
+
+    /// <summary>
+    /// Resolves the actor that owns a previously established Teams session for
+    /// generic reminder re-entry. It does not create a destination or bypass
+    /// ingress ACL checks; the binding remains the durable destination owner.
+    /// </summary>
+    bool TryGetReminderConversation(SessionId sessionId, out IActorRef conversation)
+    {
+        conversation = ActorRefs.Nobody;
+        return false;
+    }
+}
+
+/// <summary>
+/// SDK-free reminder gateway. It preserves the generic gateway forwarding
+/// behavior: the session pipeline, not this gateway, sends the final command
+/// acknowledgement to the reminder execution actor.
+/// </summary>
+public sealed class TeamsReminderGatewayActor : ReceiveActor
+{
+    private readonly ITeamsConversationIngressSink _conversationSink;
+
+    public TeamsReminderGatewayActor(ITeamsConversationIngressSink conversationSink)
+    {
+        _conversationSink = conversationSink ?? throw new ArgumentNullException(nameof(conversationSink));
+        Receive<DeliverTrustedSessionTurn>(message =>
+        {
+            if (!_conversationSink.TryGetReminderConversation(message.SessionId, out var conversation))
+            {
+                Sender.Tell(CommandNack.For(message.SessionId, "Teams session is unavailable."));
+                return;
+            }
+
+            conversation.Forward(new TeamsConversationReminder(message));
+        });
+    }
 }
 
 public enum TeamsApprovalActionDisposition

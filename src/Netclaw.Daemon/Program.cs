@@ -28,6 +28,7 @@ using Netclaw.Actors.SubAgents;
 using Netclaw.Actors.Tools;
 using Netclaw.Channels;
 using Netclaw.Channels.Teams;
+using Netclaw.Channels.Teams.Serialization;
 using Netclaw.Configuration;
 using Netclaw.Configuration.Http;
 using Netclaw.Providers;
@@ -1060,6 +1061,7 @@ static void ConfigureDaemonServices(
             : null;
 
         akkaBuilder.WithNetclawSerialization();
+        akkaBuilder.WithTeamsPersistenceSerialization();
         akkaBuilder.WithNetclawActors(reminderStorage);
         akkaBuilder.WithSessionLogDispatcher(paths.SessionLogsDirectory, sp.GetRequiredService<TimeProvider>());
         akkaBuilder.WithSignalRGateway();

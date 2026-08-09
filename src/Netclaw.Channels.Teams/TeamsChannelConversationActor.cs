@@ -8,8 +8,10 @@ using Akka.Event;
 using Akka.Persistence;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
+using Netclaw.Actors.Serialization;
 using Netclaw.Channels.Telemetry;
 using static Netclaw.Actors.Sessions.SessionProtocol;
+using LegacyProto = Netclaw.Actors.Serialization.Proto;
 
 namespace Netclaw.Channels.Teams;
 
@@ -30,6 +32,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
     private readonly ILoggingAdapter _log;
     private readonly Dictionary<string, SessionId> _activitySessions = new(StringComparer.Ordinal);
     private readonly Queue<string> _activityOrder = new();
+    private bool _requiresMigrationSnapshot;
 
     public TeamsConversationActor(SessionId conversationId, TeamsConversationDependencies dependencies)
     {
@@ -37,23 +40,34 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         _dependencies = dependencies ?? throw new ArgumentNullException(nameof(dependencies));
         _log = Context.GetLogger().WithContext("Adapter", "teams");
 
-        Recover<DurableTeamsChannelActivityMapped>(ApplyMapped);
+        Recover<TeamsChannelActivityMapped>(ApplyMapped);
+        Recover<LegacyChannelPersistenceEnvelope>(ApplyLegacyPersistence);
+        Recover<RecoveryCompleted>(_ =>
+        {
+            if (_requiresMigrationSnapshot)
+                Self.Tell(new SaveTeamsChannelMigrationSnapshot());
+        });
         Recover<SnapshotOffer>(offer =>
         {
-            if (offer.Snapshot is DurableTeamsChannelActivityIndexSnapshot snapshot)
+            if (offer.Snapshot is TeamsChannelActivityIndexSnapshot snapshot)
                 ApplySnapshot(snapshot);
+            else if (offer.Snapshot is LegacyChannelPersistenceEnvelope legacy)
+                ApplyLegacyPersistence(legacy);
         });
 
         Command<TeamsConversationIngress>(HandleIngress);
         CommandAsync<TeamsConversationApprovalAction>(HandleApprovalActionAsync);
+        Command<TeamsConversationReminder>(HandleReminder);
         CommandAsync<RouteChannelBinding>(RouteBindingAsync);
         Command<SaveSnapshotSuccess>(saved =>
         {
             DeleteMessages(saved.Metadata.SequenceNr);
-            DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr - 1));
+            if (saved.Metadata.SequenceNr > 1)
+                DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr - 1));
         });
         Command<SaveSnapshotFailure>(_ =>
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("channel_activity_index_snapshot_failed"));
+        Command<SaveTeamsChannelMigrationSnapshot>(_ => SaveMigrationSnapshot());
     }
 
     public override string PersistenceId =>
@@ -132,7 +146,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
 
         var evicted = _activityOrder.Count == ActivityIndexCapacity ? _activityOrder.Peek() : null;
         Persist(
-            new DurableTeamsChannelActivityMapped(fingerprint, sessionId.Value, evicted),
+            new TeamsChannelActivityMapped(fingerprint, sessionId.Value, evicted),
             mapped =>
             {
                 ApplyMapped(mapped);
@@ -239,6 +253,32 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         }
     }
 
+    private void HandleReminder(TeamsConversationReminder reminder)
+    {
+        if (!TeamsSessionIdentifierCodec.TryParse(reminder.Reminder.SessionId, out var identifier, out _)
+            || identifier.Scope != TeamsConversationScope.Channel
+            || !TeamsSessionIdentifierCodec.TryCreatePersonal(
+                identifier.TenantId,
+                identifier.ConversationId,
+                out var expectedConversation,
+                out _)
+            || expectedConversation != _conversationId)
+        {
+            Sender.Tell(CommandNack.For(reminder.Reminder.SessionId, "Teams session does not match the channel conversation."));
+            return;
+        }
+
+        var binding = Context.Child(TeamsActorNames.Binding(reminder.Reminder.SessionId));
+        if (binding.IsNobody())
+        {
+            binding = Context.ActorOf(
+                TeamsSessionBindingActor.CreateProps(reminder.Reminder.SessionId, _dependencies),
+                TeamsActorNames.Binding(reminder.Reminder.SessionId));
+        }
+
+        binding.Forward(new TeamsBindingReminder(reminder.Reminder));
+    }
+
     private bool IsExpectedConversation(TeamsInboundActivity activity)
     {
         if (activity.Trust.Scope != TeamsConversationScope.Channel)
@@ -265,7 +305,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
                && expected == _conversationId;
     }
 
-    private void ApplyMapped(DurableTeamsChannelActivityMapped mapped)
+    private void ApplyMapped(TeamsChannelActivityMapped mapped)
     {
         EnsureFingerprint(mapped.ActivityFingerprint);
         if (!TeamsSessionIdentifierCodec.TryParse(new SessionId(mapped.SessionId), out var parsed, out _)
@@ -294,7 +334,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         _activityOrder.Enqueue(mapped.ActivityFingerprint);
     }
 
-    private void ApplySnapshot(DurableTeamsChannelActivityIndexSnapshot snapshot)
+    private void ApplySnapshot(TeamsChannelActivityIndexSnapshot snapshot)
     {
         if (snapshot.Entries.Count > ActivityIndexCapacity)
             throw new InvalidOperationException("The Teams channel activity index snapshot exceeds its retention limit.");
@@ -305,15 +345,55 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
             ApplyMapped(entry with { EvictedActivityFingerprint = null });
     }
 
+    private void ApplyLegacyPersistence(LegacyChannelPersistenceEnvelope legacy)
+    {
+        _requiresMigrationSnapshot = true;
+        switch (legacy.Manifest)
+        {
+            case "dtcam-v1":
+            {
+                var value = LegacyProto.DurableTeamsChannelActivityMappedProto.Parser.ParseFrom(legacy.Payload);
+                ApplyMapped(new TeamsChannelActivityMapped(
+                    value.ActivityFingerprint,
+                    value.SessionId,
+                    value.HasEvictedActivityFingerprint ? value.EvictedActivityFingerprint : null));
+                break;
+            }
+            case "dtcais-v1":
+            {
+                var value = LegacyProto.DurableTeamsChannelActivityIndexSnapshotProto.Parser.ParseFrom(legacy.Payload);
+                ApplySnapshot(new TeamsChannelActivityIndexSnapshot(value.Entries.Select(entry => new TeamsChannelActivityMapped(
+                    entry.ActivityFingerprint,
+                    entry.SessionId,
+                    entry.HasEvictedActivityFingerprint ? entry.EvictedActivityFingerprint : null)).ToArray()));
+                break;
+            }
+            default:
+                throw new InvalidOperationException("The legacy Team persistence manifest is not valid for a channel conversation actor.");
+        }
+    }
+
+    private void SaveMigrationSnapshot()
+    {
+        if (IsRecovering || !_requiresMigrationSnapshot)
+            return;
+
+        SaveSnapshot(new TeamsChannelActivityIndexSnapshot(_activityOrder.Select(fingerprint => new TeamsChannelActivityMapped(
+            fingerprint,
+            _activitySessions[fingerprint].Value,
+            null)).ToArray()));
+        _requiresMigrationSnapshot = false;
+    }
+
     private void SaveSnapshotWhenDue()
     {
         if (!IsRecovering && LastSequenceNr > 0 && LastSequenceNr % SnapshotInterval == 0)
         {
-            var entries = _activityOrder.Select(fingerprint => new DurableTeamsChannelActivityMapped(
+            var entries = _activityOrder.Select(fingerprint => new TeamsChannelActivityMapped(
                 fingerprint,
                 _activitySessions[fingerprint].Value,
                 null)).ToArray();
-            SaveSnapshot(new DurableTeamsChannelActivityIndexSnapshot(entries));
+            SaveSnapshot(new TeamsChannelActivityIndexSnapshot(entries));
         }
     }
 
@@ -328,4 +408,6 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         SessionId SessionId,
         IActorRef ReplyTo,
         CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
+
+    private sealed record SaveTeamsChannelMigrationSnapshot : INoSerializationVerificationNeeded;
 }

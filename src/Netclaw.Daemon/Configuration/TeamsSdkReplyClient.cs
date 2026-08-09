@@ -46,6 +46,10 @@ internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) :
         {
             return new TeamsDeliveryResult(TeamsDeliveryStatus.RejectedTooLarge, ReasonCode: "output_too_large");
         }
+        catch (HttpRequestException exception) when (exception.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+        {
+            return new TeamsDeliveryResult(TeamsDeliveryStatus.InvalidDestination, ReasonCode: "sdk_destination_invalid");
+        }
         catch (HttpRequestException)
         {
             return new TeamsDeliveryResult(TeamsDeliveryStatus.Unavailable, ReasonCode: "sdk_unavailable");
@@ -75,13 +79,11 @@ internal interface ITeamsSdkReplyOperations
     Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken);
 }
 
-internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore contexts) : ITeamsSdkReplyOperations
+internal sealed class TeamsSdkReplyOperations(
+    Microsoft.Teams.Apps.App app) : ITeamsSdkReplyOperations
 {
     public async Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken)
     {
-        if (!contexts.TryGet(message.Destination, out var context))
-            throw new HttpRequestException("The Teams outbound context is unavailable.");
-
         var activity = new MessageActivity(message.Text)
         {
             ReplyToId = message.ReplyToActivityId
@@ -123,138 +125,16 @@ internal sealed class TeamsSdkReplyOperations(TeamsSdkConversationContextStore c
             activity.Attachments = [new Attachment(card)];
         }
         if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
-        {
-            var update = await context.Api.Conversations.Activities.UpdateAsync(
-                message.Destination.ConversationId,
-                message.UpdateActivityId,
-                activity,
-                cancellationToken);
-            return update?.Id;
-        }
+            throw new HttpRequestException("The Teams update context is unavailable.");
 
-        var sent = await context.Send(activity, cancellationToken);
-        return sent.Id;
-    }
-}
-
-/// <summary>
-/// Holds the live SDK context at the daemon edge for the active conversation.
-/// It is bounded by active keys and never serializes, logs, or exposes the SDK
-/// object to actor state.
-/// </summary>
-internal sealed class TeamsSdkConversationContextStore
-{
-    private readonly Dictionary<TeamsSdkContextKey, IContext<IActivity>> _contexts = [];
-    private readonly object _gate = new();
-
-    public void Capture(TeamsInboundActivity activity, IContext<IActivity> context)
-    {
-        ArgumentNullException.ThrowIfNull(activity);
-        ArgumentNullException.ThrowIfNull(context);
-        if (!TryCreateDestination(activity, out var destination)
-            || !MatchesActivity(activity, context.Activity))
-            return;
-
-        lock (_gate)
-        {
-            var key = TeamsSdkContextKey.Create(destination);
-            if (_contexts.Count >= 1_024 && !_contexts.ContainsKey(key))
-                _contexts.Remove(_contexts.Keys.First());
-            _contexts[key] = context;
-        }
-    }
-
-    public void Capture(TeamsApprovalAction action, IContext<IActivity> context)
-    {
-        ArgumentNullException.ThrowIfNull(action);
-        ArgumentNullException.ThrowIfNull(context);
-        if (!TryCreateDestination(action, out var destination)
-            || !MatchesAction(action, context.Activity))
-        {
-            return;
-        }
-
-        lock (_gate)
-        {
-            var key = TeamsSdkContextKey.Create(destination);
-            if (_contexts.Count >= 1_024 && !_contexts.ContainsKey(key))
-                _contexts.Remove(_contexts.Keys.First());
-            _contexts[key] = context;
-        }
-    }
-
-    public bool TryGet(TeamsOutboundDestination destination, out IContext<IActivity> context)
-    {
-        lock (_gate)
-            return _contexts.TryGetValue(TeamsSdkContextKey.Create(destination), out context!);
-    }
-
-    private static bool TryCreateDestination(TeamsInboundActivity activity, out TeamsOutboundDestination destination)
-    {
-        destination = null!;
-        try
-        {
-            destination = new TeamsOutboundDestination(
-                activity.Trust.TenantId,
-                activity.Trust.ConversationId,
-                activity.Trust.Scope,
-                activity.Reply?.ServiceUrl ?? string.Empty,
-                activity.Trust.Scope == TeamsConversationScope.Channel ? activity.Reply?.RootActivityId : null,
-                activity.TeamId,
-                activity.ChannelId,
-                activity.Trust.Scope == TeamsConversationScope.Personal ? activity.Trust.SenderId : null);
-            return true;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-    }
-
-    private static bool TryCreateDestination(TeamsApprovalAction action, out TeamsOutboundDestination destination)
-    {
-        destination = null!;
-        try
-        {
-            destination = new TeamsOutboundDestination(
-                action.Trust.TenantId,
-                action.Trust.ConversationId,
-                action.Trust.Scope,
-                action.ServiceUrl,
-                action.RootActivityId,
-                action.TeamId,
-                action.ChannelId,
-                action.Trust.Scope == TeamsConversationScope.Personal ? action.Trust.SenderId : null);
-            return true;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-    }
-
-    private static bool MatchesActivity(TeamsInboundActivity activity, IActivity sdkActivity) =>
-        string.Equals(activity.Trust.ActivityId, sdkActivity.Id, StringComparison.Ordinal)
-        && string.Equals(activity.Trust.ConversationId, sdkActivity.Conversation?.Id, StringComparison.Ordinal)
-        && string.Equals(activity.Reply?.ServiceUrl, sdkActivity.ServiceUrl, StringComparison.Ordinal);
-
-    private static bool MatchesAction(TeamsApprovalAction action, IActivity sdkActivity) =>
-        string.Equals(action.Trust.ActivityId, sdkActivity.Id, StringComparison.Ordinal)
-        && string.Equals(action.Trust.ConversationId, sdkActivity.Conversation?.Id, StringComparison.Ordinal)
-        && string.Equals(action.ServiceUrl, sdkActivity.ServiceUrl, StringComparison.Ordinal);
-
-    private sealed record TeamsSdkContextKey(
-        string TenantId,
-        string ConversationId,
-        TeamsConversationScope Scope,
-        string? RootActivityId,
-        string ServiceUrl)
-    {
-        public static TeamsSdkContextKey Create(TeamsOutboundDestination destination) => new(
-            destination.TenantId,
-            destination.ConversationId,
-            destination.Scope,
-            destination.RootActivityId,
-            destination.ServiceUrl);
+        // The app owns authenticated client credentials. Unlike an inbound SDK
+        // context, it survives the original HTTP request and can send to the
+        // validated destination recovered by the binding actor.
+        var proactiveSent = await app.Send(
+            message.Destination.ConversationId,
+            activity,
+            serviceUrl: message.Destination.ServiceUrl,
+            cancellationToken: cancellationToken);
+        return proactiveSent.Id;
     }
 }
