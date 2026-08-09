@@ -53,10 +53,12 @@ public sealed record TeamsConversationApprovalAction(
     CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
 
 public sealed record TeamsConversationReminder(
-    DeliverTrustedSessionTurn Reminder) : INoSerializationVerificationNeeded;
+    DeliverTrustedSessionTurn Reminder,
+    string? KnownDestinationKey = null) : INoSerializationVerificationNeeded;
 
 public sealed record TeamsBindingReminder(
-    DeliverTrustedSessionTurn Reminder) : INoSerializationVerificationNeeded;
+    DeliverTrustedSessionTurn Reminder,
+    string? KnownDestinationKey = null) : INoSerializationVerificationNeeded;
 
 public enum TeamsBindingRouteDisposition
 {
@@ -70,6 +72,44 @@ public enum TeamsBindingRouteDisposition
 }
 
 public sealed record TeamsBindingRouteResult(TeamsBindingRouteDisposition Disposition);
+
+public enum TeamsMigrationHealthState
+{
+    NotRequired,
+    Pending,
+    Completed,
+    Failed
+}
+
+public enum TeamsProactiveHealthState
+{
+    Disabled,
+    Unavailable,
+    Available,
+    CapacityPressure
+}
+
+/// <summary>
+/// Provides bounded state from one binding actor. It contains only counts and
+/// classification values. It never includes Teams routing or message data.
+/// </summary>
+public sealed record TeamsBindingProactiveDiagnostics(
+    TeamsProactiveHealthState Health,
+    TeamsMigrationHealthState Migration,
+    int PersonalDestinationCount,
+    int ChannelDestinationCount,
+    int PendingDeliveryCount,
+    int RetryableFailureCount,
+    int PermanentFailureCount,
+    int UnknownDeliveryCount,
+    int RetainedDeliveryCount,
+    bool HasCapacityPressure,
+    string? ReasonCode = null) : INoSerializationVerificationNeeded;
+
+public sealed record GetTeamsBindingProactiveDiagnostics : INoSerializationVerificationNeeded
+{
+    public static readonly GetTeamsBindingProactiveDiagnostics Instance = new();
+}
 
 /// <summary>
 /// Builds actor names from a canonical Teams session ID. The codec constructs
@@ -557,7 +597,7 @@ public sealed class TeamsPersonalConversationActor : ReceiveActor
                 TeamsActorNames.Binding(_sessionId));
         }
 
-        binding.Forward(new TeamsBindingReminder(reminder.Reminder));
+        binding.Forward(new TeamsBindingReminder(reminder.Reminder, reminder.KnownDestinationKey));
     }
 }
 
@@ -591,6 +631,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private TeamsOutboundDestination? _destination;
     private long _destinationGeneration;
     private bool _requiresMigrationSnapshot;
+    private bool _migrationSnapshotSaveInFlight;
+    private bool _migrationSnapshotFailed;
     private string? _processingActivityId;
 
     public TeamsSessionBindingActor(SessionId sessionId, TeamsConversationDependencies dependencies)
@@ -633,6 +675,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Command<ReceiveTimeout>(_ => Context.Stop(Self));
         Command<TeamsBindingIngress>(HandleIngress);
         CommandAsync<TeamsBindingReminder>(HandleReminderAsync);
+        Command<GetTeamsBindingProactiveDiagnostics>(_ => Sender.Tell(CreateProactiveDiagnostics()));
         CommandAsync<TeamsBindingApprovalAction>(HandleApprovalActionAsync);
         CommandAsync<ForwardTeamsApprovalDecision>(ForwardApprovalDecisionAsync);
         CommandAsync<DeliverTeamsApprovalTerminal>(DeliverApprovalTerminalAsync);
@@ -658,11 +701,29 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         });
         Command<SaveSnapshotSuccess>(saved =>
         {
+            if (_migrationSnapshotSaveInFlight)
+            {
+                _migrationSnapshotSaveInFlight = false;
+                _migrationSnapshotFailed = false;
+                _requiresMigrationSnapshot = false;
+            }
+
             DeleteMessages(saved.Metadata.SequenceNr);
-            DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr - 1));
+            if (saved.Metadata.SequenceNr > 1)
+                DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr - 1));
         });
         Command<SaveSnapshotFailure>(_ =>
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_processed_state_snapshot_failed"));
+        {
+            if (_migrationSnapshotSaveInFlight)
+            {
+                _migrationSnapshotSaveInFlight = false;
+                _migrationSnapshotFailed = true;
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("teams_migration_snapshot_failed");
+                return;
+            }
+
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_processed_state_snapshot_failed");
+        });
     }
 
     public override string PersistenceId =>
@@ -803,9 +864,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
         }
 
-        if (_destination is null)
+        var destinationResolution = ResolveReminderDestination(received.KnownDestinationKey);
+        if (destinationResolution.Disposition != TeamsDestinationResolutionDisposition.Resolved)
         {
-            RecordDestinationTelemetry("proactive_destination_missing");
+            RecordDestinationTelemetry(destinationResolution.ReasonCode ?? "proactive_destination_missing");
             replyTo.Tell(CommandNack.For(_sessionId, "Teams proactive destination is unavailable."));
             return;
         }
@@ -1134,6 +1196,29 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         !string.IsNullOrWhiteSpace(value)
         && Encoding.UTF8.GetByteCount(value) <= TeamsSessionIdentifierCodec.MaxRawIdentifierBytes;
 
+    private TeamsDestinationResolution ResolveReminderDestination(string? knownDestinationKey)
+    {
+        if (!TeamsSessionIdentifierCodec.TryParse(_sessionId, out var identifier, out _))
+            return new TeamsDestinationResolution(TeamsDestinationResolutionDisposition.Rejected, ReasonCode: "invalid_binding_session");
+
+        var candidates = _destination is null
+            ? Array.Empty<TeamsProactiveDestinationCandidate>()
+            : [new TeamsProactiveDestinationCandidate(
+                _sessionId,
+                identifier.Scope,
+                _destinationGeneration,
+                IsDestinationActive(_destination))];
+
+        return TeamsProactiveDestinationResolver.Resolve(
+            _sessionId,
+            identifier.Scope,
+            knownDestinationKey,
+            candidates);
+    }
+
+    private bool IsDestinationActive(TeamsOutboundDestination destination) =>
+        _destinationGeneration > 0 && MatchesBinding(destination);
+
     private static TeamsProactiveDestinationCaptured ToCapturedDestination(TeamsOutboundDestination destination, long generation) => new()
     {
         TenantId = destination.TenantId,
@@ -1398,11 +1483,87 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private void SaveMigrationSnapshot()
     {
-        if (IsRecovering || !_requiresMigrationSnapshot)
+        if (IsRecovering || !_requiresMigrationSnapshot || _migrationSnapshotSaveInFlight)
             return;
 
+        _migrationSnapshotSaveInFlight = true;
         SaveSnapshot(CreateSnapshot());
-        _requiresMigrationSnapshot = false;
+    }
+
+    private TeamsBindingProactiveDiagnostics CreateProactiveDiagnostics()
+    {
+        var migration = _requiresMigrationSnapshot
+            ? _migrationSnapshotFailed
+                ? TeamsMigrationHealthState.Failed
+                : TeamsMigrationHealthState.Pending
+            : _destination is null && _destinationGeneration == 0
+                ? TeamsMigrationHealthState.NotRequired
+                : TeamsMigrationHealthState.Completed;
+        var pending = _proactiveDeliveries.Values.Count(state => state is TeamsProactiveDeliveryState.Pending or TeamsProactiveDeliveryState.Sending);
+        var retryable = _proactiveDeliveries.Values.Count(state => state == TeamsProactiveDeliveryState.FailedRetryable);
+        var permanent = _proactiveDeliveries.Values.Count(state => state == TeamsProactiveDeliveryState.FailedPermanent);
+        var unknown = _proactiveDeliveries.Values.Count(state => state == TeamsProactiveDeliveryState.DeliveryUnknown);
+        var hasCapacityPressure = _proactiveDeliveryOrder.Count >= ProactiveDeliveryCapacity;
+
+        if (!_dependencies.Options.Enabled)
+        {
+            return new TeamsBindingProactiveDiagnostics(
+                TeamsProactiveHealthState.Disabled,
+                migration,
+                0,
+                0,
+                pending,
+                retryable,
+                permanent,
+                unknown,
+                _proactiveDeliveryOrder.Count,
+                hasCapacityPressure,
+                "teams_disabled");
+        }
+
+        if (hasCapacityPressure)
+        {
+            return new TeamsBindingProactiveDiagnostics(
+                TeamsProactiveHealthState.CapacityPressure,
+                migration,
+                _destination?.Scope == TeamsConversationScope.Personal ? 1 : 0,
+                _destination?.Scope == TeamsConversationScope.Channel ? 1 : 0,
+                pending,
+                retryable,
+                permanent,
+                unknown,
+                _proactiveDeliveryOrder.Count,
+                true,
+                "proactive_delivery_capacity_reached");
+        }
+
+        if (_destination is null)
+        {
+            return new TeamsBindingProactiveDiagnostics(
+                TeamsProactiveHealthState.Unavailable,
+                migration,
+                0,
+                0,
+                pending,
+                retryable,
+                permanent,
+                unknown,
+                _proactiveDeliveryOrder.Count,
+                false,
+                "proactive_destination_missing");
+        }
+
+        return new TeamsBindingProactiveDiagnostics(
+            TeamsProactiveHealthState.Available,
+            migration,
+            _destination.Scope == TeamsConversationScope.Personal ? 1 : 0,
+            _destination.Scope == TeamsConversationScope.Channel ? 1 : 0,
+            pending,
+            retryable,
+            permanent,
+            unknown,
+            _proactiveDeliveryOrder.Count,
+            false);
     }
 
     private TeamsBindingSnapshot CreateSnapshot() => new(_processedActivityOrder.ToArray())
@@ -1480,6 +1641,15 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 || reminderState != TeamsProactiveDeliveryState.Sending))
         {
             reminderDeliveryKey = null;
+        }
+
+        if (reminderDeliveryKey is not null
+            && _proactiveDeliveryGenerations[reminderDeliveryKey] != _destinationGeneration)
+        {
+            CompleteReminderFailure(
+                reminderDeliveryKey,
+                "The Teams proactive destination changed before delivery completed.");
+            return;
         }
 
         for (var index = 0; index < rendered.Chunks.Count; index++)
