@@ -403,14 +403,20 @@ Reminder creation remains governed by the generic source-audience tool profile;
 proactive-destination support does not grant scheduling authority. An unmapped
 Teams channel resolves to Public even after its tenant, team, channel, sender,
 and mention ACL checks pass, so the default Public profile excludes
-`set_reminder`. An operator may map an independently approved canonical
-`team/channel` identity to Team through `Teams.ChannelAudiences`; the Team
-profile includes scheduling and may use the normal `current_session` path.
+`set_reminder`. An operator may map an independently approved canonical team
+and channel identity to Team through the structured
+`Teams.ChannelAudienceOverrides` array; the Team profile includes scheduling
+and may use the normal `current_session` path. Canonical Teams identities can
+contain `:`, so they MUST be configuration values rather than dictionary keys;
+Microsoft configuration providers reserve `:` as a hierarchy delimiter.
 This mapping does not alter the shared-channel Public trust boundary, trusted
 principal derivation, or any tenant, ACL, mention, root, or destination check.
 The live runner derives one exact mapping from its authenticated approved team
-and channel records and fails closed on missing or ambiguous results. It never
-learns the mapping from inbound traffic and never persists an identity in Git.
+and channel records, writes it atomically to isolated owner-only configuration,
+and fails closed on missing, duplicate, or ambiguous results. It never learns
+the mapping from inbound traffic and never persists an identity in Git. The
+legacy `Teams.ChannelAudiences` dictionary remains supported for identities
+that do not contain configuration delimiters.
 
 For each stable generic reminder delivery key, the binding persists `Pending`
 before it records `Sending` and submits the turn to the normal session pipeline.

@@ -15,6 +15,21 @@ public enum TeamsAuthenticationMode
 }
 
 /// <summary>
+/// Delimiter-safe audience override for one Teams channel or an entire team.
+/// </summary>
+public sealed class TeamsChannelAudienceOverride
+{
+    public string TeamId { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Exact channel identity. Leave empty to apply the override to the entire team.
+    /// </summary>
+    public string? ChannelId { get; init; }
+
+    public string Audience { get; init; } = string.Empty;
+}
+
+/// <summary>
 /// Configuration for the disabled-by-default Microsoft Teams integration.
 /// ClientSecret is loaded only from the existing secrets overlay or NETCLAW_
 /// environment variables and is never included in the normal configuration schema.
@@ -53,4 +68,11 @@ public sealed class TeamsChannelOptions : IRemoteChatChannelOptions
     /// identities; values are personal, team, or public.
     /// </summary>
     public Dictionary<string, string> ChannelAudiences { get; init; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Structured audience overrides for canonical Teams identities that contain
+    /// configuration path delimiters. Exact team/channel entries take precedence
+    /// over team-wide entries and the public fallback.
+    /// </summary>
+    public TeamsChannelAudienceOverride[] ChannelAudienceOverrides { get; init; } = [];
 }
