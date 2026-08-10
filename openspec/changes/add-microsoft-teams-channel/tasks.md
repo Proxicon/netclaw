@@ -181,9 +181,12 @@ targets while preserving evidence.
   identity fail-closed; all ACL dimensions matched and the channel-root SDK
   reply was visible in the same root. The first same-root reminder request then
   stopped at `tool_not_allowed_for_audience_profile` with no reminder created.
-  Obtain explicit authorization for the intended channel audience/profile
-  before resuming restart/no-resend, second-root, and attachment validation; do
-  not weaken production ACL or tool policy for the test.
+  Policy reconciliation proved the unmapped channel was intentionally Public,
+  while the approved root may use the existing exact `team/channel` Team
+  audience override. The owner-only runner now supplies that derived ephemeral
+  mapping without storing identities or changing production authorization.
+  Resume through generic `set_reminder` plus `current_session`, then complete
+  restart/no-resend, second-root, and attachment validation.
 
 ## PR 9 — App package and operations
 
