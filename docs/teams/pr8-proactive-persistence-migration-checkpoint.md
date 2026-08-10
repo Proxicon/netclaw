@@ -166,18 +166,30 @@ audit. No production-code correction was made or committed.
 
 The successful but denied channel root resolved to `TrustAudience.Public` in
 `TeamsChannelAclPolicy.TryResolveAudience`, because its canonical
-`team/channel` key and team key were both absent from `ChannelAudiences`. The
+`team/channel` key and team key were both absent from the bound
+`ChannelAudiences`. The
 explicitly allowed sender still resolved to
 `PrincipalClassification.TrustedInternal`; SDK provenance was verified, and
 the shared-channel trust boundary remained `TrustBoundary.Public`.
 
-This is a deployment-configuration instance of class B, not a production
-resolver defect. Teams deliberately differs from the shared Slack, Discord,
-and Mattermost heuristic: its channel traffic requires exact team and channel
-allow-lists, but an allow-list match alone does not upgrade the audience. The
-existing `Channel_audience_uses_team_channel_then_team_then_public_fallback`
-test proves exact `team/channel` override, team override, and unmapped Public
-fallback. No new red production test or authorization-code change is needed.
+The first environment-variable attempt and the subsequent owner-only JSON
+dictionary attempt both failed identically in a fresh live state. Canonical
+Teams identities contain `:`, which Microsoft configuration providers reserve
+as a hierarchy delimiter in both environment variables and JSON keys. The
+documented dictionary form therefore could not bind the live canonical key.
+This is class B, Teams audience misclassification caused by a production
+configuration-contract defect. It is not an ACL, trust, tool-policy, or
+reminder-delivery defect.
+
+The extend-only correction adds `Teams.ChannelAudienceOverrides`, an array of
+structured `TeamId`, optional `ChannelId`, and `Audience` values. Identifiers
+are configuration values rather than keys, so delimiters remain opaque. Exact
+team/channel entries precede team-wide entries; duplicate matching structured
+entries fail closed as `invalid_channel_audience`. The legacy
+`ChannelAudiences` dictionary and the unmapped Public fallback remain intact.
+Red tests prove delimiter-safe JSON binding and Team policy resolution before
+the correction; focused policy tests also preserve legacy precedence and
+duplicate rejection.
 
 `ToolAudienceProfileDefaults.CreatePublic` excludes every scheduling tool.
 `ToolAccessPolicy.IsToolExposed` therefore omits `set_reminder`, and
@@ -187,13 +199,14 @@ fallback. No new red production test or authorization-code change is needed.
 `set_reminder`, with no reminder-specific approval override; normal approval
 policy still applies if an operator configures one.
 
-The owner-only live runner now derives the already approved team and channel
-from an authenticated directory lookup and supplies one ephemeral exact
-`ChannelAudiences[team/channel] = team` entry to the daemon. The identifiers do
-not appear in Git or in the script text. Zero, multiple, missing, or unavailable
-directory results still fail closed. Public Teams channels remain unable to
+The owner-only live runner derives the already approved team and channel from
+an authenticated directory lookup and atomically writes one exact structured
+Team override to the isolated mode-600 configuration. The identifiers do not
+appear in Git or in the script text. Zero, multiple, missing, unavailable, or
+duplicate results still fail closed. Public Teams channels remain unable to
 schedule reminders, and ACL, mention, tenant, root, destination, attachment,
-and tool-profile checks are unchanged.
+and tool-profile checks are unchanged. The final live matrix is CI-gated until
+the configuration correction merges into `dev`.
 
 The cross-channel contract is now explicit:
 

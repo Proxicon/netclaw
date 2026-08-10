@@ -12,9 +12,12 @@ channel ACL as authority to create reminders. Generic tool policy SHALL decide
 whether `set_reminder` is available from the resolved source audience. An
 unmapped Teams channel SHALL remain Public and SHALL NOT expose scheduling by
 default. An operator MAY map an independently approved canonical team/channel
-identity to Team through `Teams.ChannelAudiences`; that Team session MAY use the
-generic `current_session` reminder path. The mapping SHALL NOT relax tenant,
-team, channel, sender, mention, canonical-root, or destination validation.
+identity to Team through the structured `Teams.ChannelAudienceOverrides`
+array; that Team session MAY use the generic `current_session` reminder path.
+Canonical identities containing configuration delimiters SHALL be represented
+as structured values, not dictionary keys. Duplicate matching structured
+overrides SHALL fail closed. The mapping SHALL NOT relax tenant, team, channel,
+sender, mention, canonical-root, or destination validation.
 
 #### Scenario: Unmapped allowed channel remains unable to schedule
 

@@ -182,11 +182,14 @@ targets while preserving evidence.
   reply was visible in the same root. The first same-root reminder request then
   stopped at `tool_not_allowed_for_audience_profile` with no reminder created.
   Policy reconciliation proved the unmapped channel was intentionally Public,
-  while the approved root may use the existing exact `team/channel` Team
-  audience override. The owner-only runner now supplies that derived ephemeral
-  mapping without storing identities or changing production authorization.
-  Resume through generic `set_reminder` plus `current_session`, then complete
-  restart/no-resend, second-root, and attachment validation.
+  while the approved root may use an exact Team audience override. Two fresh
+  live attempts proved canonical IDs containing `:` cannot bind through the
+  existing dictionary key in either environment or JSON configuration. A red
+  binding/policy test now gates an extend-only structured override whose IDs
+  are values, while Public fallback and production authorization remain
+  unchanged. Resume through generic `set_reminder` plus `current_session` only
+  after the focused correction is green, merged to `dev`, and deployed; then
+  complete restart/no-resend, second-root, and attachment validation.
 
 ## PR 9 — App package and operations
 
