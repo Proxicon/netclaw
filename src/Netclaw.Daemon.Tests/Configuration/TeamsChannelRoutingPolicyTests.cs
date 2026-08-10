@@ -99,6 +99,60 @@ public sealed class TeamsChannelRoutingPolicyTests
             channelAudiences: new Dictionary<string, string> { ["team-a/channel-a"] = "personal", ["team-a"] = "public" })).Acl!.Audience);
     }
 
+    [Fact]
+    public void Structured_channel_audience_override_supports_delimiter_bearing_canonical_ids()
+    {
+        const string teamId = "19:team-id@thread.tacv2";
+        const string channelId = "19:channel-id@thread.tacv2";
+        var options = CreateOptions(
+            allowedTeamIds: [teamId],
+            allowedChannelIds: [channelId],
+            channelAudienceOverrides:
+            [
+                new TeamsChannelAudienceOverride
+                {
+                    TeamId = teamId,
+                    ChannelId = channelId,
+                    Audience = "team"
+                }
+            ]);
+
+        var decision = TeamsChannelAclPolicy.Evaluate(
+            CreateActivity(teamId: teamId, channelId: channelId),
+            options);
+
+        Assert.Equal(TeamsChannelPolicyDisposition.Allowed, decision.Disposition);
+        Assert.Equal(TrustAudience.Team, decision.Acl!.Audience);
+    }
+
+    [Fact]
+    public void Structured_channel_audience_override_prefers_exact_channel_and_rejects_duplicates()
+    {
+        var activity = CreateActivity();
+        var exact = new TeamsChannelAudienceOverride
+        {
+            TeamId = "team-a",
+            ChannelId = "channel-a",
+            Audience = "team"
+        };
+        var teamWide = new TeamsChannelAudienceOverride
+        {
+            TeamId = "team-a",
+            Audience = "public"
+        };
+
+        var resolved = TeamsChannelAclPolicy.Evaluate(
+            activity,
+            CreateOptions(channelAudienceOverrides: [teamWide, exact]));
+        var duplicate = TeamsChannelAclPolicy.Evaluate(
+            activity,
+            CreateOptions(channelAudienceOverrides: [exact, exact]));
+
+        Assert.Equal(TrustAudience.Team, resolved.Acl!.Audience);
+        Assert.Equal(TeamsChannelPolicyDisposition.Denied, duplicate.Disposition);
+        Assert.Equal("invalid_channel_audience", duplicate.ReasonCode);
+    }
+
     private static TeamsChannelOptions AllowedOptions() => CreateOptions();
 
     private static TeamsChannelOptions CreateOptions(
@@ -106,14 +160,16 @@ public sealed class TeamsChannelRoutingPolicyTests
         string[]? allowedChannelIds = null,
         string[]? allowedUserIds = null,
         bool mentionOnly = true,
-        Dictionary<string, string>? channelAudiences = null) => new()
+        Dictionary<string, string>? channelAudiences = null,
+        TeamsChannelAudienceOverride[]? channelAudienceOverrides = null) => new()
     {
         TenantId = "tenant-a",
         MentionOnly = mentionOnly,
         AllowedTeamIds = allowedTeamIds ?? ["team-a"],
         AllowedChannelIds = allowedChannelIds ?? ["channel-a"],
         AllowedUserIds = allowedUserIds ?? [],
-        ChannelAudiences = channelAudiences ?? new Dictionary<string, string>(StringComparer.Ordinal)
+        ChannelAudiences = channelAudiences ?? new Dictionary<string, string>(StringComparer.Ordinal),
+        ChannelAudienceOverrides = channelAudienceOverrides ?? []
     };
 
     private static TeamsInboundActivity CreateActivity(

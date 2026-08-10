@@ -56,7 +56,12 @@ public static class TeamsChannelAclPolicy
         if (activity.Kind == TeamsIngressActivityKind.Message && options.MentionOnly && !activity.IsMentioned)
             return new TeamsChannelPolicyDecision(TeamsChannelPolicyDisposition.Ignored, "channel_unmentioned");
 
-        if (!TryResolveAudience(options.ChannelAudiences, activity.TeamId, activity.ChannelId, out var audience))
+        if (!TryResolveAudience(
+                options.ChannelAudiences,
+                options.ChannelAudienceOverrides,
+                activity.TeamId,
+                activity.ChannelId,
+                out var audience))
             return Deny("invalid_channel_audience");
         var isExplicitUser = options.AllowedUserIds.Contains(activity.Trust.SenderId, StringComparer.Ordinal);
         return new TeamsChannelPolicyDecision(
@@ -77,18 +82,72 @@ public static class TeamsChannelAclPolicy
 
     private static bool TryResolveAudience(
         IReadOnlyDictionary<string, string> audiences,
+        IReadOnlyList<TeamsChannelAudienceOverride> structuredOverrides,
         string teamId,
         string channelId,
         out TrustAudience audience)
     {
         var key = $"{teamId}/{channelId}";
-        if (!audiences.TryGetValue(key, out var value)
-            && !audiences.TryGetValue(teamId, out value))
+        if (!TryFindStructuredOverride(
+                structuredOverrides,
+                teamId,
+                channelId,
+                exactChannel: true,
+                out var found,
+                out var value))
         {
-            audience = TrustAudience.Public;
-            return true;
+            audience = default;
+            return false;
+        }
+        if (found || audiences.TryGetValue(key, out value))
+            return SecurityPolicyDefaults.TryParseAudience(value, out audience);
+
+        if (!TryFindStructuredOverride(
+                structuredOverrides,
+                teamId,
+                channelId,
+                exactChannel: false,
+                out found,
+                out value))
+        {
+            audience = default;
+            return false;
+        }
+        if (found || audiences.TryGetValue(teamId, out value))
+            return SecurityPolicyDefaults.TryParseAudience(value, out audience);
+
+        audience = TrustAudience.Public;
+        return true;
+    }
+
+    private static bool TryFindStructuredOverride(
+        IReadOnlyList<TeamsChannelAudienceOverride> overrides,
+        string teamId,
+        string channelId,
+        bool exactChannel,
+        out bool found,
+        out string value)
+    {
+        found = false;
+        value = string.Empty;
+        foreach (var audienceOverride in overrides)
+        {
+            if (!string.Equals(audienceOverride.TeamId, teamId, StringComparison.Ordinal))
+                continue;
+
+            var channelMatches = exactChannel
+                ? string.Equals(audienceOverride.ChannelId, channelId, StringComparison.Ordinal)
+                : string.IsNullOrWhiteSpace(audienceOverride.ChannelId);
+            if (!channelMatches)
+                continue;
+
+            if (found)
+                return false;
+
+            found = true;
+            value = audienceOverride.Audience;
         }
 
-        return SecurityPolicyDefaults.TryParseAudience(value, out audience);
+        return true;
     }
 }
