@@ -294,9 +294,10 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 
-- The channel proactive delivery, restart/no-resend, second-root isolation,
-  and attachment tenant matrix must pass using the exact Team mapping without
-  weakening attachment, ACL, trust, or tool policy.
+- The channel proactive delivery, restart/no-resend, and second-root isolation
+  matrix passed using the exact Team mapping without weakening ACL, trust, or
+  tool policy. The real-upload attachment smoke did not fail closed and remains
+  a release blocker.
 
 ## Resume order
 
@@ -305,6 +306,39 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 3. Confirm the owner-only runner derives exactly one approved Team audience
    mapping and passes protected-configuration readiness.
 4. Run the dedicated live proactive matrix through `current_session`.
+
+## PR #16 policy correction and final live matrix (2026-08-10)
+
+PR #16 merged as `aa8ff41b` after all required CI checks passed. The correction
+retains exact tenant, team, channel, sender, mention, canonical-root, trust, and
+destination checks. It adds an extend-only structured channel-audience
+override so canonical Teams identities containing configuration delimiters are
+stored as values rather than dictionary keys. Unmapped channels remain Public;
+only an independently approved exact mapping resolves to Team.
+
+A new owner-only isolated state copied only protected configuration, identity,
+and keys. Personal text reply and a new channel-root reply passed. In the same
+channel root, the normal generic `set_reminder` plus `current_session` path
+created and delivered one reminder. A second reminder survived a clean daemon
+restart, delivered once to that root, and did not resend after another restart.
+A new root received its own text reply and reminder exactly once, while the
+original root received no cross-root delivery.
+
+The required final real-upload smoke failed the attachment security gate. A
+new root with a qualified bot mention and a harmless small text upload produced
+the normal processing indicator and the requested model reply. It did not show
+a safe attachment rejection. This contradicts the documented requirement that
+unsupported Graph-backed or unknown attachment representations stop before
+actor, model, Graph, download, or staging work.
+
+The daemon and development tunnel stopped immediately. No additional live
+scenario ran, and the isolated owner-only state was preserved. The result does
+not expose the actual SDK attachment representation and therefore does not
+justify another speculative rendering-wrapper exception or correction. Obtain
+one bounded, privacy-safe SDK-boundary structural capture in a separately
+authorized diagnostic pass, add a sanitized red fixture, and restore the
+fail-closed boundary through green CI before resuming packaging or release
+progression.
 
 ## Prohibited shortcuts
 
