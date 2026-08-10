@@ -59,6 +59,37 @@ public sealed class TeamsChannelFoundationTests
         Assert.Empty(options.AllowedChannelIds);
         Assert.Empty(options.AllowedUserIds);
         Assert.Empty(options.ChannelAudiences);
+        Assert.Empty(options.ChannelAudienceOverrides);
+    }
+
+    [Fact]
+    public void Structured_channel_audience_override_binds_delimiter_bearing_canonical_ids()
+    {
+        const string json = """
+            {
+              "Teams": {
+                "ChannelAudienceOverrides": [
+                  {
+                    "TeamId": "19:team-id@thread.tacv2",
+                    "ChannelId": "19:channel-id@thread.tacv2",
+                    "Audience": "team"
+                  }
+                ]
+              }
+            }
+            """;
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
+        var configuration = new ConfigurationBuilder()
+            .AddJsonStream(stream)
+            .Build();
+
+        var options = configuration.GetSection("Teams").Get<TeamsChannelOptions>();
+
+        Assert.NotNull(options);
+        var audienceOverride = Assert.Single(options.ChannelAudienceOverrides);
+        Assert.Equal("19:team-id@thread.tacv2", audienceOverride.TeamId);
+        Assert.Equal("19:channel-id@thread.tacv2", audienceOverride.ChannelId);
+        Assert.Equal("team", audienceOverride.Audience);
     }
 
     [Fact]

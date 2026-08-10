@@ -5,6 +5,36 @@ conversation destinations without persisting tokens or requesting Graph access.
 
 ## ADDED Requirements
 
+### Requirement: Reminder creation authority is separate from Teams delivery capability
+
+The Teams channel SHALL NOT treat a captured proactive destination or a passed
+channel ACL as authority to create reminders. Generic tool policy SHALL decide
+whether `set_reminder` is available from the resolved source audience. An
+unmapped Teams channel SHALL remain Public and SHALL NOT expose scheduling by
+default. An operator MAY map an independently approved canonical team/channel
+identity to Team through the structured `Teams.ChannelAudienceOverrides`
+array; that Team session MAY use the generic `current_session` reminder path.
+Canonical identities containing configuration delimiters SHALL be represented
+as structured values, not dictionary keys. Duplicate matching structured
+overrides SHALL fail closed. The mapping SHALL NOT relax tenant, team, channel,
+sender, mention, canonical-root, or destination validation.
+
+#### Scenario: Unmapped allowed channel remains unable to schedule
+
+- **GIVEN** a Teams channel root passes tenant, team, channel, sender, and mention ACL checks
+- **AND** no explicit channel audience mapping applies
+- **WHEN** the session requests `set_reminder`
+- **THEN** the Public audience profile denies the tool before reminder creation
+- **AND** no reminder or delivery state is created
+
+#### Scenario: Exact approved Team channel uses current session
+
+- **GIVEN** an independently approved canonical team/channel identity is mapped to Team
+- **AND** the channel root passes every normal ingress and ACL check
+- **WHEN** the generic `set_reminder` tool creates a `current_session` reminder
+- **THEN** the reminder retains that canonical Teams root session
+- **AND** delivery remains subject to the existing destination generation and fail-closed resolution rules
+
 ### Requirement: Teams reminder destinations are explicit and validated
 
 The Teams channel SHALL resolve current-session delivery and explicit Teams

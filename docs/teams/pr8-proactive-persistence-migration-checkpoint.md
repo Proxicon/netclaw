@@ -6,9 +6,13 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-The merged-dev architecture gate and personal live matrix passed. Channel-root
-live validation exposed a translation drift and remains pending the focused
-correction's CI and live rerun.
+The merged-dev architecture gate and personal live matrix passed. The focused
+channel-root translation corrections are merged, and the channel ACL identity
+has been reconciled without weakening exact/default-deny policy. The reminder
+policy gate is also reconciled: an unmapped Teams channel is intentionally
+`Public`, while the single approved live team/channel is now mapped explicitly
+to `Team` in owner-only protected configuration. The remaining live matrix may
+use the normal `set_reminder` plus `current_session` production path.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -80,8 +84,10 @@ numbers. No fixture constructs a pre-converted v2 record.
 
 - Full Actors regression: 2,869 passed with no skips.
 - Actors reminder, proactive, and serialization regression: 272 passed.
-- Full Daemon regression: 1,123 passed with no skips.
+- Full Daemon regression: 1,142 passed with no skips.
 - Teams-only Daemon regression: 172 passed.
+- Focused scheduling/tool-policy regression: 48 passed with no skips.
+- Focused Teams routing/current-session regression: 72 passed with no skips.
 - All required Actors, Teams, Daemon, and Daemon.Tests builds passed with zero
   warnings and zero errors.
 - `dotnet slopwatch analyze`: 0 issues.
@@ -112,8 +118,112 @@ empty upload shells, and mixed unsupported attachments remain fail-closed.
 The test project now links directly to the OpenSpec fixture directory and
 requires an explicit matrix entry for every JSON fixture. Focused tenant-
 evidence and Teams foundation coverage passed after the correction. The live
-channel root, proactive delivery, second-root isolation, and attachment smoke
-remain pending until the focused correction passes CI and is merged.
+channel root now passes translation and reply delivery. Channel proactive
+delivery, restart/no-resend, second-root isolation, and attachment smoke remain
+pending on an explicitly authorized channel audience/profile configuration.
+
+## Live channel ACL identity reconciliation
+
+Merged `dev` at `116d03d5` was exercised with a fresh owner-only state and a
+bounded HMAC comparison keyed by a random mode-600 local key. The trace exposed
+no identifiers. Tenant, sender, and channel matched exactly. Only team failed:
+the protected runner had selected the authoritative directory object identity,
+while the authenticated activity matched the same authoritative team's
+distinct internal Teams identity. There was no whitespace, case, partial, or
+other canonicalization equivalence.
+
+This is configuration class A, not a translator or ACL-policy defect. The
+protected runner now resolves exactly one approved team and channel through the
+authenticated directory, converts the directory object to its internal Teams
+identity, and fails closed on zero, multiple, missing, or unavailable results.
+It does not learn or store an allow-list value from inbound traffic. Production
+ACL code remains exact, tenant-bound, mention-gated, and default-deny.
+
+A second fresh state proved all four configured/translated dimensions matched
+exactly with one valid, nonduplicate candidate each. The ordered lifecycle was
+`channel_root_received`, `channel_root_translated`, `channel_acl_allowed`,
+`destination_captured`, `channel_root_routed`, two processing/final
+`session_output_received` and `binding_output_correlated` pairs,
+`outbound_request_created`, `sdk_send_started`, `sdk_send_completed`,
+`provider_result_mapped`, `actor_result_received`, and terminal
+`reply_terminal`. The provider category was `success`, and the exact requested
+reply appeared in the same root.
+
+The first same-root reminder request then failed with the closed category
+`tool_not_allowed_for_audience_profile`; the bot explicitly reported that no
+reminder was created. Server-side state showed zero pending reminders and no
+reminder files. Per the terminal-gate rule, restart/no-resend, second-root, and
+attachment cases did not run. Do not broaden audience or tool policy merely to
+make the live test pass; use the established authorization process to approve
+the intended channel profile before resuming.
+
+The daemon and tunnel stopped cleanly. Temporary HMAC/lifecycle source was
+removed, Slopwatch reported zero issues, and the repository returned clean.
+The safe comparison trace and ephemeral key remain mode 600 outside Git for
+audit. No production-code correction was made or committed.
+
+## Channel reminder audience-policy reconciliation
+
+The successful but denied channel root resolved to `TrustAudience.Public` in
+`TeamsChannelAclPolicy.TryResolveAudience`, because its canonical
+`team/channel` key and team key were both absent from the bound
+`ChannelAudiences`. The
+explicitly allowed sender still resolved to
+`PrincipalClassification.TrustedInternal`; SDK provenance was verified, and
+the shared-channel trust boundary remained `TrustBoundary.Public`.
+
+The first environment-variable attempt and the subsequent owner-only JSON
+dictionary attempt both failed identically in a fresh live state. Canonical
+Teams identities contain `:`, which Microsoft configuration providers reserve
+as a hierarchy delimiter in both environment variables and JSON keys. The
+documented dictionary form therefore could not bind the live canonical key.
+This is class B, Teams audience misclassification caused by a production
+configuration-contract defect. It is not an ACL, trust, tool-policy, or
+reminder-delivery defect.
+
+The extend-only correction adds `Teams.ChannelAudienceOverrides`, an array of
+structured `TeamId`, optional `ChannelId`, and `Audience` values. Identifiers
+are configuration values rather than keys, so delimiters remain opaque. Exact
+team/channel entries precede team-wide entries; duplicate matching structured
+entries fail closed as `invalid_channel_audience`. The legacy
+`ChannelAudiences` dictionary and the unmapped Public fallback remain intact.
+Red tests prove delimiter-safe JSON binding and Team policy resolution before
+the correction; focused policy tests also preserve legacy precedence and
+duplicate rejection.
+
+`ToolAudienceProfileDefaults.CreatePublic` excludes every scheduling tool.
+`ToolAccessPolicy.IsToolExposed` therefore omits `set_reminder`, and
+`ToolAccessPolicy.AuthorizeInvocation` independently returns
+`tool_not_allowed_for_audience_profile` at the profile check before
+`SetReminderTool.ExecuteAsync`. The Team and Personal defaults include
+`set_reminder`, with no reminder-specific approval override; normal approval
+policy still applies if an operator configures one.
+
+The owner-only live runner derives the already approved team and channel from
+an authenticated directory lookup and atomically writes one exact structured
+Team override to the isolated mode-600 configuration. The identifiers do not
+appear in Git or in the script text. Zero, multiple, missing, unavailable, or
+duplicate results still fail closed. Public Teams channels remain unable to
+schedule reminders, and ACL, mention, tenant, root, destination, attachment,
+and tool-profile checks are unchanged. The final live matrix is CI-gated until
+the configuration correction merges into `dev`.
+
+The cross-channel contract is now explicit:
+
+| Scope | Resolved audience | Reminder creation | Approval | Target path |
+| --- | --- | --- | --- | --- |
+| Teams allowed personal chat | Personal | allowed | profile policy; default auto | `current_session` |
+| Teams allowed but unmapped channel root | Public | denied before invocation | none | none |
+| Teams exact approved mapped channel root | Team | allowed | profile policy; default auto | `current_session` to captured root |
+| Slack/Discord/Mattermost approved thread | Team when operator-vetted, unless explicitly overridden | allowed | profile policy; default auto | `current_session` |
+| Any Public channel/thread | Public | denied before invocation | none | none |
+
+PR 8 requires durable proactive delivery for an already authorized generic
+reminder; it does not grant reminder creation independently of the source
+audience. `current_session` is the supported production creation and target
+mode for the now-Team Teams root. It retains the canonical session and captured
+destination generation; it does not accept a different root or fall back to a
+personal or top-level destination.
 
 ## Proof Pass 4 full-regression and architecture-audit evidence
 
@@ -184,18 +294,17 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 
-- The focused channel-root translation correction must pass CI and merge to
-  `dev`.
-- The blocked channel-root, channel proactive, second-root, negative, and
-  attachment tenant matrix must pass without weakening the attachment or ACL
-  policy.
+- The channel proactive delivery, restart/no-resend, second-root isolation,
+  and attachment tenant matrix must pass using the exact Team mapping without
+  weakening attachment, ACL, trust, or tool policy.
 
 ## Resume order
 
 1. Read this checkpoint and inspect the branch diff.
 2. Do not redesign or repeat completed migration work.
-3. Wait for the required CI workflows after the branch push.
-4. Run dedicated live proactive validation only after CI passes.
+3. Confirm the owner-only runner derives exactly one approved Team audience
+   mapping and passes protected-configuration readiness.
+4. Run the dedicated live proactive matrix through `current_session`.
 
 ## Prohibited shortcuts
 
