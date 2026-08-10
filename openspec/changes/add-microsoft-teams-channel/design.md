@@ -418,6 +418,27 @@ the mapping from inbound traffic and never persists an identity in Git. The
 legacy `Teams.ChannelAudiences` dictionary remains supported for identities
 that do not contain configuration delimiters.
 
+#### Channel reminder policy live result and attachment gate (2026-08-10)
+
+PR #16 merged the structured Team audience override after its full CI matrix
+passed. A fresh owner-only run proved that an explicitly approved channel root
+can use the normal generic `set_reminder` tool with `current_session`, deliver
+proactively to the originating root, survive a daemon restart, suppress a
+post-delivery resend, and keep a second reminder isolated to its distinct root.
+The default unmapped audience remains Public, and no ACL, trust, mention,
+destination, or generic tool policy was broadened.
+
+The required final live attachment smoke did not satisfy the existing
+fail-closed contract. A root containing a real user upload and a qualified bot
+mention reached normal processing and produced a model reply instead of being
+rejected before actor dispatch. The captured behavior does not reveal which
+SDK attachment representation was supplied, so it is not evidence for
+broadening another rendering-wrapper predicate. Live infrastructure stopped
+immediately and no further scenario ran. Packaging and release progression
+remain blocked until a bounded, privacy-safe SDK-boundary capture identifies
+the representation and a CI-gated correction proves that it cannot reach the
+actor, model, Graph, download, or staging paths.
+
 For each stable generic reminder delivery key, the binding persists `Pending`
 before it records `Sending` and submits the turn to the normal session pipeline.
 It persists `Sent` only after the Teams SDK accepts a post. Retryable local or
