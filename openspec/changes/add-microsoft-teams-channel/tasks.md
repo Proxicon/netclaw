@@ -174,22 +174,21 @@ targets while preserving evidence.
   `FailedPermanent`/`DeliveryUnknown` state transitions and choose/document the
   explicit `DeliveryUnknown` recovery policy.
 - [ ] 8.3 Complete the CI-gated live channel proactive matrix. Personal
-  capture, delivery, and restart recovery passed. Channel translation is fixed.
-  A privacy-safe live comparison proved the runner used the directory object
-  identity where the authenticated activity and authoritative directory expose
-  a distinct internal Teams identity. The protected runner now resolves that
-  identity fail-closed; all ACL dimensions matched and the channel-root SDK
-  reply was visible in the same root. The first same-root reminder request then
-  stopped at `tool_not_allowed_for_audience_profile` with no reminder created.
-  Policy reconciliation proved the unmapped channel was intentionally Public,
-  while the approved root may use an exact Team audience override. Two fresh
-  live attempts proved canonical IDs containing `:` cannot bind through the
-  existing dictionary key in either environment or JSON configuration. A red
-  binding/policy test now gates an extend-only structured override whose IDs
-  are values, while Public fallback and production authorization remain
-  unchanged. Resume through generic `set_reminder` plus `current_session` only
-  after the focused correction is green, merged to `dev`, and deployed; then
-  complete restart/no-resend, second-root, and attachment validation.
+  capture, delivery, and restart recovery passed. PR #16 added the structured
+  exact Team audience override required for canonical identifiers containing
+  configuration delimiters and merged after all required CI checks passed. A
+  fresh owner-only live run then proved personal and channel-root replies,
+  same-root reminder creation through generic `set_reminder` plus
+  `current_session`, proactive delivery, restart recovery, no resend after a
+  second restart, and isolation of a second reminder to its distinct root.
+  Tenant, ACL, mention, trust, Public fallback, and destination policy remained
+  unchanged. The final real-upload smoke failed closed-policy validation: the
+  activity produced normal processing and a model reply rather than an
+  attachment rejection. The daemon and tunnel stopped immediately, and no
+  further live scenario ran. Keep 8.3 open and stop packaging or release
+  progression until a privacy-safe transport capture explains this live upload
+  representation and a CI-gated correction restores rejection before actor or
+  model dispatch.
 
 ## PR 9 — App package and operations
 
