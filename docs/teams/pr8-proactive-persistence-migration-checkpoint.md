@@ -8,8 +8,11 @@
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
 The merged-dev architecture gate and personal live matrix passed. The focused
 channel-root translation corrections are merged, and the channel ACL identity
-has been reconciled without weakening exact/default-deny policy. A later live
-gate remains: the channel audience/profile currently forbids reminder tools.
+has been reconciled without weakening exact/default-deny policy. The reminder
+policy gate is also reconciled: an unmapped Teams channel is intentionally
+`Public`, while the single approved live team/channel is now mapped explicitly
+to `Team` in owner-only protected configuration. The remaining live matrix may
+use the normal `set_reminder` plus `current_session` production path.
 
 - Branch: `feature/teams-channel-pr8-proactive-reminders`
 - Pre-checkpoint head: `4baf137c`
@@ -81,8 +84,10 @@ numbers. No fixture constructs a pre-converted v2 record.
 
 - Full Actors regression: 2,869 passed with no skips.
 - Actors reminder, proactive, and serialization regression: 272 passed.
-- Full Daemon regression: 1,123 passed with no skips.
+- Full Daemon regression: 1,142 passed with no skips.
 - Teams-only Daemon regression: 172 passed.
+- Focused scheduling/tool-policy regression: 48 passed with no skips.
+- Focused Teams routing/current-session regression: 72 passed with no skips.
 - All required Actors, Teams, Daemon, and Daemon.Tests builds passed with zero
   warnings and zero errors.
 - `dotnet slopwatch analyze`: 0 issues.
@@ -157,6 +162,56 @@ removed, Slopwatch reported zero issues, and the repository returned clean.
 The safe comparison trace and ephemeral key remain mode 600 outside Git for
 audit. No production-code correction was made or committed.
 
+## Channel reminder audience-policy reconciliation
+
+The successful but denied channel root resolved to `TrustAudience.Public` in
+`TeamsChannelAclPolicy.TryResolveAudience`, because its canonical
+`team/channel` key and team key were both absent from `ChannelAudiences`. The
+explicitly allowed sender still resolved to
+`PrincipalClassification.TrustedInternal`; SDK provenance was verified, and
+the shared-channel trust boundary remained `TrustBoundary.Public`.
+
+This is a deployment-configuration instance of class B, not a production
+resolver defect. Teams deliberately differs from the shared Slack, Discord,
+and Mattermost heuristic: its channel traffic requires exact team and channel
+allow-lists, but an allow-list match alone does not upgrade the audience. The
+existing `Channel_audience_uses_team_channel_then_team_then_public_fallback`
+test proves exact `team/channel` override, team override, and unmapped Public
+fallback. No new red production test or authorization-code change is needed.
+
+`ToolAudienceProfileDefaults.CreatePublic` excludes every scheduling tool.
+`ToolAccessPolicy.IsToolExposed` therefore omits `set_reminder`, and
+`ToolAccessPolicy.AuthorizeInvocation` independently returns
+`tool_not_allowed_for_audience_profile` at the profile check before
+`SetReminderTool.ExecuteAsync`. The Team and Personal defaults include
+`set_reminder`, with no reminder-specific approval override; normal approval
+policy still applies if an operator configures one.
+
+The owner-only live runner now derives the already approved team and channel
+from an authenticated directory lookup and supplies one ephemeral exact
+`ChannelAudiences[team/channel] = team` entry to the daemon. The identifiers do
+not appear in Git or in the script text. Zero, multiple, missing, or unavailable
+directory results still fail closed. Public Teams channels remain unable to
+schedule reminders, and ACL, mention, tenant, root, destination, attachment,
+and tool-profile checks are unchanged.
+
+The cross-channel contract is now explicit:
+
+| Scope | Resolved audience | Reminder creation | Approval | Target path |
+| --- | --- | --- | --- | --- |
+| Teams allowed personal chat | Personal | allowed | profile policy; default auto | `current_session` |
+| Teams allowed but unmapped channel root | Public | denied before invocation | none | none |
+| Teams exact approved mapped channel root | Team | allowed | profile policy; default auto | `current_session` to captured root |
+| Slack/Discord/Mattermost approved thread | Team when operator-vetted, unless explicitly overridden | allowed | profile policy; default auto | `current_session` |
+| Any Public channel/thread | Public | denied before invocation | none | none |
+
+PR 8 requires durable proactive delivery for an already authorized generic
+reminder; it does not grant reminder creation independently of the source
+audience. `current_session` is the supported production creation and target
+mode for the now-Team Teams root. It retains the canonical session and captured
+destination generation; it does not accept a different root or fall back to a
+personal or top-level destination.
+
 ## Proof Pass 4 full-regression and architecture-audit evidence
 
 The branch tip was checked against current `proxicon/dev`. The current dev tip
@@ -226,18 +281,17 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 
-- The focused channel-root translation correction must pass CI and merge to
-  `dev`.
-- The blocked channel-root, channel proactive, second-root, negative, and
-  attachment tenant matrix must pass without weakening the attachment or ACL
-  policy.
+- The channel proactive delivery, restart/no-resend, second-root isolation,
+  and attachment tenant matrix must pass using the exact Team mapping without
+  weakening attachment, ACL, trust, or tool policy.
 
 ## Resume order
 
 1. Read this checkpoint and inspect the branch diff.
 2. Do not redesign or repeat completed migration work.
-3. Wait for the required CI workflows after the branch push.
-4. Run dedicated live proactive validation only after CI passes.
+3. Confirm the owner-only runner derives exactly one approved Team audience
+   mapping and passes protected-configuration readiness.
+4. Run the dedicated live proactive matrix through `current_session`.
 
 ## Prohibited shortcuts
 
