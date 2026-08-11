@@ -27,6 +27,8 @@ using Netclaw.Actors.Skills;
 using Netclaw.Actors.SubAgents;
 using Netclaw.Actors.Tools;
 using Netclaw.Channels;
+using Netclaw.Channels.Teams;
+using Netclaw.Channels.Teams.Serialization;
 using Netclaw.Configuration;
 using Netclaw.Configuration.Http;
 using Netclaw.Providers;
@@ -160,6 +162,7 @@ static async Task RunDaemonAsync(
         daemonLogLevel,
         daemonConfig,
         shellResolution);
+    builder.AddTeamsIngress();
 
     // Authentication — a PolicyScheme selector is the default scheme.
     // It routes to DeviceBearer when an Authorization: Bearer header is present,
@@ -264,9 +267,13 @@ static async Task RunDaemonAsync(
     // the host's IModelCapabilityResolver chain and ILoggerFactory.
     app.Services.GetRequiredService<ModelCapabilities>();
 
+    if (app.Services.GetRequiredService<TeamsIngressRegistration>().CanActivateSdk)
+        app.UseTeamsActivityBodyGuard();
+
     app.UseAuthentication();
     app.UseAuthorization();
     app.UseRateLimiter();
+    app.UseTeamsIngress();
 
     // Require authorization for the OpenAPI document so the full API surface is not
     // exposed to unauthenticated callers when the daemon binds to a non-loopback
@@ -316,6 +323,7 @@ static async Task RunDaemonAsync(
         .RequireAuthorization();
     app.MapWebhookEndpoints();
     app.MapMattermostActionEndpoint();
+    app.MapTeamsActivityEndpoint();
 
     app.MapPairingEndpoints();
 
@@ -1097,6 +1105,7 @@ static void ConfigureDaemonServices(
             : null;
 
         akkaBuilder.WithNetclawSerialization();
+        akkaBuilder.WithTeamsPersistenceSerialization();
         akkaBuilder.WithNetclawActors(shellEnvironment, reminderStorage);
         akkaBuilder.WithSessionLogDispatcher(paths.SessionLogsDirectory, sp.GetRequiredService<TimeProvider>());
         akkaBuilder.WithSignalRGateway();

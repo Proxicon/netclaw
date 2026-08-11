@@ -22,11 +22,20 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Remove="Fixtures/Teams/TenantEvidence/**/*" />
+    <None Include="../../openspec/changes/add-microsoft-teams-channel/fixtures/tenant-evidence/**/*.json">
+      <Link>Fixtures/Teams/TenantEvidence/%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Netclaw.Actors/Netclaw.Actors.csproj" />
     <ProjectReference Include="../Netclaw.Channels/Netclaw.Channels.csproj" />
     <ProjectReference Include="../Netclaw.Channels.Discord/Netclaw.Channels.Discord.csproj" />
     <ProjectReference Include="../Netclaw.Channels.Mattermost/Netclaw.Channels.Mattermost.csproj" />
     <ProjectReference Include="../Netclaw.Channels.Slack/Netclaw.Channels.Slack.csproj" />
+    <ProjectReference Include="../Netclaw.Channels.Teams/Netclaw.Channels.Teams.csproj" />
     <ProjectReference Include="../Netclaw.Configuration/Netclaw.Configuration.csproj" />
     <ProjectReference Include="../Netclaw.Daemon/Netclaw.Daemon.csproj" />
     <ProjectReference Include="../Netclaw.Providers/Netclaw.Providers.csproj" />
