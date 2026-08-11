@@ -1964,11 +1964,11 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
     /// same dispatch logic — there is no divergent second copy.
     /// </summary>
     /// <param name="oneTimeApprovalPreSeed">
-    /// Optional map of <c>callId → approved patterns</c>. For each entry, the
-    /// pipeline pre-seeds the one-time approval bypass on that call's execution
-    /// context before the first attempt, so an <c>ApprovedOnce</c> re-drive
-    /// skips the approval gate for exactly that call without emitting a second
-    /// approval prompt. Scoped per call id — never widens scope to other calls.
+    /// Optional map of <c>callId → one-time authorization keys</c>. Each value
+    /// binds the approved patterns and exact approval-candidate snapshot. The
+    /// pipeline pre-seeds the bypass before the first attempt, so an
+    /// <c>ApprovedOnce</c> re-drive cannot emit a duplicate prompt or authorize
+    /// a newly unsafe candidate. The keys apply only to that call id.
     /// </param>
     private void DispatchToolBatch(
         List<FunctionCallContent> toolCalls,
@@ -3072,7 +3072,12 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
             errorMsg += hint is not null ? $"  {cmd} {hint}\n" : $"  {cmd}\n";
         }
 
-        EmitOutput(new TextOutput(errorMsg.TrimEnd()) { SessionId = _sessionId }, OutputFilter.Text);
+        return RejectSlashCommand(errorMsg.TrimEnd());
+    }
+
+    private bool RejectSlashCommand(string message)
+    {
+        EmitOutput(new TextOutput(message) { SessionId = _sessionId }, OutputFilter.Text);
         EmitOutput(new TurnCompleted
         {
             SessionId = _sessionId,
@@ -3086,10 +3091,13 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private bool HandleInlineSlashCommand(SkillEntry skill, string remainder, IReadOnlyList<SerializableMediaReference> mediaRefs)
     {
+        if (skill.Source is not FileSkillSource fileSource)
+            return RejectSlashCommand($"Skill /{skill.Name} cannot use file-based slash dispatch.");
+
         string skillBody;
         try
         {
-            var content = File.ReadAllText(skill.FilePath);
+            var content = File.ReadAllText(fileSource.FilePath);
             skillBody = Skills.SkillScanner.ExtractBody(content);
         }
         catch (IOException ex)
@@ -3131,6 +3139,9 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
 
     private bool TryHandleRoutedSlashCommand(SkillEntry skill, string remainder, IReadOnlyList<SerializableMediaReference> mediaRefs, string routedSubagent)
     {
+        if (skill.Source is not FileSkillSource fileSource)
+            return RejectSlashCommand($"Skill /{skill.Name} cannot use file-based routed dispatch.");
+
         if (_subAgentRegistry is null || _subAgentSpawner is null)
         {
             EmitOutput(new TextOutput($"Skill '/{skill.Name}' routes to subagent '{routedSubagent}', but subagent routing is not available in this runtime.")
@@ -3188,7 +3199,7 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
         string skillBody;
         try
         {
-            var content = File.ReadAllText(skill.FilePath);
+            var content = File.ReadAllText(fileSource.FilePath);
             skillBody = Skills.SkillScanner.ExtractBody(content);
         }
         catch (IOException ex)
@@ -4325,7 +4336,10 @@ public sealed class LlmSessionActor : ReceivePersistentActor, IWithTimers
                 // record their durable grant separately. This only authorizes the
                 // immediate re-drive, matching the live pipeline and the sub-agent.
                 // See https://github.com/netclaw-dev/netclaw/issues/1802.
-                preSeed[call.CallId.Value] = resolved.Pending.Patterns;
+                preSeed[call.CallId.Value] = OneTimeApprovalKeys.Create(
+                    resolved.Pending.Patterns,
+                    resolved.Pending.Candidates,
+                    resolved.Pending.Cwd);
             }
 
             if (resolved.Decision is ApprovalDecision.Denied or ApprovalDecision.TimedOut)

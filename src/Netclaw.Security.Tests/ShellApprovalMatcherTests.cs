@@ -6,13 +6,15 @@
 using System.Text.Json;
 using Netclaw.Configuration;
 using Netclaw.Tools;
+using ShellSyntaxTree;
 using Xunit;
 
 namespace Netclaw.Security.Tests;
 
 public sealed class ShellApprovalMatcherTests
 {
-    private readonly ShellApprovalMatcher _matcher = ShellApprovalMatcher.Instance;
+    private readonly ShellApprovalMatcher _matcher = new(
+        ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux));
 
     private static Dictionary<string, object?> Args(string command) => new() { ["Command"] = command };
 
@@ -27,15 +29,165 @@ public sealed class ShellApprovalMatcherTests
     private static ApprovalEntry InDir(string verb, string dir) => new(verb) { Directory = dir };
 
     /// <summary>
-    /// xunit.v3 <c>SkipUnless</c> hook for POSIX-only tests. The v2
-    /// matcher falls through to the legacy <c>ShellTokenizer</c> path
-    /// on Windows (ShellSyntaxTree is bash-only), so tests that pin
-    /// BashParser cwd attribution / <c>arg.Resolved</c> canonicalization
-    /// don't apply. Marking them <c>[Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]</c>
-    /// produces a proper "Skipped" entry in the test log on Windows
-    /// runners instead of hiding the gap behind an early-return.
+    /// xunit.v3 <c>SkipUnless</c> hook for tests that require the POSIX
+    /// filesystem in addition to the matcher's explicit Bash environment.
     /// </summary>
     public static bool IsPosix => !OperatingSystem.IsWindows();
+    public static bool IsWindows => OperatingSystem.IsWindows();
+
+    [Theory]
+    [InlineData("pwsh -NoProfile -Command 'git status'", "pwsh")]
+    [InlineData("powershell.exe -File script.ps1", "powershell.exe")]
+    public void Bash_matcher_keeps_power_shell_as_one_external_approval_unit(
+        string command,
+        string expectedVerb)
+    {
+        var analysis = _matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(command));
+
+        Assert.False(analysis.IsMessy);
+        Assert.Equal(expectedVerb, Assert.Single(analysis.Candidates).Verb);
+    }
+
+    [Fact]
+    public void Power_shell_matcher_uses_the_native_power_shell_grammar()
+    {
+        var matcher = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7));
+
+        var analysis = matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args("Get-ChildItem -Path . -Filter *.cs", @"C:\work"));
+
+        Assert.False(analysis.IsMessy);
+        Assert.Equal("Get-ChildItem", Assert.Single(analysis.Candidates).Verb);
+    }
+
+    [Theory]
+    [InlineData(@"Set-Location C:\workspace\service.repo", "Set-Location")]
+    [InlineData(@"cd C:\workspace\service.repo", "Set-Location")]
+    [InlineData(@"Push-Location C:\workspace\service.repo", "Push-Location")]
+    public void Power_shell_location_command_preserves_dotted_directory(
+        string command,
+        string expectedVerb)
+    {
+        var matcher = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7));
+
+        var candidate = Assert.Single(matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            Args(command, @"C:\workspace")));
+
+        Assert.Equal(expectedVerb, candidate.Verb);
+        Assert.Equal("C:/workspace/service.repo", candidate.Directory);
+    }
+
+    [Theory]
+    [InlineData(@"Get-Content Env:\Path")]
+    [InlineData(@"Get-Item HKLM:\Software\Vendor")]
+    [InlineData(@"Remove-Item CustomDrive:\target")]
+    [InlineData(@"Write-Output Env:\Path")]
+    [InlineData(@"Get-Item Registry::HKEY_LOCAL_MACHINE\Software")]
+    [InlineData(@"Get-Item Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\Software")]
+    public void Power_shell_provider_drives_do_not_create_persistent_candidates(string command)
+    {
+        var matcher = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7));
+
+        var analysis = matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(command, @"C:\work"));
+
+        Assert.True(analysis.IsMessy);
+        Assert.Empty(analysis.Patterns);
+        Assert.Empty(analysis.Candidates);
+    }
+
+    [Fact]
+    public void Power_shell_file_system_provider_keeps_directory_scope()
+    {
+        var matcher = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7));
+
+        var analysis = matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(@"Get-Content 'FileSystem::C:\work\input.txt'", @"C:\work"));
+
+        Assert.False(analysis.IsMessy);
+        var candidate = Assert.Single(analysis.Candidates);
+        Assert.Equal("Get-Content", candidate.Verb);
+        Assert.Equal(OperatingSystem.IsWindows() ? @"C:\work" : "C:/work", candidate.Directory);
+    }
+
+    [Fact]
+    public void Power_shell_redirect_uses_the_environment_path_style()
+    {
+        var matcher = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7));
+
+        var analysis = matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(@"Get-Content .\input.txt > .\output.txt", @"C:\work"));
+
+        Assert.False(analysis.IsMessy);
+        var candidate = Assert.Single(analysis.Candidates);
+        Assert.Equal("Get-Content", candidate.Verb);
+        Assert.Equal("C:/work", candidate.Directory);
+    }
+
+    [Fact]
+    public void Power_shell_redirect_does_not_use_the_posix_null_device_exception()
+    {
+        var matcher = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7));
+
+        var analysis = matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args("Get-Content .\\input.txt > /dev/null", @"C:\work"));
+
+        Assert.True(analysis.IsMessy);
+        Assert.Empty(analysis.Candidates);
+    }
+
+    [Fact]
+    public void Dialect_change_reparses_before_candidates_can_match_a_grant()
+    {
+        const string command = @"Get-ChildItem && Get-Content .\input.txt";
+        var powerShell7 = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Program Files\PowerShell\7\pwsh.exe",
+                PwshDialect.PowerShell7));
+        var windowsPowerShell = new ShellApprovalMatcher(
+            ShellExecutionEnvironment.CreatePowerShell(
+                @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                PwshDialect.WindowsPowerShell51));
+
+        var acceptedDialect = powerShell7.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(command, @"C:\work"));
+        var changedDialect = windowsPowerShell.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(command, @"C:\work"));
+
+        Assert.False(acceptedDialect.IsMessy);
+        Assert.Equal(2, acceptedDialect.Candidates.Count);
+        Assert.True(changedDialect.IsMessy);
+        Assert.Empty(changedDialect.Patterns);
+        Assert.Empty(changedDialect.Candidates);
+    }
 
     [Fact]
     public void ExtractPatterns_simple_command()
@@ -328,15 +480,33 @@ public sealed class ShellApprovalMatcherTests
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]
     public void FormatForDisplay_heredoc_falls_back_to_flattened_raw_command()
     {
-        // The parser drops heredoc bodies from the tree (only the <<EOF
-        // marker survives as a redirect target), so a tree reconstruction
-        // would hide the executable payload from the approver. Heredoc
-        // commands fall back to the flattened raw command instead.
+        // The compatibility redirect cannot preserve the v0.3 heredoc facts.
+        // The raw fallback keeps the full body visible to the approver.
         var display = _matcher.FormatForDisplay(new ToolName("shell_execute"),
             Args("bash <<EOF\nrm -rf /tmp/x\nEOF"));
 
         Assert.DoesNotContain('\n', display);
-        Assert.Equal("bash <<EOF rm -rf /tmp/x EOF", display);
+        Assert.Equal("bash <<EOF ⏎ rm -rf /tmp/x ⏎ EOF", display);
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]
+    public void FormatForDisplay_here_string_keeps_authored_operator()
+    {
+        var display = _matcher.FormatForDisplay(new ToolName("shell_execute"),
+            Args("cat <<< \"alpha\nbeta\""));
+
+        Assert.DoesNotContain('\n', display);
+        Assert.Equal("cat <<< \"alpha ⏎ beta\"", display);
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]
+    public void FormatForDisplay_heredoc_keeps_following_command_boundary()
+    {
+        var display = _matcher.FormatForDisplay(new ToolName("shell_execute"),
+            Args("cat <<'EOF'\nbody\nEOF\ngit push"));
+
+        Assert.DoesNotContain('\n', display);
+        Assert.Equal("cat <<'EOF' ⏎ body ⏎ EOF ⏎ git push", display);
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]
@@ -462,13 +632,13 @@ public sealed class ShellApprovalMatcherTests
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]
-    public void FormatForDisplay_summarizes_multiline_redirect_target()
+    public void FormatForDisplay_unparseable_multiline_redirect_flattens_raw_command()
     {
         var display = _matcher.FormatForDisplay(new ToolName("shell_execute"),
             Args("echo hi >> \"$LOGDIR\nfile\""));
 
         Assert.DoesNotContain('\n', display);
-        Assert.Equal("echo hi >> (2 lines, 12 chars)", display);
+        Assert.Equal("echo hi >> \"$LOGDIR file\"", display);
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]
@@ -538,9 +708,8 @@ public sealed class ShellApprovalMatcherTests
     [Fact]
     public void ExtractPatterns_strips_bare_integer_positional_arguments()
     {
-        // BashParser is bash-only, so on Windows the matcher falls through to
-        // the legacy ShellTokenizer path. This test exercises the POSIX path.
-        // Windows skips with a pass to keep the test active (no Slopwatch SW001).
+        // This test uses POSIX filesystem semantics and a Linux Bash environment.
+        // Windows skips with a pass to keep the test active for Slopwatch.
         if (OperatingSystem.IsWindows()) return;
 
         // The approval pattern for `freshdesk ticket get 123` should be
@@ -611,7 +780,8 @@ public sealed class ShellApprovalMatcherTests
 /// </summary>
 public sealed class ShellApprovalMatcherPathExtractionTests
 {
-    private readonly ShellApprovalMatcher _matcher = ShellApprovalMatcher.Instance;
+    private readonly ShellApprovalMatcher _matcher = new(
+        ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux));
 
     private static Dictionary<string, object?> Args(string command) => new() { ["Command"] = command };
 
@@ -723,15 +893,29 @@ public sealed class ShellApprovalMatcherPathExtractionTests
     };
 
     /// <summary>
-    /// xunit.v3 <c>SkipUnless</c> hook for POSIX-only tests. The v2
-    /// matcher falls through to the legacy <c>ShellTokenizer</c> path
-    /// on Windows (ShellSyntaxTree is bash-only), so tests that pin
-    /// BashParser cwd attribution / <c>arg.Resolved</c> canonicalization
-    /// don't apply. Marking them <c>[Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only — matcher routes through BashParser on POSIX")]</c>
-    /// produces a proper "Skipped" entry in the test log on Windows
-    /// runners instead of hiding the gap behind an early-return.
+    /// xunit.v3 <c>SkipUnless</c> hook for tests that require POSIX paths and
+    /// filesystem behavior. Native PowerShell cases have a separate matrix.
     /// </summary>
     public static bool IsPosix => !OperatingSystem.IsWindows();
+
+    private static string CanonicalTemporaryDirectory()
+    {
+        var fullPath = Path.GetFullPath(Path.GetTempPath());
+        var pathRoot = Path.GetPathRoot(fullPath)
+            ?? throw new InvalidOperationException("The temporary directory has no path root.");
+        var current = pathRoot;
+        var relative = fullPath[pathRoot.Length..];
+        foreach (var segment in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(current, segment);
+            current = new DirectoryInfo(candidate).ResolveLinkTarget(returnFinalTarget: true)?.FullName
+                ?? candidate;
+        }
+
+        return current;
+    }
 
     [SlopwatchSuppress("SW001", "This theory verifies Bash parser path scopes, which do not apply to the Windows shell parser.")]
     [Theory(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
@@ -741,7 +925,7 @@ public sealed class ShellApprovalMatcherPathExtractionTests
         string expectedVerb,
         string[] expectedScopeNames)
     {
-        var root = Path.Combine(Path.GetTempPath(), $"netclaw-path-scopes-{Guid.NewGuid():N}");
+        var root = Path.Combine(CanonicalTemporaryDirectory(), $"netclaw-path-scopes-{Guid.NewGuid():N}");
         var projectDirectory = Path.Combine(root, "project");
         var externalDirectory = Path.Combine(root, "external");
         var command = commandTemplate.Replace(
@@ -1169,6 +1353,49 @@ public sealed class ShellApprovalMatcherPathExtractionTests
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void ExtractCandidates_preserves_dotted_cd_target_as_directory()
+    {
+        var candidate = Assert.Single(_matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            new Dictionary<string, object?>
+            {
+                ["Command"] = "cd /workspace/service.repo"
+            }));
+
+        Assert.Equal("cd", candidate.Verb);
+        Assert.Equal("/workspace/service.repo", candidate.Directory);
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void ExtractCandidates_find_dot_preserves_dotted_working_directory()
+    {
+        var candidate = Assert.Single(_matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            new Dictionary<string, object?>
+            {
+                ["Command"] = "find . -maxdepth 1 -type f",
+                ["WorkingDirectory"] = "/workspace/service.repo"
+            }));
+
+        Assert.Equal("find", candidate.Verb);
+        Assert.Equal("/workspace/service.repo", candidate.Directory);
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void ExtractCandidates_file_operand_in_dotted_directory_uses_parent_directory()
+    {
+        var candidate = Assert.Single(_matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            new Dictionary<string, object?>
+            {
+                ["Command"] = "cat /workspace/service.repo/readme.md"
+            }));
+
+        Assert.Equal("cat", candidate.Verb);
+        Assert.Equal("/workspace/service.repo", candidate.Directory);
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
     public void ExtractCandidates_propagates_cd_target_to_subsequent_clauses_with_no_path_arg()
     {
         // Production repro of the retry-after-approval failure on
@@ -1227,6 +1454,73 @@ public sealed class ShellApprovalMatcherPathExtractionTests
             });
 
         Assert.Contains(candidates, c => c.Verb == "git push" && c.Directory == "/repo");
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void ExtractCandidates_bundled_wrapper_inherits_outer_proven_cwd()
+    {
+        var candidate = Assert.Single(_matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            Args(
+                "cd /tmp && bash -lc \"cat relative.txt\"",
+                "/work")),
+            candidate => candidate.Verb == "cat");
+
+        Assert.Equal("/tmp", candidate.Directory);
+    }
+
+    [SlopwatchSuppress("SW001", "This theory verifies Bash wrapper approval scopes, which do not apply to the Windows shell parser.")]
+    [Theory(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    [InlineData("sudo bash -lc \"git status\"", "sudo bash", "/work")]
+    [InlineData("sudo /bin/bash -lc \"git status\"", "sudo", "/bin/bash")]
+    [InlineData("env bash -lc \"git status\"", "env bash", "/work")]
+    [InlineData("env /bin/bash -lc \"git status\"", "env", "/bin/bash")]
+    [InlineData("nohup bash -lc \"git status\"", "nohup bash", "/work")]
+    [InlineData("timeout 5 bash -lc \"git status\"", "timeout", "/work")]
+    [InlineData("nice -n 5 bash -lc \"git status\"", "nice", "/work")]
+    public void ExtractCandidates_retains_prefix_executable(
+        string command,
+        string expectedPrefix,
+        string expectedDirectory)
+    {
+        var candidates = _matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            Args(command, "/work"));
+
+        Assert.Contains(candidates, candidate =>
+            candidate.Verb == expectedPrefix && candidate.Directory == expectedDirectory);
+        Assert.Contains(candidates, candidate =>
+            candidate.Verb == "git status" && candidate.Directory == "/work");
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void Redirect_to_symlink_target_fails_closed()
+    {
+        var root = Path.Combine(CanonicalTemporaryDirectory(), $"netclaw-redirect-symlink-{Guid.NewGuid():N}");
+        var projectDirectory = Path.Combine(root, "project");
+        var externalDirectory = Path.Combine(root, "external");
+        var externalFile = Path.Combine(externalDirectory, "result.log");
+        var redirectTarget = Path.Combine(projectDirectory, "result.log");
+        Directory.CreateDirectory(projectDirectory);
+        Directory.CreateDirectory(externalDirectory);
+        File.WriteAllText(externalFile, "external");
+        File.CreateSymbolicLink(redirectTarget, externalFile);
+
+        try
+        {
+            var arguments = Args("git status > result.log", projectDirectory);
+
+            Assert.Empty(_matcher.ExtractCandidates(
+                new ToolName("shell_execute"),
+                arguments));
+            Assert.True(_matcher.IsMessy(
+                new ToolName("shell_execute"),
+                arguments));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
@@ -1320,7 +1614,7 @@ public sealed class ShellApprovalMatcherPathExtractionTests
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
     public void ExtractCandidates_uses_redirect_target_and_invocation_working_directory()
     {
-        var workingDirectory = Path.Combine(Path.GetTempPath(), $"netclaw-redirect-{Guid.NewGuid():N}");
+        var workingDirectory = Path.Combine(CanonicalTemporaryDirectory(), $"netclaw-redirect-{Guid.NewGuid():N}");
         var candidates = _matcher.ExtractCandidates(
             new ToolName("shell_execute"),
             new Dictionary<string, object?>
@@ -1331,6 +1625,98 @@ public sealed class ShellApprovalMatcherPathExtractionTests
 
         Assert.Contains(candidates, candidate =>
             candidate.Verb == "echo" && candidate.Directory == workingDirectory);
+    }
+
+    [SlopwatchSuppress("SW001", "This theory verifies POSIX null device behavior, which does not apply to the Windows shell parser.")]
+    [Theory(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    [InlineData("ls -la 2>/dev/null", "ls")]
+    [InlineData("ls -la 2>/dev/./null", "ls")]
+    [InlineData("cat </dev/null", "cat")]
+    public void ExtractCandidates_ignores_resolved_posix_null_device_redirect(
+        string command,
+        string expectedVerb)
+    {
+        var candidates = _matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            Args(command));
+
+        var candidate = Assert.Single(candidates);
+        Assert.Equal(expectedVerb, candidate.Verb);
+        Assert.Null(candidate.Directory);
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void ExtractCandidates_uses_invocation_directory_after_null_device_redirect()
+    {
+        const string workingDirectory = "/home/user/repos/demo";
+        var candidates = _matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            Args("tmux ls 2>/dev/null", workingDirectory));
+
+        var candidate = Assert.Single(candidates);
+        Assert.Equal("tmux ls", candidate.Verb);
+        Assert.Equal(workingDirectory, candidate.Directory);
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void ExtractCandidates_keeps_other_redirect_scope_after_null_device_redirect()
+    {
+        var candidates = _matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            Args(
+                "tmux ls 2>/dev/null >/netclaw-approval-external/netclaw-output.txt",
+                "/work"));
+
+        var candidate = Assert.Single(candidates);
+        Assert.Equal("tmux ls", candidate.Verb);
+        Assert.Equal("/netclaw-approval-external", candidate.Directory);
+    }
+
+    [SlopwatchSuppress("SW001", "This theory verifies POSIX null device lookalikes, which do not apply to the Windows shell parser.")]
+    [Theory(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    [InlineData("ls -la 2>/dev/nul")]
+    [InlineData("ls -la 2>/dev/null.backup")]
+    public void ExtractCandidates_does_not_generalize_posix_null_device_exception(string command)
+    {
+        var candidates = _matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            Args(command));
+
+        var candidate = Assert.Single(candidates);
+        Assert.Equal("ls", candidate.Verb);
+        Assert.Equal("/dev", candidate.Directory);
+    }
+
+    [SlopwatchSuppress("SW001", "This test verifies POSIX symlink redirect behavior, which does not apply to the Windows shell parser.")]
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void ExtractCandidates_rejects_redirect_through_symlink_directory()
+    {
+        var root = Path.Combine(
+            CanonicalTemporaryDirectory(),
+            $"netclaw-redirect-parent-symlink-{Guid.NewGuid():N}");
+        var workingDirectory = Path.Combine(root, "project");
+        var externalDirectory = Path.Combine(root, "external");
+        var redirectDirectory = Path.Combine(workingDirectory, "output");
+        Directory.CreateDirectory(workingDirectory);
+        Directory.CreateDirectory(externalDirectory);
+        Directory.CreateSymbolicLink(redirectDirectory, externalDirectory);
+
+        try
+        {
+            var arguments = Args("echo hello > output/result.txt", workingDirectory);
+
+            Assert.Empty(_matcher.ExtractCandidates(
+                new ToolName("shell_execute"),
+                arguments));
+            Assert.True(_matcher.IsMessy(
+                new ToolName("shell_execute"),
+                arguments));
+        }
+        finally
+        {
+            Directory.Delete(redirectDirectory);
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
@@ -1358,14 +1744,10 @@ public sealed class ShellApprovalMatcherPathExtractionTests
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
-    public void ExtractCandidates_bare_numeric_operand_is_not_a_path_scope()
+    public void ExtractCandidates_bare_numeric_operand_uses_command_cwd()
     {
-        // Regression for #1795: `head -c 2000` treats the bare numeric
-        // operand `2000` as a path arg (slash-free token branch of
-        // IsAuthorizationPathArg) and resolves it relative to cwd, producing
-        // the phantom scope `/cwd/2000`. `head -c 2000` touches no filesystem
-        // path; head is a read-only verb with no path argument, so its
-        // candidate must carry Directory == null (like `git status`).
+        // The #1795 guard removes the false `/cwd/2000` path scope.
+        // The v0.3 occurrence still supplies the command cwd for a scoped grant.
         var candidates = _matcher.ExtractCandidates(
             new ToolName("shell_execute"),
             new Dictionary<string, object?>
@@ -1376,7 +1758,7 @@ public sealed class ShellApprovalMatcherPathExtractionTests
 
         var headCandidate = Assert.Single(candidates);
         Assert.Equal("head", headCandidate.Verb);
-        Assert.Null(headCandidate.Directory);
+        Assert.Equal("/home/user/repos/demo", headCandidate.Directory);
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
@@ -1418,11 +1800,10 @@ public sealed class ShellApprovalMatcherPathExtractionTests
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
-    public void ExtractCandidates_bare_numeric_flag_value_is_not_a_path_scope()
+    public void ExtractCandidates_bare_numeric_flag_value_uses_command_cwd()
     {
-        // Regression for #1795: `head -n 20` has a bare numeric operand `20`.
-        // A number is not a path, so no scope forms. The candidate must carry
-        // Directory == null.
+        // The #1795 guard removes the false `/cwd/20` path scope.
+        // The v0.3 occurrence still supplies the command cwd for a scoped grant.
         var candidates = _matcher.ExtractCandidates(
             new ToolName("shell_execute"),
             new Dictionary<string, object?>
@@ -1433,7 +1814,7 @@ public sealed class ShellApprovalMatcherPathExtractionTests
 
         var headCandidate = Assert.Single(candidates);
         Assert.Equal("head", headCandidate.Verb);
-        Assert.Null(headCandidate.Directory);
+        Assert.Equal("/home/user/repos/demo", headCandidate.Directory);
     }
 
     [SlopwatchSuppress("SW001", "This test verifies Bash symlink path behavior, which does not apply to the Windows shell parser.")]

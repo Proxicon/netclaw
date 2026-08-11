@@ -1,4 +1,4 @@
-﻿// -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // <copyright file="IToolApprovalService.cs" company="Petabridge, LLC">
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
@@ -65,7 +65,19 @@ public readonly record struct ToolApprovalSessionId(string Value)
 
 public sealed record ToolApprovalCheckResult(
     IReadOnlyList<string> UnapprovedPatterns,
-    IReadOnlyList<ToolApprovalMatch> ApprovedMatches);
+    IReadOnlyList<ToolApprovalMatch> ApprovedMatches)
+{
+    /// <summary>
+    /// Gets one ordered disposition for each checked candidate. A null value
+    /// means the approval service implements the earlier aggregate result.
+    /// Callers must retain the full prompt candidate set in that case.
+    /// </summary>
+    public IReadOnlyList<ToolApprovalCandidateCheck>? CandidateChecks { get; init; }
+}
+
+public sealed record ToolApprovalCandidateCheck(
+    ApprovalCandidate Candidate,
+    ToolApprovalMatch? ApprovedMatch);
 
 public sealed record ToolApprovalMatch(
     string Pattern,

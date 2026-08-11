@@ -157,7 +157,15 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         var sw = Stopwatch.StartNew();
         try
         {
-            var result = await tool.ExecuteAsync(toolCall.Arguments, context.Invocation, ct);
+            var result = tool is ShellTool shellTool
+                         && _policy.TryTakeAuthorizedShellAnalysis(context, out var shellAnalysis)
+                         && shellAnalysis is not null
+                ? await shellTool.ExecuteAuthorizedAsync(
+                    toolCall.Arguments,
+                    context.Invocation,
+                    shellAnalysis,
+                    ct)
+                : await tool.ExecuteAsync(toolCall.Arguments, context.Invocation, ct);
 
             var redacted = SecretOutputRedactor.Redact(result);
 
@@ -232,8 +240,17 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         // before the first item is produced; the tool-execution pipeline handles
         // those exactly as it does for the non-streaming path.
         var tool = await GetAuthorizedToolAsync(toolCall, context, ct);
+        var updates = tool is ShellTool shellTool
+                      && _policy.TryTakeAuthorizedShellAnalysis(context, out var shellAnalysis)
+                      && shellAnalysis is not null
+            ? shellTool.ExecuteAuthorizedStreamAsync(
+                toolCall.Arguments,
+                context.Invocation,
+                shellAnalysis,
+                ct)
+            : tool.ExecuteStreamAsync(toolCall.Arguments, context.Invocation, ct);
         var sw = Stopwatch.StartNew();
-        await foreach (var update in tool.ExecuteStreamAsync(toolCall.Arguments, context.Invocation, ct))
+        await foreach (var update in updates)
         {
             switch (update)
             {
@@ -352,17 +369,42 @@ public sealed class DispatchingToolExecutor : IToolExecutor
                         context.Approval.Cwd,
                         ct);
                     approvalMatches = approvalCheck.ApprovedMatches;
+                    var hasExactCandidateChecks = TryGetExactUnapprovedCandidates(
+                        approvalCheck,
+                        candidatesForCheck,
+                        out var unapprovedCandidates);
+                    var hasInconsistentCandidateChecks = approvalCheck.CandidateChecks is not null
+                                                         && !hasExactCandidateChecks;
 
-                    if (approvalCheck.UnapprovedPatterns.Count == 0)
+                    if (approvalCheck.UnapprovedPatterns.Count == 0
+                        && !hasInconsistentCandidateChecks)
                     {
                         context.Approval.ApplyDecision(
                             "PreviouslyApproved",
                             FormatApprovalMatches(approvalCheck.ApprovedMatches));
                     }
 
-                    accessDecision = approvalCheck.UnapprovedPatterns.Count == 0
-                        ? ToolAccessDecision.Allow(ToolAllowReason.StoredApproval)
-                        : ToolAccessDecision.RequiresApproval(approvalContext);
+                    if (approvalCheck.UnapprovedPatterns.Count == 0
+                        && !hasInconsistentCandidateChecks)
+                    {
+                        accessDecision = ToolAccessDecision.Allow(ToolAllowReason.StoredApproval);
+                    }
+                    else
+                    {
+                        // New approval services return exact candidate occurrences.
+                        // An older implementation can only return verb strings, so
+                        // keep the broader context instead of guessing which scoped
+                        // candidate lacks approval.
+                        var promptContext = hasExactCandidateChecks
+                            && unapprovedCandidates.Count > 0
+                            && string.Equals(tool.Name, ShellTool.ToolName, StringComparison.Ordinal)
+                                ? ToolAccessPolicy.NarrowShellApprovalContext(
+                                    approvalContext,
+                                    unapprovedCandidates,
+                                    context.SessionDirectory)
+                                : approvalContext;
+                        accessDecision = ToolAccessDecision.RequiresApproval(promptContext);
+                    }
                 }
             }
         }
@@ -428,6 +470,48 @@ public sealed class DispatchingToolExecutor : IToolExecutor
             approvalMatches);
     }
 
+    private static bool TryGetExactUnapprovedCandidates(
+        ToolApprovalCheckResult result,
+        IReadOnlyList<ApprovalCandidate> checkedCandidates,
+        out IReadOnlyList<ApprovalCandidate> unapprovedCandidates)
+    {
+        unapprovedCandidates = [];
+        if (result.CandidateChecks is not { } candidateChecks
+            || candidateChecks.Count != checkedCandidates.Count)
+        {
+            return false;
+        }
+
+        var exactUnapprovedCandidates = new List<ApprovalCandidate>();
+        var exactUnapprovedPatterns = new List<string>();
+        var exactApprovedMatches = new List<ToolApprovalMatch>();
+        for (var index = 0; index < candidateChecks.Count; index++)
+        {
+            var check = candidateChecks[index];
+            if (check.Candidate != checkedCandidates[index])
+                return false;
+
+            if (check.ApprovedMatch is { } approvedMatch)
+                exactApprovedMatches.Add(approvedMatch);
+            else
+            {
+                exactUnapprovedCandidates.Add(check.Candidate);
+                exactUnapprovedPatterns.Add(check.Candidate.Verb);
+            }
+        }
+
+        if (!exactUnapprovedPatterns.SequenceEqual(
+                result.UnapprovedPatterns,
+                StringComparer.OrdinalIgnoreCase)
+            || !exactApprovedMatches.SequenceEqual(result.ApprovedMatches))
+        {
+            return false;
+        }
+
+        unapprovedCandidates = exactUnapprovedCandidates;
+        return true;
+    }
+
     private void LogAuthorizationDecision(string toolName, ToolAuthorizationDecision decision)
     {
         switch (decision.Outcome)
@@ -475,32 +559,17 @@ public sealed class DispatchingToolExecutor : IToolExecutor
         if (approvalContext is null)
             return false;
 
-        // Tool-name match is required for any one-time bypass — without it
-        // we could never tell which tool the grant applies to.
-        if (!string.IsNullOrEmpty(context.Approval.OneTimeApprovedToolName)
-            && !string.Equals(context.Approval.OneTimeApprovedToolName, toolCall.Name, StringComparison.Ordinal))
+        if (string.IsNullOrEmpty(context.Approval.OneTimeApprovedToolName)
+            || !string.Equals(context.Approval.OneTimeApprovedToolName, toolCall.Name, StringComparison.Ordinal))
             return false;
 
-        // By this point: either OneTimeApprovedToolName is empty (no
-        // bypass active), or it matched toolCall.Name above. Messy commands
-        // have no extractable patterns, so an active per-tool ApprovedOnce
-        // bypass is the only signal we can use — without this branch a
-        // retry would hit the empty-patterns guard below and throw
-        // ToolApprovalRequiredException. The pipeline clears
-        // OneTimeApprovedToolName after the retry, so the bypass cannot
-        // leak into a subsequent call.
-        if (approvalContext.IsMessy && !string.IsNullOrEmpty(context.Approval.OneTimeApprovedToolName))
-            return true;
-
-        if (context.Approval.OneTimeApprovedPatterns.Count == 0)
-            return false;
-
-        if (approvalContext.Patterns.Count == 0)
-            return false;
-
-        if (string.IsNullOrEmpty(context.Approval.OneTimeApprovedToolName))
-            return false;
-
-        return approvalContext.Patterns.All(pattern => context.Approval.OneTimeApprovedPatterns.Contains(pattern));
+        // Patterns bind the authored approval units. Candidate keys bind the
+        // filtered verb and effective-directory set that the user approved.
+        // Exact equality forces a new prompt when a formerly safe candidate
+        // becomes unsafe before the retry, for example after a symlink swap.
+        // An unchanged messy command has an empty key set on both attempts,
+        // while a clean-to-messy transition cannot match its original keys.
+        return context.Approval.OneTimeApprovedPatterns.SetEquals(
+            OneTimeApprovalKeys.Create(approvalContext));
     }
 }

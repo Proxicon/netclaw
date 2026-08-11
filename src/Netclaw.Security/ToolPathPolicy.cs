@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Text;
+using ShellSyntaxTree;
 
 namespace Netclaw.Security;
 
@@ -22,13 +23,23 @@ namespace Netclaw.Security;
 /// </remarks>
 public sealed class ToolPathPolicy
 {
+    private readonly ShellCommandAnalyzer _analyzer;
     private readonly HashSet<string> _writeDeniedPaths;
     private readonly HashSet<string> _readDeniedPaths;
     private readonly HashSet<string> _shellDeniedPaths;
     private readonly HashSet<string> _commandIndicators;
 
     public ToolPathPolicy(IEnumerable<string> deniedPaths)
+        : this(ShellExecutionEnvironmentDefaults.Bash, deniedPaths)
     {
+    }
+
+    public ToolPathPolicy(
+        ShellExecutionEnvironment environment,
+        IEnumerable<string> deniedPaths)
+    {
+        Environment = environment ?? throw new ArgumentNullException(nameof(environment));
+        _analyzer = new ShellCommandAnalyzer(environment);
         var materialized = deniedPaths.ToList();
         _writeDeniedPaths = BuildNormalizedSet(materialized);
         _readDeniedPaths = _writeDeniedPaths;
@@ -40,13 +51,30 @@ public sealed class ToolPathPolicy
         IEnumerable<string> writeDeniedPaths,
         IEnumerable<string> readDeniedPaths,
         IEnumerable<string> shellIndicatorPaths)
+        : this(
+            ShellExecutionEnvironmentDefaults.Bash,
+            writeDeniedPaths,
+            readDeniedPaths,
+            shellIndicatorPaths)
     {
+    }
+
+    public ToolPathPolicy(
+        ShellExecutionEnvironment environment,
+        IEnumerable<string> writeDeniedPaths,
+        IEnumerable<string> readDeniedPaths,
+        IEnumerable<string> shellIndicatorPaths)
+    {
+        Environment = environment ?? throw new ArgumentNullException(nameof(environment));
+        _analyzer = new ShellCommandAnalyzer(environment);
         _writeDeniedPaths = BuildNormalizedSet(writeDeniedPaths);
         _readDeniedPaths = BuildNormalizedSet(readDeniedPaths);
         var shellList = shellIndicatorPaths.ToList();
         _shellDeniedPaths = BuildNormalizedSet(shellList);
         _commandIndicators = BuildCommandIndicators(shellList);
     }
+
+    public ShellExecutionEnvironment Environment { get; }
 
     private static HashSet<string> BuildNormalizedSet(IEnumerable<string> paths)
     {
@@ -173,6 +201,21 @@ public sealed class ToolPathPolicy
         if (string.IsNullOrWhiteSpace(command))
             return false;
 
+        return CommandReferencesDeniedPath(
+            _analyzer.Analyze(command, workingDirectory));
+    }
+
+    public bool CommandReferencesDeniedPath(ShellCommandAnalysis analysis)
+    {
+        ArgumentNullException.ThrowIfNull(analysis);
+        if (!ReferenceEquals(analysis.Environment, Environment))
+            throw new ArgumentException(
+                "The command analysis belongs to another shell environment.",
+                nameof(analysis));
+
+        var command = analysis.Source;
+        var workingDirectory = analysis.WorkingDirectory;
+
         var tokens = ShellTokenizer.Tokenize(command).ToList();
         var slashCommand = command.Replace('\\', '/');
         foreach (var indicator in _commandIndicators)
@@ -181,12 +224,20 @@ public sealed class ToolPathPolicy
                 return true;
         }
 
+        if (StructuredAnalysisReferencesDeniedPath(analysis))
+        {
+            return true;
+        }
+
         foreach (var token in tokens)
         {
             if (!LooksLikePath(token))
                 continue;
 
-            var normalized = ShellTokenizer.NormalizePathToken(token, workingDirectory);
+            var normalized = ShellTokenizer.NormalizePathToken(
+                token,
+                workingDirectory,
+                Environment.PathStyle);
             if (normalized is not null && IsDeniedNormalized(normalized, _shellDeniedPaths))
             {
                 return true;
@@ -234,6 +285,63 @@ public sealed class ToolPathPolicy
 
         return false;
     }
+
+    private bool StructuredAnalysisReferencesDeniedPath(
+        ShellCommandAnalysis analysis)
+    {
+        if (analysis.Failure != ShellAnalysisFailure.None)
+            return false;
+
+        foreach (var occurrence in analysis.Commands)
+        {
+            foreach (var argument in occurrence.Clause.Args)
+            {
+                if (argument.IsPath
+                    && !string.IsNullOrWhiteSpace(argument.Resolved)
+                    && IsDeniedAgainst(argument.Resolved, _shellDeniedPaths))
+                {
+                    return true;
+                }
+            }
+
+            foreach (var effective in occurrence.Arguments)
+            {
+                if (!effective.Element.IsPath)
+                {
+                    continue;
+                }
+
+                if (DomainReferencesDeniedPath(effective.Value))
+                    return true;
+            }
+
+            foreach (var redirect in occurrence.Redirects)
+            {
+                if (redirect is FileRedirectAnalysis file
+                    && DomainReferencesDeniedPath(file.Target))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool DomainReferencesDeniedPath(ShellValueDomain domain)
+        => domain switch
+        {
+            ShellValueDomain.Exact exact =>
+                !string.IsNullOrWhiteSpace(exact.Value)
+                && IsDeniedAgainst(exact.Value, _shellDeniedPaths),
+            ShellValueDomain.FiniteSet finite => finite.Values.Any(value =>
+                !string.IsNullOrWhiteSpace(value)
+                && IsDeniedAgainst(value, _shellDeniedPaths)),
+            ShellValueDomain.PathPattern pattern =>
+                !string.IsNullOrWhiteSpace(pattern.CoveringDirectory)
+                && IsDeniedAgainst(pattern.CoveringDirectory, _shellDeniedPaths),
+            _ => false
+        };
 
     private static bool ContainsProtectedPathHint(string slashCommand)
     {

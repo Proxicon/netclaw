@@ -3,7 +3,7 @@ name: netclaw-operations
 description: "REQUIRED when the user asks about scheduling, reminders, cron jobs, timers, background jobs, diagnostics, troubleshooting, MCP tools, daemon health, identity updates, or Netclaw capabilities and self-maintenance."
 metadata:
   author: netclaw
-  version: "2.42.0"
+  version: "2.47.0"
 ---
 
 # Netclaw Operations
@@ -43,6 +43,13 @@ a reference file — load the one matching the user's intent with
 allowed roots); the project's identity file (`.netclaw/AGENTS.md`, `CLAUDE.md`,
 `AGENTS.md`, or `CONTEXT.md`) then loads into the prompt. Full rules:
 `skill_read_resource('netclaw-operations', 'references/projects.md')`.
+
+Use the `shell_execute` `WorkingDirectory` argument for one command in another
+directory. Do not add an inline `cd` unless changing directory is itself the
+behavior the user asked you to run or test. Use
+`set_working_directory` when later commands and subagents need the same project
+root. Do not repeat it when `[working-context]` already names that project. If
+the tool rejects a path, correct the path and retry it before work continues.
 
 For Team and Personal sessions, `[working-context]` is refreshed at the start
 of each new turn. In a Git project it includes the active worktree, branch,
@@ -104,6 +111,7 @@ view inline plus a pointer to the full output — not the whole thing:
   `shell_execute` to get around it — that just spills again.
 - **`background_job`** output goes to `~/.netclaw/jobs/{id}/output.log` (bounded);
   `check_background_job` returns a tail, and you can `file_read`/`grep` the log for the rest.
+  Netclaw deletes a terminal job's definition and logs 24 hours after completion.
 
 Reading a targeted range or grepping is always cheaper than re-running a command or
 re-reading a whole file. Secret-bearing values are redacted from all tool output.
@@ -113,6 +121,15 @@ re-reading a whole file. Secret-bearing values are redacted from all tool output
 Only a core toolset is always loaded. Use `search_tools(query)` to find additional
 or MCP tools by capability before concluding a tool doesn't exist. Full guidance:
 `skill_read_resource('netclaw-operations', 'references/tools.md')`.
+
+MCP servers can also supply workflow skills. These skills use names such as
+`mcp__gigatron__month_over_month`. Review the normal skill index first. Use
+`skill_load(name, arguments)` when one of these workflows matches the request.
+
+The argument hint marks values that the MCP server requires. Supply those
+values exactly. Do not invent a missing value. A loaded prompt can name MCP
+tools, but it does not grant them. Use the normal `search_tools` and
+`load_tool` flow for each required tool.
 
 ## MCP OAuth
 
