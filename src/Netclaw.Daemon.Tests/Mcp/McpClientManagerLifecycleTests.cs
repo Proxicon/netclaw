@@ -7,11 +7,14 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using ModelContextProtocol;
 using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using Netclaw.Actors.Skills;
 using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
 using Netclaw.Configuration.Secrets;
@@ -514,6 +517,9 @@ public sealed class McpClientManagerLifecycleTests
                 NullLogger<McpOAuthCredentialStore>.Instance);
             _flowBroker = new McpOAuthFlowBroker(timeProvider, CancellationToken.None);
             Registry = new ToolRegistry();
+            var dependencies = McpManagerTestDependencies.Create();
+            SkillRegistry = dependencies.SkillRegistry;
+            SkillIndex = dependencies.SkillIndex;
             Logger = new RecordingLogger<McpClientManager>();
             Manager = new McpClientManager(
                 new Dictionary<string, McpServerEntry>
@@ -526,7 +532,10 @@ public sealed class McpClientManagerLifecycleTests
                     },
                 },
                 Registry,
-                new ToolConfig(),
+                dependencies.SkillRegistry,
+                dependencies.SkillIndexPublisher,
+                dependencies.ToolAccessPolicy,
+                dependencies.ToolConfig,
                 credentials,
                 McpOAuthTestDoubles.UnusedRegistrar(),
                 _flowBroker,
@@ -541,6 +550,10 @@ public sealed class McpClientManagerLifecycleTests
         public McpClientManager Manager { get; }
 
         public ToolRegistry Registry { get; }
+
+        public SkillRegistry SkillRegistry { get; }
+
+        public SkillIndexContextLayer SkillIndex { get; }
 
         public RecordingLogger<McpClientManager> Logger { get; }
 
@@ -591,6 +604,10 @@ public sealed class McpClientManagerLifecycleTests
                 throwOnError: true)!;
             var client = (McpClient)RuntimeHelpers.GetUninitializedObject(implementationType);
             plan.Client = client;
+            plan.NotificationHandlers = options.Handlers.NotificationHandlers?.ToDictionary(
+                static pair => pair.Key,
+                static pair => pair.Value,
+                StringComparer.Ordinal) ?? new Dictionary<string, Func<JsonRpcNotification, CancellationToken, ValueTask>>();
             _clients[client] = plan;
             Interlocked.Increment(ref _createCount);
             plan.Created.TrySetResult();
@@ -606,18 +623,66 @@ public sealed class McpClientManagerLifecycleTests
                 await plan.Initialize(cancellationToken);
 
             var functions = BuildFunctions(plan);
-            return new McpClientInitialization(functions.Values.ToList());
+            return new McpClientInitialization(functions.Values.ToList(), plan.Prompts);
         }
 
-        public ValueTask<IReadOnlyList<AIFunction>> ListToolsAsync(
+        public McpCatalogNotificationProfile GetCatalogNotificationProfile(McpClient client)
+            => _clients[client].NotificationProfile;
+
+        public Task ListenForCatalogChangesAsync(
+            McpClient client,
+            RequestId requestId,
+            SubscriptionsListenNotifications notifications,
+            CancellationToken cancellationToken)
+        {
+            var plan = _clients[client];
+            Interlocked.Increment(ref plan.ListenCountStorage);
+            plan.ListenRequestId = requestId;
+            plan.ListenNotifications = notifications;
+            plan.ListenStarted.TrySetResult();
+            return plan.Listen is null
+                ? Task.CompletedTask
+                : plan.Listen(cancellationToken);
+        }
+
+        public async ValueTask<IReadOnlyList<AIFunction>> ListToolsAsync(
             McpClient client,
             CancellationToken cancellationToken)
         {
             var plan = _clients[client];
-            Interlocked.Increment(ref plan.RefreshCountStorage);
+            var refreshCount = Interlocked.Increment(ref plan.RefreshCountStorage);
+            if (plan.BeforeListTools is not null)
+                await plan.BeforeListTools(refreshCount, cancellationToken);
             if (plan.ListFailure is not null)
-                return ValueTask.FromException<IReadOnlyList<AIFunction>>(plan.ListFailure);
-            return ValueTask.FromResult<IReadOnlyList<AIFunction>>(BuildFunctions(plan).Values.ToList());
+                throw plan.ListFailure;
+            return BuildFunctions(plan).Values.ToList();
+        }
+
+        public ValueTask<IReadOnlyList<Prompt>> ListPromptsAsync(
+            McpClient client,
+            CancellationToken cancellationToken)
+        {
+            var plan = _clients[client];
+            Interlocked.Increment(ref plan.PromptRefreshCountStorage);
+            if (plan.PromptListFailure is not null)
+                return ValueTask.FromException<IReadOnlyList<Prompt>>(plan.PromptListFailure);
+            return ValueTask.FromResult<IReadOnlyList<Prompt>>(plan.Prompts);
+        }
+
+        public ValueTask<GetPromptResult> GetPromptAsync(
+            McpClient client,
+            string promptName,
+            IReadOnlyDictionary<string, string> arguments,
+            CancellationToken cancellationToken)
+        {
+            var plan = _clients[client];
+            Interlocked.Increment(ref plan.PromptInvocationCountStorage);
+            plan.LastPromptName = promptName;
+            plan.LastPromptArguments = new Dictionary<string, string>(arguments, StringComparer.Ordinal);
+            return plan.GetPromptResult is null
+                ? ValueTask.FromException<GetPromptResult>(
+                    new InvalidOperationException("The controlled prompt result is not configured."))
+                : ValueTask.FromResult(plan.GetPromptResult);
         }
 
         private IReadOnlyDictionary<string, AIFunction> BuildFunctions(ClientPlan plan)
@@ -660,18 +725,45 @@ public sealed class McpClientManagerLifecycleTests
     {
         public string[] ToolNames { get; set; } = toolNames;
 
+        public IReadOnlyList<Prompt> Prompts { get; set; } = [];
+
+        public GetPromptResult? GetPromptResult { get; set; }
+
         public Func<CancellationToken, Task>? Initialize { get; init; }
 
         public Func<int, CancellationToken, Task<object?>>? Invoke { get; init; }
+
+        public Func<CancellationToken, Task>? Listen { get; init; }
+
+        public Func<int, CancellationToken, Task>? BeforeListTools { get; init; }
+
+        public McpCatalogNotificationProfile NotificationProfile { get; init; } =
+            new("2025-11-25", false, false);
 
         public Exception? DisposeFailure { get; init; }
 
         public Exception? ListFailure { get; set; }
 
+        public Exception? PromptListFailure { get; set; }
+
+        public string? LastPromptName { get; set; }
+
+        public IReadOnlyDictionary<string, string>? LastPromptArguments { get; set; }
+
+        public IReadOnlyDictionary<string, Func<JsonRpcNotification, CancellationToken, ValueTask>> NotificationHandlers { get; set; } =
+            new Dictionary<string, Func<JsonRpcNotification, CancellationToken, ValueTask>>();
+
+        public RequestId ListenRequestId { get; set; }
+
+        public SubscriptionsListenNotifications? ListenNotifications { get; set; }
+
         public TaskCompletionSource Created { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TaskCompletionSource Disposed { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ListenStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public McpClient? Client { get; set; }
@@ -682,11 +774,34 @@ public sealed class McpClientManagerLifecycleTests
 
         public int RefreshCountStorage;
 
+        public int PromptRefreshCountStorage;
+
+        public int PromptInvocationCountStorage;
+
+        public int ListenCountStorage;
+
         public int InvocationCount => Volatile.Read(ref InvocationCountStorage);
 
         public int DisposeCount => Volatile.Read(ref DisposeCountStorage);
 
         public int RefreshCount => Volatile.Read(ref RefreshCountStorage);
+
+        public int PromptRefreshCount => Volatile.Read(ref PromptRefreshCountStorage);
+
+        public int PromptInvocationCount => Volatile.Read(ref PromptInvocationCountStorage);
+
+        public int ListenCount => Volatile.Read(ref ListenCountStorage);
+
+        public ValueTask NotifyAsync(
+            string method,
+            JsonNode? parameters,
+            CancellationToken cancellationToken = default)
+        {
+            if (!NotificationHandlers.TryGetValue(method, out var handler))
+                throw new InvalidOperationException($"No notification handler is registered for '{method}'.");
+
+            return handler(new JsonRpcNotification { Method = method, Params = parameters }, cancellationToken);
+        }
     }
 
     private sealed class RecordingNotificationSink : IOperationalNotificationSink

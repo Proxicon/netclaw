@@ -31,6 +31,8 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
     private const string OtherSessionId = "signalr/other-session";
 
     private readonly string _rootDirectory;
+    private readonly string _projectDirectory;
+    private readonly string _externalDirectory;
     private readonly IActorRef _approvalActor;
     private readonly FunctionCallContent _toolCall;
     private readonly ToolExecutionContext _context;
@@ -38,6 +40,8 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
 
     private ShellApprovalHarness(
         string rootDirectory,
+        string projectDirectory,
+        string externalDirectory,
         IActorRef approvalActor,
         FunctionCallContent toolCall,
         ToolExecutionContext context,
@@ -45,6 +49,8 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
         CountingApprovalService approvalService)
     {
         _rootDirectory = rootDirectory;
+        _projectDirectory = projectDirectory;
+        _externalDirectory = externalDirectory;
         _approvalActor = approvalActor;
         _toolCall = toolCall;
         _context = context;
@@ -60,7 +66,7 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
         CancellationToken ct)
     {
         var rootDirectory = Path.Combine(
-            Path.GetTempPath(),
+            CanonicalTemporaryDirectory(),
             "netclaw-approval-matrix",
             Guid.NewGuid().ToString("N"));
         var projectDirectory = Path.Combine(rootDirectory, "project");
@@ -69,6 +75,18 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
         Directory.CreateDirectory(projectDirectory);
         Directory.CreateDirectory(sessionDirectory);
         Directory.CreateDirectory(externalDirectory);
+
+        var environment = testCase.Invocation.CreateEnvironment();
+        var approvalProjectDirectory = projectDirectory;
+        var approvalSessionDirectory = sessionDirectory;
+        var approvalExternalDirectory = externalDirectory;
+        if (environment.PathStyle == ShellPathStyle.Windows)
+        {
+            var windowsRoot = $"C:/netclaw-approval-matrix/{Guid.NewGuid():N}";
+            approvalProjectDirectory = $"{windowsRoot}/project";
+            approvalSessionDirectory = $"{windowsRoot}/session";
+            approvalExternalDirectory = $"{windowsRoot}/external";
+        }
 
         var store = new ToolApprovalStore(Path.Combine(rootDirectory, "tool-approvals.json"));
         var approvalActor = CreateApprovalActor(actorSystem, store);
@@ -85,7 +103,11 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
                 new ToolName(ShellTool.ToolName),
                 [seed.Pattern],
                 persistent: true,
-                ResolveDirectory(seed.Directory, projectDirectory, sessionDirectory, externalDirectory),
+                ResolveDirectory(
+                    seed.Directory,
+                    approvalProjectDirectory,
+                    approvalSessionDirectory,
+                    approvalExternalDirectory),
                 ct);
         }
 
@@ -110,12 +132,17 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
 
         var countingApprovalService = new CountingApprovalService(approvalService);
         var config = CreateConfig();
+        var commandPolicy = new ShellCommandPolicy(environment);
+        var deniedPaths = environment.Platform == ShellPlatform.Windows
+            ? new[] { @"C:\protected\config" }
+            : [];
+        var pathPolicy = new ToolPathPolicy(environment, deniedPaths);
         var registry = new ToolRegistry();
         registry.WithFirstPartyTools(
             config,
             new NetclawPaths(),
-            new ToolPathPolicy([]),
-            new ShellCommandPolicy());
+            pathPolicy,
+            commandPolicy);
 
         var policy = new ToolAccessPolicy(
             config,
@@ -124,19 +151,19 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
                 TrustAudience.Personal,
                 ShellExecutionMode.HostAllowed,
                 UsedStrictFallback: false),
-            shellCommandPolicy: new ShellCommandPolicy(),
-            toolPathPolicy: new ToolPathPolicy([]),
+            shellCommandPolicy: commandPolicy,
+            toolPathPolicy: pathPolicy,
             shellTrustZonePolicy: new ShellTrustZonePolicy(
                 config,
                 new NetclawPaths(rootDirectory, Path.Combine(rootDirectory, "workspaces"))),
-            safeVerbs: SafeVerbLoader.Load());
+            safeVerbs: SafeVerbLoader.Load(environment.Platform == ShellPlatform.Windows));
         var executor = new DispatchingToolExecutor(registry, policy, countingApprovalService);
 
         var workingDirectory = ResolveDirectory(
             testCase.Invocation.WorkingDirectory,
-            projectDirectory,
-            sessionDirectory,
-            externalDirectory);
+            approvalProjectDirectory,
+            approvalSessionDirectory,
+            approvalExternalDirectory);
         var arguments = workingDirectory is null
             ? ToolInput.Create("Command", testCase.Invocation.Command)
             : ToolInput.Create(
@@ -145,16 +172,18 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
         var toolCall = new FunctionCallContent(testCase.Id, ShellTool.ToolName, arguments);
         var context = TestToolExecutionContext.CreateBound(
             InvocationSessionId,
-            sessionDirectory,
+            approvalSessionDirectory,
             new TestToolExecutionContextOptions
             {
                 Audience = testCase.Invocation.Audience,
-                ProjectDirectory = projectDirectory,
+                ProjectDirectory = approvalProjectDirectory,
                 InteractiveApproval = TestToolExecutionContext.InteractiveApproval(testCase.Invocation.Interactive)
             });
 
         return new ShellApprovalHarness(
             rootDirectory,
+            projectDirectory,
+            externalDirectory,
             approvalActor,
             toolCall,
             context,
@@ -178,6 +207,32 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
                 .ToList());
     }
 
+    public Task<ToolAuthorizationDecision> EvaluateDecisionAsync(CancellationToken ct)
+        => _executor.EvaluateAuthorizationAsync(_toolCall, _context, ct);
+
+    public void SeedOneTimeApproval(ToolApprovalContext approvalContext)
+        => _context.Approval.SeedOneTimeApproval(
+            _toolCall.Name,
+            OneTimeApprovalKeys.Create(approvalContext));
+
+    public void ReplaceProjectDirectoryWithExternalSymlink(string relativeDirectory)
+    {
+        var path = Path.Combine(_projectDirectory, relativeDirectory);
+        Directory.CreateDirectory(path);
+        Directory.Delete(path);
+        Directory.CreateSymbolicLink(path, _externalDirectory);
+    }
+
+    public void CreateProjectDirectory(string relativeDirectory)
+        => Directory.CreateDirectory(Path.Combine(_projectDirectory, relativeDirectory));
+
+    public void CreateProjectFileSymlinkToExternalFile(string relativePath)
+    {
+        var externalFile = Path.Combine(_externalDirectory, "secret.txt");
+        File.WriteAllText(externalFile, "synthetic test data");
+        File.CreateSymbolicLink(Path.Combine(_projectDirectory, relativePath), externalFile);
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _approvalActor.GracefulStop(TimeSpan.FromSeconds(5));
@@ -191,6 +246,25 @@ internal sealed class ShellApprovalHarness : IAsyncDisposable
             ShellMode = ShellExecutionMode.HostAllowed,
             AudienceProfiles = ToolAudienceProfileDefaults.CreateProfilesForPosture(DeploymentPosture.Personal)
         };
+
+    private static string CanonicalTemporaryDirectory()
+    {
+        var fullPath = Path.GetFullPath(Path.GetTempPath());
+        var pathRoot = Path.GetPathRoot(fullPath)
+            ?? throw new InvalidOperationException("The temporary directory has no path root.");
+        var current = pathRoot;
+        var relative = fullPath[pathRoot.Length..];
+        foreach (var segment in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(current, segment);
+            current = new DirectoryInfo(candidate).ResolveLinkTarget(returnFinalTarget: true)?.FullName
+                ?? candidate;
+        }
+
+        return current;
+    }
 
     private static IActorRef CreateApprovalActor(ActorSystem actorSystem, ToolApprovalStore store)
         => actorSystem.ActorOf(

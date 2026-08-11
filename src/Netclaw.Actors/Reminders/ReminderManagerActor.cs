@@ -25,12 +25,6 @@ public sealed partial class ReminderManagerActor : ReceiveActor
     public const string EntityId = "manager";
 
     /// <summary>
-    /// Maximum number of concurrent reminder executions. Not configurable —
-    /// if we ever need to tune this, add a knob then.
-    /// </summary>
-    internal const int MaxConcurrentExecutions = 3;
-
-    /// <summary>
     /// Consecutive execution failures after which a reminder is auto-paused.
     /// Not configurable. Must stay strictly below Akka.Reminders'
     /// <c>MaxDeliveryAttempts</c> (default 10) so Netclaw's auto-pause fires
@@ -443,7 +437,6 @@ public sealed partial class ReminderManagerActor : ReceiveActor
     /// </summary>
     private async Task DeleteReminderInternalAsync(ReminderId id)
     {
-        _definitionStore.Delete(id);
         await CancelScheduleOnlyAsync(id);
         _skipCounts.Remove(id);
 
@@ -454,7 +447,11 @@ public sealed partial class ReminderManagerActor : ReceiveActor
         catch (Exception ex)
         {
             _log.Warning(ex, "Failed to delete history for reminder '{0}'", id.Value);
+            throw;
         }
+
+        // Delete the definition last so reconciliation can retry a partial cleanup.
+        _definitionStore.Delete(id);
     }
 
     private async Task<ReminderStateResponse> EnableReminderInternalAsync(ReminderId id)
@@ -603,20 +600,6 @@ public sealed partial class ReminderManagerActor : ReceiveActor
                 envelope,
                 nack: definition.Schedule.Type == ReminderScheduleType.OneShot || sameOccurrence,
                 "Another execution for this reminder is active.");
-            return;
-        }
-
-        if (_activeExecutions.Count >= MaxConcurrentExecutions)
-        {
-            _log.Info("Concurrency limit reached ({0}), settling blocked reminder '{1}'",
-                MaxConcurrentExecutions, reminderId.Value);
-            if (definition.Schedule.Type != ReminderScheduleType.OneShot)
-                RecordSkippedDuplicate(reminderId, definition.Title, "capacity");
-            await SettleBlockedOccurrenceAsync(
-                definition,
-                envelope,
-                nack: definition.Schedule.Type == ReminderScheduleType.OneShot,
-                "Reminder execution capacity is unavailable.");
             return;
         }
 
@@ -872,22 +855,7 @@ public sealed partial class ReminderManagerActor : ReceiveActor
         }
 
         if (definition is { Schedule.Type: ReminderScheduleType.OneShot })
-        {
-            try
-            {
-                _definitionStore.Save(definition with
-                {
-                    Enabled = false,
-                    ConsecutiveFailures = 0,
-                    TerminalOutcome = ReminderTerminalOutcome.Completed,
-                    UpdatedAtMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds()
-                });
-            }
-            catch (Exception ex)
-            {
-                _log.Error(ex, "Failed to save completed state for one-shot reminder '{0}'", outcome.Id.Value);
-            }
-        }
+            await DeleteReminderInternalAsync(outcome.Id);
 
         _log.Info("Reminder '{0}' execution completed successfully", outcome.Id.Value);
     }
@@ -1058,6 +1026,17 @@ public sealed partial class ReminderManagerActor : ReceiveActor
             var definitions = _definitionStore.List();
             var definitionsById = definitions.ToDictionary(d => d.Id.Value, StringComparer.Ordinal);
 
+            var deletedCompletedOneShots = 0;
+            foreach (var definition in definitions.Where(d =>
+                         !d.Enabled &&
+                         d.Schedule.Type == ReminderScheduleType.OneShot &&
+                         d.TerminalOutcome == ReminderTerminalOutcome.Completed))
+            {
+                await DeleteReminderInternalAsync(definition.Id);
+                definitionsById.Remove(definition.Id.Value);
+                deletedCompletedOneShots++;
+            }
+
             var cancelledOrphans = 0;
             foreach (var (id, _) in scheduled)
             {
@@ -1114,6 +1093,13 @@ public sealed partial class ReminderManagerActor : ReceiveActor
                 if (outcome is null)
                     continue;
 
+                if (outcome == ReminderTerminalOutcome.Completed)
+                {
+                    await DeleteReminderInternalAsync(definition.Id);
+                    deletedCompletedOneShots++;
+                    continue;
+                }
+
                 var terminalDefinition = definition with
                 {
                     Enabled = false,
@@ -1135,13 +1121,15 @@ public sealed partial class ReminderManagerActor : ReceiveActor
                 disabledExpired++;
             }
 
-            if (cancelledOrphans > 0 || restoredSchedules > 0 || softDeletedOneShots > 0 || disabledExpired > 0)
+            if (cancelledOrphans > 0 || restoredSchedules > 0 || softDeletedOneShots > 0
+                || disabledExpired > 0 || deletedCompletedOneShots > 0)
             {
-                _log.Info("Reminder reconcile complete: cancelled_orphans={0}, restored={1}, soft_deleted_oneshots={2}, disabled_expired={3}",
+                _log.Info("Reminder reconcile complete: cancelled_orphans={0}, restored={1}, soft_deleted_oneshots={2}, disabled_expired={3}, deleted_completed_oneshots={4}",
                     cancelledOrphans,
                     restoredSchedules,
                     softDeletedOneShots,
-                    disabledExpired);
+                    disabledExpired,
+                    deletedCompletedOneShots);
             }
 
             // Only ack external callers — skip Self.Tell from PreStart

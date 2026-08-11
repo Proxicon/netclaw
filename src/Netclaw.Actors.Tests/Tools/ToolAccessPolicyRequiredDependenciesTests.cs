@@ -8,6 +8,7 @@ using Netclaw.Configuration;
 using Netclaw.Security;
 using Netclaw.Tests.Utilities;
 using Netclaw.Tools;
+using ShellSyntaxTree;
 using Xunit;
 
 namespace Netclaw.Actors.Tests.Tools;
@@ -28,6 +29,8 @@ namespace Netclaw.Actors.Tests.Tools;
 /// </summary>
 public sealed class ToolAccessPolicyRequiredDependenciesTests
 {
+    public static bool IsPosix => !OperatingSystem.IsWindows();
+
     private static ToolConfig ShellConfig()
         => new() { ShellMode = ShellExecutionMode.HostAllowed };
 
@@ -81,5 +84,54 @@ public sealed class ToolAccessPolicyRequiredDependenciesTests
             ToolInput.Create("Command", $"cat {Path.Combine(otherRoot, "notes.txt")}"));
 
         Assert.NotEqual("shell_references_protected_path", otherDecision.DenyReason);
+    }
+
+    [Fact]
+    public void Protected_path_control_checks_native_power_shell_path()
+    {
+        var environment = ShellExecutionEnvironment.CreatePowerShell(
+            @"C:\Program Files\PowerShell\7\pwsh.exe",
+            PwshDialect.PowerShell7);
+        const string deniedRoot = @"C:\protected\config";
+        var commandPolicy = new ShellCommandPolicy(environment);
+        var pathPolicy = new ToolPathPolicy(environment, [deniedRoot]);
+        var policy = new ToolAccessPolicy(
+            ShellConfig(),
+            Defaults(),
+            commandPolicy,
+            pathPolicy);
+        var shellTool = new ShellTool(ShellConfig(), pathPolicy, commandPolicy);
+
+        var decision = policy.AuthorizeInvocation(
+            shellTool,
+            PersonalContext(),
+            ToolInput.Create("Command", @"Get-Content C:\protected\config\secret.txt"));
+
+        Assert.False(decision.Allowed);
+        Assert.Equal("shell_references_protected_path", decision.DenyReason);
+    }
+
+    [Fact]
+    public void Shell_authorization_captures_one_analysis_for_execution()
+    {
+        var environment = ShellExecutionEnvironment.CreateBash(ShellPlatform.Linux);
+        var commandPolicy = new ShellCommandPolicy(environment);
+        var pathPolicy = new ToolPathPolicy(environment, []);
+        var policy = new ToolAccessPolicy(
+            ShellConfig(),
+            Defaults(),
+            commandPolicy,
+            pathPolicy);
+        var shellTool = new ShellTool(ShellConfig(), pathPolicy, commandPolicy);
+        var context = PersonalContext();
+        var arguments = ToolInput.Create("Command", "git status");
+
+        _ = policy.AuthorizeInvocation(shellTool, context, arguments);
+
+        Assert.True(policy.TryTakeAuthorizedShellAnalysis(context, out var analysis));
+        Assert.NotNull(analysis);
+        Assert.Equal("git status", analysis.Source);
+        Assert.Equal(context.ResolveShellCwd(null), analysis.WorkingDirectory);
+        Assert.False(policy.TryTakeAuthorizedShellAnalysis(context, out _));
     }
 }

@@ -321,7 +321,7 @@ public class ReminderManagerActorTests : TestKit
     }
 
     [Fact]
-    public async Task Reconcile_retains_past_oneshot_without_durable_outcome()
+    public async Task Reconcile_deletes_completed_oneshot_and_retains_ambiguous_or_failed_oneshots()
     {
         var manager = await GetManagerAsync();
         var now = TimeProvider.System.GetUtcNow();
@@ -361,6 +361,23 @@ public class ReminderManagerActorTests : TestKit
         await historyStore.AppendAsync(
             zombie.Id,
             new HistoryRecord(now.AddMinutes(-30), false, 100, "session-1", "recovery failed"));
+        var completed = zombie with
+        {
+            Id = new ReminderId("completed-old"),
+            Enabled = false,
+            TerminalOutcome = ReminderTerminalOutcome.Completed
+        };
+        var failed = zombie with
+        {
+            Id = new ReminderId("failed-old"),
+            Enabled = false,
+            ConsecutiveFailures = ReminderManagerActor.FailurePauseThreshold,
+            TerminalOutcome = ReminderTerminalOutcome.Failed
+        };
+        _definitionStore.Save(completed);
+        _definitionStore.Save(failed);
+        await historyStore.AppendAsync(completed.Id, new HistoryRecord(now, true, 100, "session-1", null));
+        await historyStore.AppendAsync(failed.Id, new HistoryRecord(now, false, 100, "session-1", "failed"));
 
         // Confirm it shows up as scheduled
         var healthBefore = await manager.Ask<ReminderHealthResponse>(
@@ -379,6 +396,10 @@ public class ReminderManagerActorTests : TestKit
         Assert.True(afterReconcile!.Enabled);
         Assert.Null(afterReconcile.TerminalOutcome);
         Assert.Single(await historyStore.ReadAsync(zombie.Id, 10));
+        Assert.Null(_definitionStore.Get(completed.Id));
+        Assert.Empty(await historyStore.ReadAsync(completed.Id, 10));
+        Assert.NotNull(_definitionStore.Get(failed.Id));
+        Assert.Single(await historyStore.ReadAsync(failed.Id, 10));
     }
 
     [Theory]
@@ -583,9 +604,18 @@ public class ReminderManagerActorTests : TestKit
             TimeSpan.FromSeconds(30),
             TestContext.Current.CancellationToken);
 
-        Assert.Contains(sink.Alerts, alert =>
-            alert.Category == AlertType.ReminderSchemaDropped
-            && alert.Summary.Contains(reminderId, StringComparison.Ordinal));
+        // Keep the Ask as the startup barrier (it absorbs dispatcher
+        // scheduling latency under parallel CI load), but poll the sink
+        // instead of trusting a one-shot post-Ask read: the health reply
+        // proves PreStart completed, not that the alert reached the sink.
+        // This test has flaked on CI twice (#1405, #1844) with an empty
+        // sink immediately after a successful Ask reply.
+        await AwaitAssertAsync(() =>
+        {
+            Assert.Contains(sink.Alerts, alert =>
+                alert.Category == AlertType.ReminderSchemaDropped
+                && alert.Summary.Contains(reminderId, StringComparison.Ordinal));
+        }, duration: TimeSpan.FromSeconds(30), cancellationToken: TestContext.Current.CancellationToken);
     }
 
     /// <summary>
@@ -1014,7 +1044,7 @@ public class ReminderManagerActorTests : TestKit
     }
 
     [Fact]
-    public async Task Recurring_occurrence_at_capacity_is_acked_without_execution()
+    public async Task Recurring_occurrence_starts_even_while_other_reminders_are_running()
     {
         var manager = await GetManagerAsync();
 
@@ -1030,18 +1060,19 @@ public class ReminderManagerActorTests : TestKit
             "auto-ack-capacity");
         ActorRegistry.For(Sys).Register<SlackGatewayActorKey>(autoAckRef);
 
+        // Fill three in-flight executions (the historical capacity limit).
         // Save before dispatch so filesystem latency cannot consume any test
         // timing window while execution slots are being filled.
-        for (var i = 0; i < ReminderManagerActor.MaxConcurrentExecutions; i++)
+        for (var i = 0; i < 3; i++)
         {
             var id = $"blocking-{i}";
             _definitionStore.Save(CreateCurrentSessionDefinition(id, deliveryRequired: true));
         }
 
-        for (var i = 0; i < ReminderManagerActor.MaxConcurrentExecutions; i++)
+        for (var i = 0; i < 3; i++)
             manager.Tell(CreateEnvelope($"blocking-{i}"));
 
-        for (var i = 0; i < ReminderManagerActor.MaxConcurrentExecutions; i++)
+        for (var i = 0; i < 3; i++)
         {
             var delivered = await gatewayProbe.ExpectMsgAsync<DeliverTrustedSessionTurn>(
                 TimeSpan.FromSeconds(5),
@@ -1052,17 +1083,19 @@ public class ReminderManagerActorTests : TestKit
 
         var invocationCount = _sessionPipeline.InvocationCount;
         var now = TimeProvider.System.GetUtcNow();
-        var recurringId = "capacity-recurring";
+        var recurringId = "concurrent-recurring";
         var recurringReminder = new ReminderDefinition
         {
             Id = new ReminderId(recurringId),
-            Title = "Capacity recurring reminder",
-            Instructions = "Do not create a stale catch-up execution",
+            Title = "Concurrent recurring reminder",
+            Instructions = "Must start even while other reminders are executing",
             Delivery = new ReminderDelivery { Kind = DeliveryKind.None },
             Schedule = new ReminderSchedule
             {
                 Type = ReminderScheduleType.Interval,
-                Interval = TimeSpan.FromMinutes(30),
+                // Must exceed the 1h execution timeout + settlement margin,
+                // otherwise the safe-execution-lease check skips the occurrence.
+                Interval = TimeSpan.FromHours(2),
                 FireAt = now.AddMilliseconds(100)
             },
             Audience = TrustAudience.Team,
@@ -1086,22 +1119,17 @@ public class ReminderManagerActorTests : TestKit
                 new GetReminderStatusQuery(recurringReminder.Id),
                 TimeSpan.FromSeconds(3),
                 TestContext.Current.CancellationToken);
-            Assert.Equal(1, status.SkippedDuplicates);
-            Assert.Equal(ReminderManagerActor.MaxConcurrentExecutions,
-                (await manager.Ask<ReminderHealthResponse>(
-                    GetReminderHealthQuery.Instance,
-                    TimeSpan.FromSeconds(3),
-                    TestContext.Current.CancellationToken)).ActiveExecutions);
+            // The historical capacity gate would have skipped this occurrence
+            // (SkippedDuplicates == 1) without starting an execution. With the
+            // cap removed the occurrence must be dispatched, not skipped.
+            Assert.Equal(0, status.SkippedDuplicates);
+            Assert.True(_sessionPipeline.InvocationCount > invocationCount,
+                "Expected the recurring reminder to be executed by the pipeline.");
         }, duration: TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
 
         var stored = _definitionStore.Get(recurringReminder.Id);
         Assert.NotNull(stored);
         Assert.True(stored!.Enabled);
-        Assert.Equal(invocationCount, _sessionPipeline.InvocationCount);
-
-        Assert.DoesNotContain(_notificationSink.Alerts, alert =>
-            alert.Category == AlertType.ReminderExecutionFailed
-            && alert.Source == recurringId);
     }
 
     [Fact]
@@ -1238,7 +1266,7 @@ public class ReminderManagerActorTests : TestKit
     }
 
     [Fact]
-    public async Task Successful_retry_resets_failure_count_and_soft_deletes_oneshot()
+    public async Task Successful_retry_deletes_oneshot_definition_and_history()
     {
         var manager = await GetManagerAsync();
         var gatewayProbe = CreateTestProbe("retry-success-gateway");
@@ -1271,17 +1299,9 @@ public class ReminderManagerActorTests : TestKit
 
         await AwaitAssertAsync(async () =>
         {
-            var stored = _definitionStore.Get(definition.Id);
-            Assert.NotNull(stored);
-            Assert.False(stored!.Enabled);
-            Assert.Equal(0, stored.ConsecutiveFailures);
-            Assert.Equal(ReminderTerminalOutcome.Completed, stored.TerminalOutcome);
-
-            var status = await manager.Ask<ReminderStatusResponse>(
-                new GetReminderStatusQuery(definition.Id),
-                TimeSpan.FromSeconds(3),
-                TestContext.Current.CancellationToken);
-            Assert.Equal("Delivered", status.Occurrence?.CompletionStatus);
+            Assert.Null(_definitionStore.Get(definition.Id));
+            var historyStore = new ReminderHistoryStore(new NetclawPaths(_basePath));
+            Assert.Empty(await historyStore.ReadAsync(definition.Id, 10));
         }, duration: TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
     }
 

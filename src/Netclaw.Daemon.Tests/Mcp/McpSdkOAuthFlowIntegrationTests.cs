@@ -25,6 +25,7 @@ using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
+using Netclaw.Configuration.Http;
 using Netclaw.Configuration.Secrets;
 using Netclaw.Daemon.Mcp;
 using Netclaw.Tests.Utilities;
@@ -735,6 +736,7 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         var runtime = new FakeServerMcpRuntime(server, failToolListing);
         var logger = new RecordingLogger<McpClientManager>();
         var serverName = new McpServerName("fake-oauth");
+        var dependencies = McpManagerTestDependencies.Create();
         var manager = new McpClientManager(
             new Dictionary<string, McpServerEntry>
             {
@@ -747,7 +749,10 @@ public sealed class McpSdkOAuthFlowIntegrationTests
                 },
             },
             new ToolRegistry(),
-            new ToolConfig(),
+            dependencies.SkillRegistry,
+            dependencies.SkillIndexPublisher,
+            dependencies.ToolAccessPolicy,
+            dependencies.ToolConfig,
             credentials,
             McpOAuthTestDoubles.RegistrarFor(server.CreateHttpClient()),
             broker,
@@ -808,7 +813,10 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         public IClientTransport CreateHttpTransport(HttpClientTransportOptions options)
         {
             LastHttpOptions = options;
-            return new HttpClientTransport(options, server.CreateHttpClient(), ownsHttpClient: true);
+            // Mirror the production runtime: the SDK's OAuth token exchange runs through the
+            // rejection handler, so a 400 invalid_client surfaces instead of the SDK's
+            // protocol fallback masking it.
+            return new HttpClientTransport(options, server.CreateTransportHttpClient(), ownsHttpClient: true);
         }
 
         public Task<McpClient> CreateAsync(
@@ -834,7 +842,8 @@ public sealed class McpSdkOAuthFlowIntegrationTests
                 barrier.Reached.TrySetResult(true);
                 await barrier.Release.Task.WaitAsync(cancellationToken);
             }
-            return new McpClientInitialization(tools.Cast<AIFunction>().ToList());
+            var prompts = await ListPromptsAsync(client, cancellationToken);
+            return new McpClientInitialization(tools.Cast<AIFunction>().ToList(), prompts);
         }
 
         public ValueTask<IReadOnlyList<AIFunction>> ListToolsAsync(
@@ -848,6 +857,30 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         {
             var tools = await client.ListToolsAsync(cancellationToken: cancellationToken);
             return tools.Cast<AIFunction>().ToList();
+        }
+
+        public async ValueTask<IReadOnlyList<Prompt>> ListPromptsAsync(
+            McpClient client,
+            CancellationToken cancellationToken)
+        {
+            if (client.ServerCapabilities.Prompts is null)
+                return [];
+
+            var prompts = await client.ListPromptsAsync(cancellationToken: cancellationToken);
+            return prompts.Select(static prompt => prompt.ProtocolPrompt).ToList();
+        }
+
+        public ValueTask<GetPromptResult> GetPromptAsync(
+            McpClient client,
+            string promptName,
+            IReadOnlyDictionary<string, string> arguments,
+            CancellationToken cancellationToken)
+        {
+            var values = arguments.ToDictionary(
+                static pair => pair.Key,
+                static pair => (object?)pair.Value,
+                StringComparer.Ordinal);
+            return client.GetPromptAsync(promptName, values, cancellationToken: cancellationToken);
         }
 
         public ValueTask<object?> InvokeAsync(
@@ -1004,6 +1037,22 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         {
             var client = _app.GetTestClient();
             client.BaseAddress = _state.Origin;
+            return client;
+        }
+
+        /// <summary>
+        /// Builds the client the SDK transport uses, wrapping the in-memory test server with
+        /// the same OAuth rejection handler the production runtime installs.
+        /// </summary>
+        public HttpClient CreateTransportHttpClient()
+        {
+            var client = new HttpClient(new OAuthClientRejectionHandler
+            {
+                InnerHandler = _app.GetTestServer().CreateHandler(),
+            })
+            {
+                BaseAddress = _state.Origin,
+            };
             return client;
         }
 
