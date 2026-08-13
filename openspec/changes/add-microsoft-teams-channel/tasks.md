@@ -184,11 +184,13 @@ targets while preserving evidence.
   Tenant, ACL, mention, trust, Public fallback, and destination policy remained
   unchanged. The final real-upload smoke failed closed-policy validation: the
   activity produced normal processing and a model reply rather than an
-  attachment rejection. The daemon and tunnel stopped immediately, and no
-  further live scenario ran. Keep 8.3 open and stop packaging or release
-  progression until a privacy-safe transport capture explains this live upload
-  representation and a CI-gated correction restores rejection before actor or
-  model dispatch.
+  attachment rejection. On 2026-08-13, one owner-only diagnostic capture found
+  a nonempty JSON-string `text/html` attachment with a non-Graph embedded
+  reference and channel data. No identifiers, URLs, file data, or message data
+  were retained. The daemon and tunnel stopped immediately. A sanitized
+  regression fixture and a narrow pre-routing correction now reject that shape.
+  Keep 8.3 open and stop packaging or release progression until the merged
+  correction passes one real-upload smoke with no Processing or model reply.
 
 ## PR 9 — App package and operations
 

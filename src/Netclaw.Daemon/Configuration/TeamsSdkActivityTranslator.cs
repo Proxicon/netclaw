@@ -154,7 +154,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "invalid_channel_root_identity");
         }
 
-        var attachmentFailure = RejectUnsupportedAttachments(activity.Attachments);
+        var attachmentFailure = RejectUnsupportedAttachments(activity.Attachments, activity.ChannelData is not null);
         if (attachmentFailure is not null)
             return attachmentFailure;
 
@@ -269,7 +269,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return false;
     }
 
-    private static TeamsTranslationResult? RejectUnsupportedAttachments(IList<Attachment>? attachments)
+    private static TeamsTranslationResult? RejectUnsupportedAttachments(IList<Attachment>? attachments, bool hasChannelData)
     {
         if (attachments is null || attachments.Count == 0)
             return null;
@@ -295,7 +295,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 hasEmbeddedContentReference,
                 hasEmbeddedGraphBackedContentReference,
                 contentKind,
-                attachment.ThumbnailUrl is not null);
+                attachment.ThumbnailUrl is not null,
+                hasChannelData);
 
             var classification = TeamsTenantEvidenceMappings.ClassifyAttachment(evidence);
             if (classification.Classification == TeamsAttachmentClassification.InlineTextRendering)
