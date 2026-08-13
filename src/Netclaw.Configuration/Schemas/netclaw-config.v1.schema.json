@@ -135,6 +135,29 @@
             "type": "string",
             "enum": ["personal", "team", "public"]
           }
+        },
+        "ChannelAudienceOverrides": {
+          "type": "array",
+          "description": "Delimiter-safe structured audience overrides. Exact team/channel entries take precedence over team-wide entries.",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": ["TeamId", "Audience"],
+            "properties": {
+              "TeamId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ChannelId": {
+                "type": ["string", "null"]
+              },
+              "Audience": {
+                "type": "string",
+                "enum": ["personal", "team", "public"]
+              }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
