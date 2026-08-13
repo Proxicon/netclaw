@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using Netclaw.Configuration;
 using Netclaw.Tools;
+using ShellSyntaxTree;
 
 namespace Netclaw.Security;
 
@@ -19,7 +20,26 @@ namespace Netclaw.Security;
 /// One shell clause can produce multiple candidates when it accesses multiple
 /// authorization scopes.
 /// </summary>
-public sealed record ApprovalCandidate(string Verb, string? Directory);
+public sealed record ApprovalCandidate(string Verb, string? Directory)
+{
+    /// <summary>The immutable parser-owned canonical verb tokens.</summary>
+    public IReadOnlyList<string>? VerbTokens { get; init; }
+
+    /// <summary>The native shell grammar that produced the candidate.</summary>
+    public ApprovalShell? Shell { get; init; }
+
+    /// <summary>
+    /// Retains the released candidate identity contract. Parser metadata does
+    /// not change occurrence identity.
+    /// </summary>
+    public bool Equals(ApprovalCandidate? other) =>
+        other is not null &&
+        string.Equals(Verb, other.Verb, StringComparison.Ordinal) &&
+        string.Equals(Directory, other.Directory, StringComparison.Ordinal);
+
+    /// <inheritdoc />
+    public override int GetHashCode() => HashCode.Combine(Verb, Directory);
+}
 
 /// <summary>
 /// Tool-specific pattern extraction and matching for the approval system.
@@ -214,7 +234,6 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
 
         // The prompt groups a pipe as one approval unit. Authorization still
         // checks each clause so an unsafe tail cannot hide behind a safe head.
-        var seen = new HashSet<(string, string?)>();
         var candidates = new List<ApprovalCandidate>();
 
         foreach (var occurrence in result.Commands)
@@ -251,13 +270,35 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
 
             foreach (var directory in directories)
             {
-                var key = (verb.ToLowerInvariant(), directory);
-                if (seen.Add(key))
-                    candidates.Add(new ApprovalCandidate(verb, directory));
+                var shell = Environment.Grammar == ShellGrammar.Bash
+                    ? ApprovalShell.Bash
+                    : ApprovalShell.PowerShell;
+                candidates.Add(new ApprovalCandidate(verb, directory)
+                {
+                    VerbTokens = GetCanonicalVerbTokens(clause),
+                    Shell = shell,
+                });
             }
         }
 
         return candidates;
+    }
+
+    private static IReadOnlyList<string>? GetCanonicalVerbTokens(
+        ShellSyntaxTree.Clause clause)
+    {
+        var tokens = clause.Verb.Tokens.ToArray();
+        if (tokens.Length == 0)
+        {
+            return null;
+        }
+
+        if (clause.Verb.CanonicalVerb is { Length: > 0 } canonicalVerb)
+        {
+            tokens[0] = canonicalVerb;
+        }
+
+        return Array.AsReadOnly(tokens);
     }
 
     private static IReadOnlyList<string?>? ResolveCommandDirectories(
@@ -308,6 +349,21 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
 
                 directories.Add(ResolveAuthorizationScope(verb, arg, resolved, pathStyle));
             }
+
+            foreach (var argument in occurrence.Arguments)
+            {
+                if (argument.Argument.IsPath)
+                    continue;
+
+                var authoredDirectories = ResolveAuthoredFileSystemDirectories(
+                    argument.AuthoredFileSystemValue,
+                    clauseWorkingDirectory,
+                    pathStyle);
+                if (authoredDirectories is null)
+                    return null;
+
+                directories.AddRange(authoredDirectories);
+            }
         }
 
         foreach (var redirect in occurrence.Redirects)
@@ -350,6 +406,80 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
         }
 
         return directories.Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    private static IReadOnlyList<string>? ResolveAuthoredFileSystemDirectories(
+        ShellValueDomain domain,
+        string? workingDirectory,
+        ShellPathStyle pathStyle)
+    {
+        if (domain is ShellValueDomain.Unknown)
+            return [];
+
+        IReadOnlyList<string> paths;
+        switch (domain)
+        {
+            case ShellValueDomain.Exact exact:
+                paths = [exact.Value];
+                break;
+            case ShellValueDomain.FiniteSet finite:
+                paths = finite.Values;
+                break;
+            default:
+                return null;
+        }
+
+        var directories = new List<string>(paths.Count);
+        foreach (var path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path)
+                || !IsRootedForPathStyle(path, pathStyle)
+                || UsesHostPathStyle(pathStyle) && HasUnsafeHostPath(path))
+            {
+                return null;
+            }
+
+            directories.Add(path);
+        }
+
+        if (!string.IsNullOrWhiteSpace(workingDirectory)
+            && IsRootedForPathStyle(workingDirectory, pathStyle)
+            && directories.All(path => IsWithinRootForPathStyle(
+                path,
+                workingDirectory,
+                pathStyle)))
+        {
+            return [workingDirectory];
+        }
+
+        return directories;
+    }
+
+    private static bool IsWithinRootForPathStyle(
+        string path,
+        string root,
+        ShellPathStyle pathStyle)
+    {
+        // Parser values can describe Windows paths on a POSIX test host.
+        // Host Path APIs cannot make this grammar-specific comparison.
+        var comparison = pathStyle == ShellPathStyle.Windows
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(path, root, comparison))
+            return true;
+        if (!path.StartsWith(root, comparison))
+            return false;
+        if (root.EndsWith("/", StringComparison.Ordinal)
+            || pathStyle == ShellPathStyle.Windows
+            && root.EndsWith("\\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return path.Length > root.Length
+               && (path[root.Length] == '/'
+                   || pathStyle == ShellPathStyle.Windows
+                   && path[root.Length] == '\\');
     }
 
     private static string? ResolveAuthorizationScope(
@@ -997,7 +1127,7 @@ public sealed class ShellApprovalMatcher : IToolApprovalMatcher
                 continue;
 
             if (!ApprovalPatternMatching.MatchesShellApproval(
-                    candidate.Verb, candidate.Directory, cwd, approvedEntries))
+                    candidate, cwd, approvedEntries))
                 return false;
         }
 

@@ -26,7 +26,11 @@ public sealed class ShellApprovalDispositionMatrixTests(ShellApprovalMatrixFixtu
 
     private async Task AssertApprovalContract(string caseId)
     {
-        var testCase = ShellApprovalCases.Get(caseId);
+        await AssertApprovalContract(ShellApprovalCases.Get(caseId));
+    }
+
+    private async Task AssertApprovalContract(ShellApprovalCase testCase)
+    {
         await using var harness = await ShellApprovalHarness.CreateAsync(
             testCase,
             fixture.ActorSystem,
@@ -42,6 +46,43 @@ public sealed class ShellApprovalDispositionMatrixTests(ShellApprovalMatrixFixtu
         Assert.Equal(testCase.Expected.ApprovalChecks, harness.ApprovalService.CheckCount);
         Assert.Equal(testCase.Expected.ApprovalMatches, observed.ApprovalMatches);
     }
+
+    [Fact]
+    public Task Interactive_reviewed_safe_candidate_uses_reviewed_policy()
+        => AssertApprovalContract(new ShellApprovalCase(
+            "interactive-reviewed-safe-allows",
+            new ShellApprovalInvocation("git status"),
+            Approvals.None,
+            ExpectedApproval.Allow(ToolAllowReason.SafeVerbInTrustedScope)));
+
+    [Fact]
+    public Task Noninteractive_reviewed_safe_candidate_stays_uncovered()
+        => AssertApprovalContract(new ShellApprovalCase(
+            "noninteractive-reviewed-safe-requires-approval",
+            new ShellApprovalInvocation("git status", Interactive: false),
+            Approvals.None,
+            ExpectedApproval.Require(["git status"])));
+
+    [Fact]
+    public Task Noninteractive_candidate_can_use_an_explicit_persistent_grant()
+        => AssertApprovalContract(new ShellApprovalCase(
+            "noninteractive-reviewed-safe-with-grant-allows",
+            new ShellApprovalInvocation("git status", Interactive: false),
+            Approvals.PersistentAnywhere("git status"),
+            ExpectedApproval.Allow(
+                ToolAllowReason.StoredApproval,
+                1,
+                "persistent:git status")));
+
+    [Fact]
+    public Task Noninteractive_safe_candidate_does_not_fill_a_partial_grant_gap()
+        => AssertApprovalContract(new ShellApprovalCase(
+            "noninteractive-partial-grant-keeps-safe-candidate-uncovered",
+            new ShellApprovalInvocation("git push && git status", Interactive: false),
+            Approvals.PersistentAnywhere("git push"),
+            ExpectedApproval.Require(
+                ["git status"],
+                approvalMatches: ["persistent:git push"])));
 
     [SlopwatchSuppress("SW001", "This regression requires POSIX symlink and Bash authorization behavior.")]
     [Fact(SkipUnless = nameof(IsPosix), Skip = "The symlink retry regression defines Bash authorization behavior.")]
@@ -66,6 +107,50 @@ public sealed class ShellApprovalDispositionMatrixTests(ShellApprovalMatrixFixtu
 
         Assert.Equal(ToolAuthorizationOutcome.RequiresApproval, retry.Outcome);
         Assert.Equal(["cat", "git push"], retry.ApprovalContext!.CandidateVerbs);
+    }
+
+    [SlopwatchSuppress("SW001", "This regression requires a POSIX shell cwd and Bash authorization behavior.")]
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "The project-scope correction defines Bash path behavior.")]
+    public async Task Reviewed_safe_external_cwd_exposes_project_scope_correction()
+    {
+        var testCase = new ShellApprovalCase(
+            "reviewed-safe-external-cwd-suggests-project-scope",
+            new ShellApprovalInvocation(
+                "head -40 src/file.cs",
+                ApprovalDirectoryShape.External),
+            Approvals.None,
+            ExpectedApproval.Require(["head"]));
+        await using var harness = await ShellApprovalHarness.CreateAsync(
+            testCase,
+            fixture.ActorSystem,
+            TestContext.Current.CancellationToken);
+
+        var decision = await harness.EvaluateDecisionAsync(TestContext.Current.CancellationToken);
+        var context = Assert.IsType<ToolApprovalContext>(decision.ApprovalContext);
+
+        Assert.Equal(context.Cwd, context.SuggestedProjectDirectory);
+    }
+
+    [SlopwatchSuppress("SW001", "This regression requires a POSIX shell cwd and Bash authorization behavior.")]
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "The project-scope correction defines Bash path behavior.")]
+    public async Task Unsafe_external_cwd_does_not_expose_project_scope_correction()
+    {
+        var testCase = new ShellApprovalCase(
+            "unsafe-external-cwd-keeps-normal-approval",
+            new ShellApprovalInvocation(
+                "git push",
+                ApprovalDirectoryShape.External),
+            Approvals.None,
+            ExpectedApproval.Require(["git push"]));
+        await using var harness = await ShellApprovalHarness.CreateAsync(
+            testCase,
+            fixture.ActorSystem,
+            TestContext.Current.CancellationToken);
+
+        var decision = await harness.EvaluateDecisionAsync(TestContext.Current.CancellationToken);
+        var context = Assert.IsType<ToolApprovalContext>(decision.ApprovalContext);
+
+        Assert.Null(context.SuggestedProjectDirectory);
     }
 
     [SlopwatchSuppress("SW001", "This regression requires POSIX glob, symlink, and Bash authorization behavior.")]
