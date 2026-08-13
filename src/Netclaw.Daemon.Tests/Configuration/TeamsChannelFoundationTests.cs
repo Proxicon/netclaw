@@ -1521,6 +1521,28 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_rejects_a_channel_upload_reference_shape_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.ChannelData = new TeamsChannelData();
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = JsonDocument.Parse("\"https://rendering.invalid/opaque\"").RootElement.Clone()
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
     public void Translator_rejects_inline_attachment_content_before_routing()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
