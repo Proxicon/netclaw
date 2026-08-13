@@ -130,6 +130,71 @@ public sealed class ConfigSchemaDoctorCheckTests
     }
 
     [Fact]
+    public async Task ReturnsPass_WhenTeamsConfigUsesStructuredChannelAudienceOverrides()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "AllowedTeamIds": ["team-id"],
+                "AllowedChannelIds": ["channel-id"],
+                "AllowedUserIds": ["user-id"],
+                "ChannelAudienceOverrides": [
+                  {
+                    "TeamId": "19:team-id@thread.tacv2",
+                    "ChannelId": "19:channel-id@thread.tacv2",
+                    "Audience": "team"
+                  }
+                ]
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
+    public async Task ReturnsPass_WhenModelsUseNamedDefinitionsAndRoles()
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Models": {
+                "Definitions": {
+                  "primary": {
+                    "Provider": "provider",
+                    "ModelId": "model",
+                    "Provenance": "Manual",
+                    "ContextWindow": 32768,
+                    "InputModalities": "Text, Image"
+                  }
+                },
+                "Roles": {
+                  "Main": "primary"
+                }
+              }
+            }
+            """, TestContext.Current.CancellationToken);
+
+        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+    }
+
+    [Fact]
     public async Task ReturnsError_WhenTeamsClientSecretIsPlacedInNormalConfiguration()
     {
         const string secret = "teams-pr1-synthetic-sentinel";
