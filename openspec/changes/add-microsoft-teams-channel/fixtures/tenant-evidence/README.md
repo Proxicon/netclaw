@@ -15,3 +15,9 @@ text.
 of the second PR 8 live channel-root rejection. It preserves the SDK JSON-string
 HTML wrapper, its non-Graph rendering reference, a companion SDK entity, and
 the absent channel-data object. All values are synthetic.
+
+`channel-root-upload-reference.json` records only the bounded, privacy-safe
+facts from the PR 8 upload capture. It deliberately contains no activity,
+tenant, user, file, URL, message, or provider values. The reference-bearing
+JSON-string HTML attachment with channel data is unsupported and must be
+rejected before routing.

@@ -132,6 +132,26 @@ public sealed class TeamsTenantEvidenceFixtureTests
     }
 
     [Fact]
+    public void Channel_root_upload_reference_shape_is_rejected_before_routing()
+    {
+        var attachment = Load("channel-root-upload-reference.json")["attachment"]!;
+
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+            attachment["contentType"]!.GetValue<string>(),
+            HasName: attachment["hasName"]!.GetValue<bool>(),
+            ContentUrl: null,
+            HasContentUrl: attachment["hasContentUrl"]!.GetValue<bool>(),
+            HasEmbeddedContentReference: attachment["hasEmbeddedContentReference"]!.GetValue<bool>(),
+            HasEmbeddedGraphBackedContentReference: attachment["hasEmbeddedGraphBackedContentReference"]!.GetValue<bool>(),
+            ContentKind: TeamsAttachmentContentKind.NonEmptyText,
+            HasThumbnailUrl: attachment["hasThumbnailUrl"]!.GetValue<bool>(),
+            HasChannelData: attachment["hasChannelData"]!.GetValue<bool>()));
+
+        Assert.Equal(TeamsAttachmentClassification.UnsupportedAttachmentShape, result.Classification);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+    }
+
+    [Fact]
     public void Channel_root_live_wrapper_variant_preserves_the_canonical_mentioned_root_without_model_visible_wrapper_content()
     {
         var fixture = Load("channel-root-live-wrapper-variant.json");
@@ -202,6 +222,7 @@ public sealed class TeamsTenantEvidenceFixtureTests
             "channel-root-formatted-wrapper.json",
             "channel-root-live-wrapper-variant.json",
             "channel-root-message.json",
+            "channel-root-upload-reference.json",
             "channel-second-root-message.json",
             "double-bot-mention.json",
             "message-delete.json",
