@@ -51,6 +51,122 @@ public sealed class ShellApprovalMatcherTests
     }
 
     [Fact]
+    public void Bash_github_diagnostic_with_exit_status_is_reusable()
+    {
+        const string command =
+            "gh run view 123456 --repo example/project --log-failed --verbose 2>&1 "
+            + "| head -200; echo \"---EXIT $?---\"";
+
+        var analysis = _matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(command, "/work"));
+
+        Assert.False(analysis.IsMessy);
+        Assert.Equal(
+            ["gh run view", "head", "echo"],
+            analysis.Candidates.Select(static candidate => candidate.Verb));
+    }
+
+    [Theory]
+    [InlineData("head -c 20 /tmp/work/site.css | xxd | head -3")]
+    [InlineData("rg -rn \"operation failed\" src/ tests/ | head -20; echo \"---\"; rg -rln \"upload\" src/ | head -20")]
+    [InlineData("netclaw mcp --help 2>&1 | head -50")]
+    [InlineData("find /work/project -iname \"*Command*\" -o -iname \"*Add*\" 2>/dev/null | head; echo \"---\"; rg -rn \"transport http|--transport\" /work/project --include=\"*.cs\" -l 2>/dev/null | head")]
+    [InlineData("for u in /api/first /api/second; do echo \"=== $u ===\"; curl -sS -m 10 \"$u\" | head -c 1500; echo; done")]
+    [InlineData("cd /work/project && git status --short 2>&1 | head; echo \"---branch---\"; git branch --show-current 2>&1; echo \"---remotes---\"; git remote -v 2>&1 | head -4; echo \"---recent---\"; git log --oneline -3 2>&1")]
+    [InlineData("~/.dotnet/dotnet test tests/Project.Tests/Project.Tests.csproj --filter \"FullyQualifiedName~SchemaTests\" --nologo 2>&1 | tail -30")]
+    [InlineData("docker run --rm -v tools:/tools --entrypoint sh ruby:3.1 -c 'find /tools -maxdepth 2 -type f | head'")]
+    [InlineData("docker run --rm --user root -v tools:/workbench/tools -v /tmp/site:/workbench/site -w /workbench/site --entrypoint bash image:tag -c 'bundle exec jekyll build | head'")]
+    public void Bash_live_read_and_diagnostic_shapes_are_reusable(string command)
+    {
+        var analysis = _matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(command, "/work/project"));
+
+        Assert.False(analysis.IsMessy);
+        Assert.NotEmpty(analysis.Candidates);
+        Assert.All(analysis.Candidates, static candidate =>
+        {
+            Assert.Equal(ApprovalShell.Bash, candidate.Shell);
+            Assert.NotNull(candidate.VerbTokens);
+            Assert.NotEmpty(candidate.VerbTokens);
+        });
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void Bash_finite_filesystem_loop_uses_bounded_path_scopes()
+    {
+        const string command =
+            "for f in src/A.cs src/B.cs; do cat /work/$f; done";
+        var arguments = Args(command, "/work");
+
+        var analysis = _matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            arguments);
+
+        Assert.False(analysis.IsMessy);
+        var candidate = Assert.Single(analysis.Candidates);
+        Assert.Equal("cat", candidate.Verb);
+        Assert.Equal("/work", candidate.Directory);
+        Assert.True(_matcher.IsApproved(
+            new ToolName("shell_execute"),
+            arguments,
+            [InDir("cat", "/work")],
+            cwd: "/work"));
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void Bash_finite_filesystem_loop_keeps_external_scopes_exact()
+    {
+        const string command =
+            "for f in /work/A.cs /work2/B.cs; do cat \"$f\"; done";
+
+        var analysis = _matcher.AnalyzeInvocation(
+            new ToolName("shell_execute"),
+            Args(command, "/work"));
+
+        Assert.False(analysis.IsMessy);
+        Assert.Equal(
+            ["/work/A.cs", "/work2/B.cs"],
+            analysis.Candidates.Select(static candidate => candidate.Directory));
+    }
+
+    [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]
+    public void Bash_finite_filesystem_loop_rejects_a_symlink_scope()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"netclaw-authored-loop-{Guid.NewGuid():N}");
+        var projectDirectory = Path.Combine(root, "project");
+        var externalDirectory = Path.Combine(root, "external");
+        var externalFile = Path.Combine(externalDirectory, "secret.txt");
+        var link = Path.Combine(projectDirectory, "link.txt");
+        Directory.CreateDirectory(projectDirectory);
+        Directory.CreateDirectory(externalDirectory);
+        File.WriteAllText(externalFile, "secret");
+        File.CreateSymbolicLink(link, externalFile);
+
+        try
+        {
+            var arguments = Args(
+                "for f in link.txt safe.txt; do cat \"$f\"; done",
+                projectDirectory);
+
+            Assert.True(_matcher.IsMessy(
+                new ToolName("shell_execute"),
+                arguments));
+            Assert.Empty(_matcher.ExtractCandidates(
+                new ToolName("shell_execute"),
+                arguments));
+        }
+        finally
+        {
+            File.Delete(link);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Power_shell_matcher_uses_the_native_power_shell_grammar()
     {
         var matcher = new ShellApprovalMatcher(
@@ -689,10 +805,10 @@ public sealed class ShellApprovalMatcherTests
         // Even if every conceivable verb is approved, a messy command never
         // auto-runs: the matcher cannot extract verb chains to evaluate, and
         // the prompt must offer Once/Deny only.
-        var approved = new[] { Verb("for"), Verb("do"), Verb("done"), Verb("echo") };
+        var approved = new[] { Verb("for"), Verb("do"), Verb("done"), Verb("echo"), Verb("printf") };
         Assert.False(_matcher.IsApproved(
             new ToolName("shell_execute"),
-            Args("for x in 1 2 3; do echo $x; done"),
+            Args("for x in $(printf '1 2 3'); do echo \"$x\"; done"),
             approved,
             cwd: null));
     }
@@ -1316,6 +1432,42 @@ public sealed class ShellApprovalMatcherPathExtractionTests
         var c = Assert.Single(candidates);
         Assert.Equal("echo", c.Verb);
         Assert.True(ApprovalPatternMatching.IsPureSideEffect(c));
+    }
+
+    [Fact]
+    public void ExtractCandidates_keeps_parser_tokens_when_legacy_verb_is_shortened()
+    {
+        var candidate = Assert.Single(_matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            new Dictionary<string, object?> { ["Command"] = "whoami user" }));
+
+        Assert.Equal("whoami", candidate.Verb);
+        Assert.Equal(["whoami", "user"], candidate.VerbTokens);
+        Assert.Equal(ApprovalShell.Bash, candidate.Shell);
+    }
+
+    [Fact]
+    public void ExtractCandidates_keeps_distinct_occurrences_with_one_legacy_projection()
+    {
+        var candidates = _matcher.ExtractCandidates(
+            new ToolName("shell_execute"),
+            new Dictionary<string, object?>
+            {
+                ["Command"] = "whoami user; whoami admin"
+            });
+
+        Assert.Collection(
+            candidates,
+            first =>
+            {
+                Assert.Equal("whoami", first.Verb);
+                Assert.Equal(["whoami", "user"], first.VerbTokens);
+            },
+            second =>
+            {
+                Assert.Equal("whoami", second.Verb);
+                Assert.Equal(["whoami", "admin"], second.VerbTokens);
+            });
     }
 
     [Fact(SkipUnless = nameof(IsPosix), Skip = "POSIX-only path semantics")]

@@ -1,5 +1,34 @@
 # NetClaw Release Notes
 
+## 0.26.0-beta.4 (2026-08-12)
+
+### Features
+- **Timezone-aware cron schedules** — Cron reminders now accept the Vixie `CRON_TZ=<IANA-zone>` prefix, so schedules evaluate DST-aware in a chosen time zone; expressions without the prefix still run in UTC, and unknown or Windows-style zones fail with IANA guidance ([#1789](https://github.com/netclaw-dev/netclaw/pull/1789))
+- **Netclaw identity shown on MCP OAuth consent screens** — RFC 7591 dynamic client registration now sends `client_uri` and `logo_uri`, so authorization servers render a recognizable Netclaw consent screen instead of a bare client name ([#1877](https://github.com/netclaw-dev/netclaw/pull/1877))
+- **`skill list` shows MCP prompt skills** — The CLI now reads the daemon's live skill registry via a new `GET /api/skills` endpoint, so dynamic MCP prompt skills appear in listings; the command now requires the daemon and reports "Daemon unavailable" instead of silently degrading ([#1891](https://github.com/netclaw-dev/netclaw/pull/1891))
+- **Reminder scheduling failures surface loudly** — Post-fire rescheduling and startup-reconcile failures now emit a `ReminderScheduleFailed` warning, count toward the auto-disable threshold, and trigger the Critical alert plus channel notice on disable — a reminder can no longer silently stay enabled and never fire ([#1886](https://github.com/netclaw-dev/netclaw/pull/1886))
+
+### Bug Fixes
+- **Unknown Bash argument data no longer blocks safe commands** — The approval analyzer treats unresolved parameter expansion as structurally safe when ShellSyntaxTree classifies it as a non-path argument; dynamic command identities, paths, redirects, and substitutions still fail closed ([#1875](https://github.com/netclaw-dev/netclaw/pull/1875))
+
+### Internal Improvements
+- **General shell approval analysis required** — Constitution-only change prohibiting executable-specific parsing in the approval layer; unresolved inputs stay strict when general shell facts are unavailable ([#1874](https://github.com/netclaw-dev/netclaw/pull/1874))
+- **Structured shell approval policy spec** — OpenSpec proposal, design, and spec with evidence fixtures (D01–D18 approval matrix) documenting the typed, per-candidate coverage pipeline ([#1876](https://github.com/netclaw-dev/netclaw/pull/1876))
+
+## 0.26.0-beta.3 (2026-08-11)
+
+### Features
+- **Agents declare shell working scope up front** — Agents are now guided to declare their working directory once before multi-command work in a named project, pass the directory to the shell tool instead of inline `cd`, and retry rejected paths instead of working around them — fewer redundant approval prompts and more reliable scoped approvals ([#1870](https://github.com/netclaw-dev/netclaw/pull/1870))
+
+### Bug Fixes
+- **Shell approval scopes fixed for dotted paths** — Dotted and hidden paths (e.g. `.netclaw/`) and git refs now produce correct approval scopes, with normalized-verb matching and `git ls-tree` recognized as safe ([#1868](https://github.com/netclaw-dev/netclaw/pull/1868))
+- **MCP: dead OAuth registrations discarded again under SDK 2.1** — The MCP SDK 2.1 discovery probe no longer swallows token-endpoint `invalid_client` rejections during interactive OAuth; rejected client registrations are discarded instead of wedging ([#1865](https://github.com/netclaw-dev/netclaw/pull/1865))
+
+### Dependency Updates
+- **Bump ModelContextProtocol** — 2.0.0 → 2.1.0 ([#1865](https://github.com/netclaw-dev/netclaw/pull/1865))
+- **Bump Anthropic** — 12.39.0 → 12.40.0 ([#1842](https://github.com/netclaw-dev/netclaw/pull/1842))
+- **Bump ShellSyntaxTree** — 0.2.0 → 0.3.0 ([#1867](https://github.com/netclaw-dev/netclaw/pull/1867))
+
 ## 0.26.0-beta.2 (2026-08-10)
 
 ### Features

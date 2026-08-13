@@ -52,7 +52,10 @@ internal sealed class ShellCommandAnalyzer
         ParsedCommand parsed;
         try
         {
-            parsed = _environment.Parse(command, workingDirectory);
+            parsed = _environment.ParseForApproval(
+                command,
+                workingDirectory,
+                publishAuthoredSourceFacts: depth == 0);
         }
         catch
         {
@@ -337,11 +340,8 @@ public sealed record ShellCommandAnalysis
                 && !IsAccountedExecutionRegionArgument(
                     command,
                     arg,
-                    accountedRegionArguments))
-            || command.Clause.Args.Any(static arg =>
-                arg.Kind == ArgKind.EnvVar
-                && !arg.IsCwdAttribution
-                && string.IsNullOrWhiteSpace(arg.Resolved))
+                    accountedRegionArguments)
+                && !HasBoundedAuthoredFileSystemValue(command, arg))
             || command.Clause.Args.Any(static arg =>
                 arg.IsPath
                 && arg.Kind != ArgKind.Glob
@@ -413,6 +413,14 @@ public sealed record ShellCommandAnalysis
         => argument.Argument.Kind == ArgKind.DynamicSkip
             && accountedRegionArguments.Contains(argument.Element);
 
+    private static bool HasBoundedAuthoredFileSystemValue(
+        CommandOccurrence command,
+        Arg argument)
+        => command.Arguments.Any(analyzed =>
+            ReferenceEquals(analyzed.Argument, argument)
+            && analyzed.AuthoredFileSystemValue is ShellValueDomain.Exact
+                or ShellValueDomain.FiniteSet);
+
     private static bool IsKnownAncestor(ShellSyntaxNode ancestor)
         => ancestor is ShellBlockSyntax
             or SimpleCommandSyntax
@@ -432,7 +440,29 @@ public sealed record ShellCommandAnalysis
         };
 
     private static bool HasUnsupportedArgumentDomain(AnalyzedArgument argument)
-        => argument.Value switch
+    {
+        if (argument.AuthoredFileSystemValue is not ShellValueDomain.Unknown
+            and not ShellValueDomain.Exact
+            and not ShellValueDomain.FiniteSet)
+        {
+            return true;
+        }
+
+        var value = argument.Value;
+        if (value is ShellValueDomain.Unknown)
+        {
+            if (argument.AuthoredFileSystemValue is not ShellValueDomain.Unknown)
+            {
+                value = argument.AuthoredFileSystemValue;
+            }
+            else if (!argument.Argument.IsPath
+                     && argument.AuthoredValue is not ShellValueDomain.Unknown)
+            {
+                value = argument.AuthoredValue;
+            }
+        }
+
+        return value switch
         {
             // A raw authored glob has no one runtime value. Netclaw applies
             // its fixed covering-scope checks to the source Arg below.
@@ -441,11 +471,16 @@ public sealed record ShellCommandAnalysis
             ShellValueDomain.FiniteSet finite => finite.Values.Count is < 2 or > 32
                 || finite.Values.Any(static value => value is null)
                 || finite.Values.Distinct(StringComparer.Ordinal).Count() != finite.Values.Count,
+            // ShellSyntaxTree proves these domains are bounded. They remain
+            // data only and cannot establish path or execution authority.
+            ShellValueDomain.IntegerRange => argument.Argument.IsPath,
+            ShellValueDomain.Concatenation => argument.Argument.IsPath,
             ShellValueDomain.PathPattern pattern =>
                 string.IsNullOrWhiteSpace(pattern.Pattern)
                 || string.IsNullOrWhiteSpace(pattern.CoveringDirectory),
             _ => true
         };
+    }
 
     private static bool HasUnresolvedRedirect(CommandOccurrence occurrence)
         => occurrence.Redirects.Any(redirect => HasUnresolvedRedirect(occurrence, redirect));

@@ -178,7 +178,7 @@ internal sealed record ExpectedApproval(
 {
     public static ExpectedApproval Allow(
         ToolAllowReason reason,
-        int approvalChecks = 0,
+        int? approvalChecks = null,
         params string[] approvalMatches)
         => new(
             ToolAuthorizationOutcome.Allowed,
@@ -186,7 +186,7 @@ internal sealed record ExpectedApproval(
             null,
             [],
             null,
-            approvalChecks,
+            approvalChecks ?? (reason == ToolAllowReason.SafeVerbInTrustedScope ? 1 : 0),
             approvalMatches);
 
     public static ExpectedApproval Require(
@@ -355,6 +355,32 @@ public static class ShellApprovalCases
         Case(
             "safe-pipeline-allows",
             Bash("git log | head -20"),
+            Approvals.None,
+            ExpectedApproval.Allow(ToolAllowReason.SafeVerbInTrustedScope)),
+
+        Case(
+            "live-read-chain-with-separator-allows",
+            Bash("rg -rn \"operation failed\" src/ tests/ | head -20; echo \"---\"; rg -rln \"upload\" src/ | head -20"),
+            Approvals.None,
+            ExpectedApproval.Allow(ToolAllowReason.SafeVerbInTrustedScope)),
+
+        Case(
+            "live-git-diagnostic-chain-with-separators-allows",
+            Bash("git status --short 2>&1 | head; echo \"---branch---\"; git branch --show-current 2>&1; echo \"---remotes---\"; git remote -v 2>&1 | head -4; echo \"---recent---\"; git log --oneline -3 2>&1"),
+            Approvals.None,
+            ExpectedApproval.Allow(ToolAllowReason.SafeVerbInTrustedScope)),
+
+        Case(
+            "live-finite-url-loop-prompts-with-reusable-phrase",
+            Bash("for url in /api/first /api/second; do echo \"=== $url ===\"; curl -sS -m 10 \"$url\" | head -c 1500; echo; done"),
+            Approvals.None,
+            ExpectedApproval.Require(["curl"], isMessy: false)),
+
+        Case(
+            "safe-gh-run-diagnostic-exit-status-allows",
+            Bash(
+                "gh run view 123456 --repo example/project --log-failed --verbose 2>&1 "
+                + "| head -200; echo \"---EXIT $?---\""),
             Approvals.None,
             ExpectedApproval.Allow(ToolAllowReason.SafeVerbInTrustedScope)),
 
@@ -1417,12 +1443,17 @@ public static class ShellApprovalCases
             ExpectedApproval.Allow(
                 ToolAllowReason.StoredApproval,
                 1,
+                "session:git status",
                 "persistent:git push")),
         Case(
             "partial-compound-grant-prompts",
             Bash("git status && git push"),
             Approvals.PersistentAnywhere("git status"),
-            ExpectedApproval.Require(["git push"])),
+            ExpectedApproval.Require(
+                ["git push"],
+                false,
+                1,
+                "persistent:git status")),
         Case(
             "four-unapproved-clauses-prompt",
             Bash("git add . && git commit -m fix && git push && gh pr merge 123"),

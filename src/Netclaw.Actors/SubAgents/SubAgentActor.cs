@@ -64,6 +64,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     private readonly IChatClient _chatClient;
     private readonly ToolAccessPolicy _toolAccessPolicy;
     private readonly IToolApprovalService? _approvalService;
+    private readonly ISystemPromptProvider _promptProvider;
     private readonly int _maxToolIterations;
 
     // Process-wide daily-stats sink (the same singleton the parent session records
@@ -91,6 +92,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
     // Conversation state (not persisted — ephemeral)
     private readonly List<AiChatMessage> _history = [];
+    private readonly SessionScratchCorrectionState _sessionScratchCorrections = new();
     private long _llmCallId;
     private IActorRef _replyTo = ActorRefs.Nobody;
     private CancellationTokenSource? _executionCts;
@@ -120,6 +122,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
     private string? _parentSessionId;
     private string? _subSessionId;
     private ChildFileActivityTracker _fileActivity = new(WorkingContext.Empty);
+    private string? _projectInstructions;
 
     // Default wait-for-first-delta budget when the spawn message carries none
     // (direct/test callers). Mirrors SessionConfig.PrefillTimeout so an unset
@@ -158,6 +161,25 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         IToolApprovalService? approvalService = null,
         int maxToolIterations = DefaultMaxToolIterations,
         Telemetry.ISessionMetrics? sessionMetrics = null)
+        : this(
+            definition,
+            chatClient,
+            toolAccessPolicy,
+            NullSystemPromptProvider.Instance,
+            approvalService,
+            maxToolIterations,
+            sessionMetrics)
+    {
+    }
+
+    private SubAgentActor(
+        SubAgentDefinition definition,
+        IChatClient chatClient,
+        ToolAccessPolicy toolAccessPolicy,
+        ISystemPromptProvider promptProvider,
+        IToolApprovalService? approvalService,
+        int maxToolIterations,
+        Telemetry.ISessionMetrics? sessionMetrics)
     {
         if (maxToolIterations <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxToolIterations), maxToolIterations,
@@ -171,8 +193,10 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         _chatClient = chatClient;
         _sessionMetrics = sessionMetrics;
         _toolAccessPolicy = toolAccessPolicy;
+        _promptProvider = promptProvider;
         _approvalService = approvalService;
         _maxToolIterations = maxToolIterations;
+        _projectInstructions = definition.ProjectInstructions;
         _log = Context.GetLogger();
 
         // Build a private ToolRegistry for this subagent's tool subset
@@ -203,6 +227,52 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             approvalService,
             maxToolIterations,
             sessionMetrics));
+    }
+
+    internal static Props CreatePropsWithProjectInstructionProvider(
+        SubAgentDefinition definition,
+        IChatClient chatClient,
+        ToolAccessPolicy toolAccessPolicy,
+        ISystemPromptProvider promptProvider,
+        IToolApprovalService? approvalService = null,
+        int maxToolIterations = DefaultMaxToolIterations,
+        Telemetry.ISessionMetrics? sessionMetrics = null)
+    {
+        ArgumentNullException.ThrowIfNull(promptProvider);
+        return Props.CreateBy(new SubAgentActorProducer(
+            definition,
+            chatClient,
+            toolAccessPolicy,
+            promptProvider,
+            approvalService,
+            maxToolIterations,
+            sessionMetrics));
+    }
+
+    private sealed class SubAgentActorProducer(
+        SubAgentDefinition definition,
+        IChatClient chatClient,
+        ToolAccessPolicy toolAccessPolicy,
+        ISystemPromptProvider promptProvider,
+        IToolApprovalService? approvalService,
+        int maxToolIterations,
+        Telemetry.ISessionMetrics? sessionMetrics) : IIndirectActorProducer
+    {
+        public Type ActorType => typeof(SubAgentActor);
+
+        public ActorBase Produce()
+            => new SubAgentActor(
+                definition,
+                chatClient,
+                toolAccessPolicy,
+                promptProvider,
+                approvalService,
+                maxToolIterations,
+                sessionMetrics);
+
+        public void Release(ActorBase actor)
+        {
+        }
     }
 
     /// <summary>
@@ -290,7 +360,9 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             // Build initial conversation: system prompt (from file, verbatim) + task as user message.
             // If the caller supplied runtime context, prefix it onto the user message so the
             // system prompt stays reproducible across invocations.
-            _history.Add(new AiChatMessage(Microsoft.Extensions.AI.ChatRole.System, BuildSystemPrompt(_definition)));
+            _history.Add(new AiChatMessage(
+                Microsoft.Extensions.AI.ChatRole.System,
+                BuildSystemPrompt(_definition, _projectInstructions)));
             _history.Add(new AiChatMessage(Microsoft.Extensions.AI.ChatRole.User,
                 BuildUserMessage(
                     msg.RuntimeContext,
@@ -438,12 +510,16 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                 _history.Add(ChatMessageConverter.ToAiMessage(result));
                 if (result.ToolCallId is { } callId)
                     _fileActivity.Complete(callId.Value, result.Content);
+                TryApplyProjectDirectory(result);
                 var preview = result.Content is { Length: > 200 }
                     ? result.Content[..200] + "..."
                     : result.Content ?? "(null)";
                 _log.Info("SubAgent [{AgentName}] tool [{ToolName}] result: {Result}",
                     _definition.Name, result.Name ?? "unknown", SecretOutputRedactor.Redact(preview));
             }
+
+            foreach (var change in msg.ScratchCorrectionChanges)
+                _sessionScratchCorrections.Apply(change);
 
             AddModelInputMediaNudge(msg.ModelInputMediaReferences);
 
@@ -685,6 +761,10 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
         var self = Self;
         var executor = new DispatchingToolExecutor(_toolRegistry, _toolAccessPolicy, _approvalService);
+        var setWorkingDirectoryTool =
+            _toolRegistry.GetByName(SetWorkingDirectoryTool.ToolName) as SetWorkingDirectoryTool;
+        Func<string, ToolInvocationContext, bool>? canDeclareWorkingDirectory =
+            setWorkingDirectoryTool is null ? null : setWorkingDirectoryTool.CanDeclare;
         _toolExecutionWatchdogState = _approvalBridge is null
             ? ToolExecutionWatchdogState.None
             : ToolExecutionWatchdogState.RunningApprovalCapableTools;
@@ -696,7 +776,9 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             _executionCts?.Token ?? CancellationToken.None,
             _externalCts?.Token ?? CancellationToken.None,
             self,
-            _approvalBridge);
+            _approvalBridge,
+            _sessionScratchCorrections.Snapshot(),
+            canDeclareWorkingDirectory);
     }
 
     private void FireLlmCall(bool forceNoTools = false)
@@ -761,6 +843,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         // caller wins; subsequent calls are no-ops.
         if (_completed) return;
         _completed = true;
+        _sessionScratchCorrections.Clear();
 
         _toolExecutionWatchdogState = ToolExecutionWatchdogState.None;
         _pendingApprovalWaits = 0;
@@ -946,6 +1029,51 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         return _fileActivity.BuildResult();
     }
 
+    private void TryApplyProjectDirectory(SerializableChatMessage result)
+    {
+        if (result.Name is not SetWorkingDirectoryTool.ToolName
+            || result.Content is null
+            || _toolRegistry.GetByName(SetWorkingDirectoryTool.ToolName) is not SetWorkingDirectoryTool tool)
+        {
+            return;
+        }
+
+        var projectDirectory = result.Content.Trim();
+        var validatedWorkingContext = WorkingContext.Empty.WithProjectDirectory(projectDirectory);
+        if (!string.Equals(
+                validatedWorkingContext.ProjectDirectory,
+                projectDirectory,
+                StringComparison.Ordinal)
+            || !Path.IsPathRooted(projectDirectory)
+            || !tool.CanDeclare(projectDirectory, ToolExecutionContext.Invocation))
+        {
+            return;
+        }
+
+        var nextScope = ToolExecutionContext.RunScope with
+        {
+            ProjectDirectory = projectDirectory
+        };
+        _toolExecutionContext = new ToolExecutionContext(
+            nextScope,
+            ToolExecutionContext.ExecutionTimeout);
+        _fileActivity.SetProjectDirectory(projectDirectory);
+        _projectInstructions = _promptProvider.GetProjectInstructions(
+            nextScope.Audience,
+            projectDirectory);
+
+        var prompt = BuildSystemPrompt(_definition, _projectInstructions);
+        var systemMessage = new AiChatMessage(Microsoft.Extensions.AI.ChatRole.System, prompt);
+        if (_history.Count > 0 && _history[0].Role == Microsoft.Extensions.AI.ChatRole.System)
+            _history[0] = systemMessage;
+        else
+            _history.Insert(0, systemMessage);
+
+        _log.Info("SubAgent [{AgentName}] project directory set to {ProjectDir}",
+            _definition.Name,
+            projectDirectory);
+    }
+
     private static string ExtractText(AiChatMessage message)
     {
         var sb = new StringBuilder();
@@ -1127,7 +1255,9 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         CancellationToken ct,
         CancellationToken externalCt,
         IActorRef self,
-        IParentApprovalBridge? approvalBridge = null)
+        IParentApprovalBridge? approvalBridge,
+        SessionScratchCorrectionDispatch scratchCorrections,
+        Func<string, ToolInvocationContext, bool>? canDeclareWorkingDirectory)
     {
         try
         {
@@ -1147,17 +1277,87 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
                 var meta = interpretation.Meta;
                 var cleanedTc = interpretation.Cleaned;
+                var scratchCall = SessionToolExecutionPipeline.BuildSessionScratchCallSemantics(
+                    cleanedTc,
+                    meta,
+                    toolContext.ExecutionTimeout.Value,
+                    executor is ISessionScratchRetryAwareExecutor scratchAwareExecutor
+                        ? scratchAwareExecutor.Shell
+                        : ApprovalShell.Bash);
+                SessionScratchCorrectionKey? consumedScratchKey = null;
+                if (scratchCall is { } call
+                    && scratchCorrections.TryConsume(call, out var correctionKey)
+                    && executor is ISessionScratchRetryAwareExecutor retryAwareExecutor)
+                {
+                    consumedScratchKey = correctionKey;
+                    retryAwareExecutor.MarkSessionScratchRetry(
+                        toolContext,
+                        new ToolAgentCorrection.SessionScratchSuggested(
+                            correctionKey.SessionDirectory,
+                            correctionKey.TemporaryRoot,
+                            correctionKey.Call.Shell));
+                }
                 try
                 {
                     var result = await executor.ExecuteAsync(cleanedTc, toolContext, ct);
-                    return BuildToolResult(cleanedTc, result, toolContext, modelInputBudget);
+                    return BuildToolResult(
+                        cleanedTc,
+                        result,
+                        toolContext,
+                        modelInputBudget,
+                        consumedScratchKey is { } directConsumed
+                            ? new SessionScratchCorrectionChange.Consume(directConsumed)
+                            : null);
                 }
                 catch (ToolApprovalRequiredException approvalEx)
-                    when (approvalBridge is not null)
                 {
                     var ctx = approvalEx.ApprovalContext;
+                    if (approvalBridge is not null
+                        && ctx.AgentCorrection is
+                        ToolAgentCorrection.SessionScratchSuggested scratchCorrection
+                        && scratchCall is { } correctedCall)
+                    {
+                        var correctionText = SessionToolExecutionPipeline.BuildSessionScratchCorrection(
+                            scratchCorrection.SessionDirectory);
+                        var newCorrectionKey = new SessionScratchCorrectionKey(
+                            correctedCall,
+                            scratchCorrection.TemporaryRoot,
+                            scratchCorrection.SessionDirectory);
+                        return BuildToolResult(
+                            cleanedTc,
+                            correctionText,
+                            toolContext,
+                            modelInputBudget,
+                            new SessionScratchCorrectionChange.Arm(newCorrectionKey));
+                    }
+
+                    var projectScopeCorrection =
+                        SessionToolExecutionPipeline.BuildProjectScopeDeclarationCorrection(
+                            ctx,
+                            canDeclareWorkingDirectory is not null,
+                            toolContext.Invocation,
+                            canDeclareWorkingDirectory);
+                    if (!string.IsNullOrEmpty(projectScopeCorrection))
+                    {
+                        return BuildToolResult(
+                            cleanedTc,
+                            projectScopeCorrection,
+                            toolContext,
+                            modelInputBudget);
+                    }
+
+                    if (approvalBridge is null)
+                    {
+                        throw new ParentApprovalUnavailableException(
+                            $"Tool '{tc.Name}' requires interactive approval, but no parent approval bridge is available.");
+                    }
+
                     var bridgeCandidates = ctx.Candidates is { Count: > 0 } c
-                        ? c.Select(x => new ParentApprovalCandidate(x.Verb, x.Directory)).ToList()
+                        ? c.Select(x => new ParentApprovalCandidate(x.Verb, x.Directory)
+                        {
+                            Shell = x.Shell,
+                            VerbTokens = x.VerbTokens,
+                        }).ToList()
                         : (IReadOnlyList<ParentApprovalCandidate>)[];
                     var bridgeOptions = ctx.Options
                         .Select(o => new ParentApprovalOption(o.Key.Value, o.Label))
@@ -1199,20 +1399,33 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                         var retryContext = CreatePerToolExecutionContext(executionContext, meta);
                         retryContext.Approval.SeedOneTimeApproval(tc.Name, OneTimeApprovalKeys.Create(ctx));
                         var result = await executor.ExecuteAsync(cleanedTc, retryContext, ct);
-                        return BuildToolResult(cleanedTc, result, retryContext, modelInputBudget);
+                        return BuildToolResult(
+                            cleanedTc,
+                            result,
+                            retryContext,
+                            modelInputBudget,
+                            consumedScratchKey is { } approvedConsumed
+                                ? new SessionScratchCorrectionChange.Consume(approvedConsumed)
+                                : null);
                     }
 
                     var reason = decision == ParentApprovalDecision.TimedOut
                         ? "Tool access denied: approval_timed_out"
                         : "Tool access denied: approval_denied_by_user";
-                    return BuildToolResult(tc, reason, toolContext, modelInputBudget);
-                }
-                catch (ToolApprovalRequiredException)
-                {
-                    // Missing bridge wiring is a security/configuration failure,
-                    // not a recoverable tool error for the model to continue past.
-                    throw new ParentApprovalUnavailableException(
-                        $"Tool '{tc.Name}' requires interactive approval, but no parent approval bridge is available.");
+                    if (decision == ParentApprovalDecision.Denied
+                        && consumedScratchKey is { } deniedScratchRetry)
+                    {
+                        reason = $"{reason}\n{SessionToolExecutionPipeline.BuildSessionScratchDenialHint(deniedScratchRetry.SessionDirectory)}";
+                    }
+
+                    return BuildToolResult(
+                        tc,
+                        reason,
+                        toolContext,
+                        modelInputBudget,
+                        consumedScratchKey is { } deniedConsumed
+                            ? new SessionScratchCorrectionChange.Consume(deniedConsumed)
+                            : null);
                 }
                 catch (ParentApprovalUnavailableException)
                 {
@@ -1231,7 +1444,14 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                 }
                 catch (Exception ex)
                 {
-                    return BuildToolResult(tc, $"Error: {ex.Message}", toolContext, modelInputBudget);
+                    return BuildToolResult(
+                        tc,
+                        $"Error: {ex.Message}",
+                        toolContext,
+                        modelInputBudget,
+                        consumedScratchKey is { } failedConsumed
+                            ? new SessionScratchCorrectionChange.Consume(failedConsumed)
+                            : null);
                 }
             });
 
@@ -1239,7 +1459,8 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             self.Tell(new ToolExecutionCompleted
             {
                 ToolResults = [.. results.Select(r => r.Message)],
-                ModelInputMediaReferences = [.. results.SelectMany(r => r.ModelInputMediaReferences)]
+                ModelInputMediaReferences = [.. results.SelectMany(r => r.ModelInputMediaReferences)],
+                ScratchCorrectionChanges = [.. results.Where(r => r.ScratchCorrectionChange is not null).Select(r => r.ScratchCorrectionChange!)]
             });
         }
         catch (Exception ex)
@@ -1262,7 +1483,8 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         FunctionCallContent toolCall,
         string resultText,
         ToolExecutionContext toolContext,
-        ModelInputBatchBudget modelInputBudget)
+        ModelInputBatchBudget modelInputBudget,
+        SessionScratchCorrectionChange? scratchCorrectionChange = null)
     {
         var materialization = MaterializeModelInputFiles(toolContext, modelInputBudget);
         if (materialization.RequestedCount > materialization.MediaReferences.Count)
@@ -1280,7 +1502,8 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                 ToolCallId = new ToolCallId(toolCall.CallId),
                 Name = toolCall.Name
             },
-            materialization.MediaReferences);
+            materialization.MediaReferences,
+            scratchCorrectionChange);
     }
 
     private static ModelInputMaterializationResult MaterializeModelInputFiles(
@@ -1302,16 +1525,19 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
     private sealed record SubAgentToolCallResult(
         SerializableChatMessage Message,
-        IReadOnlyList<SerializableMediaReference> ModelInputMediaReferences);
+        IReadOnlyList<SerializableMediaReference> ModelInputMediaReferences,
+        SessionScratchCorrectionChange? ScratchCorrectionChange);
 
-    private static string BuildSystemPrompt(SubAgentDefinition definition)
+    private static string BuildSystemPrompt(
+        SubAgentDefinition definition,
+        string? projectInstructions)
     {
         // Assemble the identity stack that sub-agents inherit from the parent session:
         // 1. Embedded operating core + deployment AGENTS.md mission playbook
         // 2. Project instructions (workspace/domain context from the parent's working directory)
         var basePrompt = SystemPromptAssembler.Assemble(
             agents: definition.OperatingRules,
-            projectInstructions: definition.ProjectInstructions);
+            projectInstructions: projectInstructions);
 
         // Append the sub-agent's own system prompt (markdown body + optional skill overlay)
         var rolePrompt = string.IsNullOrWhiteSpace(basePrompt)
@@ -1363,6 +1589,9 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
             else
                 _confirmedChangedFiles.Add(activity.Path);
         }
+
+        public void SetProjectDirectory(string projectDirectory)
+            => _workingContext = _workingContext.WithProjectDirectory(projectDirectory);
 
         public WorkingContextDelta BuildResult() => new()
         {
