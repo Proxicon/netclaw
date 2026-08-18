@@ -6,15 +6,16 @@
 ## Purpose and status
 
 This is a checkpoint for the PR 8 proactive-reminder architecture correction.
-The merged-dev architecture gate and personal live matrix passed. The focused
-channel-root translation corrections are merged, and the channel ACL identity
-has been reconciled without weakening exact/default-deny policy. The reminder
-policy gate is also reconciled: an unmapped Teams channel is intentionally
-`Public`, while the single approved live team/channel is now mapped explicitly
-to `Team` in owner-only protected configuration. The remaining live matrix may
-use the normal `set_reminder` plus `current_session` production path.
+The merged-dev architecture gate and the complete live matrix passed. The
+channel-root translation corrections are merged. The channel ACL identity is
+reconciled without a change to the exact default-deny policy. The reminder
+policy gate is also reconciled. An unmapped Teams channel stays `Public`. The
+approved live team and channel use an explicit `Team` mapping in protected
+owner-only configuration. The final upload smoke rejected the activity before
+actor, model, Graph, download, staging, or reply work. PR 8 task 8.3 is complete.
 
-- Branch: `feature/teams-channel-pr8-proactive-reminders`
+- Validated branch: `dev`
+- Validated head: `fb468474`
 - Pre-checkpoint head: `4baf137c`
 - Safety reference: `backup/teams-pr8-before-quality-review`
 
@@ -118,9 +119,8 @@ empty upload shells, and mixed unsupported attachments remain fail-closed.
 The test project now links directly to the OpenSpec fixture directory and
 requires an explicit matrix entry for every JSON fixture. Focused tenant-
 evidence and Teams foundation coverage passed after the correction. The live
-channel root now passes translation and reply delivery. Channel proactive
-delivery, restart/no-resend, second-root isolation, and attachment smoke remain
-pending on an explicitly authorized channel audience/profile configuration.
+channel root now passes translation and reply delivery. The channel proactive
+matrix and the attachment gate are complete.
 
 ## Live channel ACL identity reconciliation
 
@@ -294,18 +294,13 @@ request values, content, credentials, tokens, headers, or provider exceptions.
 
 ## Known incomplete gates
 
-- The channel proactive delivery, restart/no-resend, and second-root isolation
-  matrix passed using the exact Team mapping without weakening ACL, trust, or
-  tool policy. The real-upload attachment smoke did not fail closed and remains
-  a release blocker.
+- PR 8 has no incomplete live gate. Packaging and release work can proceed.
 
 ## Resume order
 
-1. Read this checkpoint and inspect the branch diff.
-2. Do not redesign or repeat completed migration work.
-3. Confirm the owner-only runner derives exactly one approved Team audience
-   mapping and passes protected-configuration readiness.
-4. Run the dedicated live proactive matrix through `current_session`.
+1. Start PR 9 packaging and operations work from current `dev`.
+2. Do not repeat the completed PR 8 live matrix.
+3. Keep the exact ACL, trust, audience, attachment, and destination policies.
 
 ## PR #16 policy correction and final live matrix (2026-08-10)
 
@@ -339,6 +334,26 @@ one bounded, privacy-safe SDK-boundary structural capture in a separately
 authorized diagnostic pass, add a sanitized red fixture, and restore the
 fail-closed boundary through green CI before resuming packaging or release
 progression.
+
+## Final attachment gate result (2026-08-18)
+
+PR #21 added the narrow attachment-boundary correction. PR #22 added the
+configuration schema correction. Both changes merged into `dev`, and merged
+CI passed. A fresh owner-only state then passed the protected doctor checks.
+The focused Teams tests passed 87 tests. The focused schema and doctor tests
+passed 43 tests.
+
+The authorized smoke used one new channel root, one qualified bot mention,
+and one harmless small text upload. The runtime received one Teams event. It
+routed zero events and recorded one `attachment_shape_rejected` result. It
+posted, failed, and rejected zero replies. Teams showed no `Processing` update
+and no bot reply.
+
+The isolated state contained no attachment staging directory, staged file, or
+session log after the result. This proves that no actor or model session ran.
+The pre-routing rejection also prevented Graph, download, and staging work.
+The daemon and the existing development tunnel stopped immediately. No other
+live scenario ran. PR 8 task 8.3 is complete, and the release gate is clear.
 
 ## Prohibited shortcuts
 
