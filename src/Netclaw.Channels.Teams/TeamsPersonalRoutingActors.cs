@@ -1451,7 +1451,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 NonceHash = approval.NonceHash,
                 RequesterSenderId = approval.RequesterSenderId,
                 RequesterPrincipal = approval.RequesterPrincipal,
-                ExpiresAtUnixMilliseconds = approval.ExpiresAtUnixMilliseconds
+                ExpiresAtUnixMilliseconds = approval.ExpiresAtUnixMilliseconds,
+                OfferedOptionKeys = approval.OfferedOptionKeys,
+                IsMcpTool = approval.IsMcpTool
             });
             if (approval.PromptId is not null)
             {
@@ -1630,6 +1632,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             RequesterSenderId = pending.RequesterSenderId,
             RequesterPrincipal = pending.RequesterPrincipal,
             ExpiresAtUnixMilliseconds = pending.ExpiresAtUnixMilliseconds,
+            OfferedOptionKeys = pending.OfferedOptionKeys,
+            IsMcpTool = pending.IsMcpTool,
             PromptId = pending.PromptId,
             Decision = pending.Decision
         }).ToArray(),
@@ -1895,6 +1899,18 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         var correlationId = TeamsApprovalCardRenderer.CreateCorrelationId();
         var nonce = TeamsApprovalCardRenderer.CreateNonce();
         var expiresAt = _dependencies.TimeProvider.GetUtcNow().AddMinutes(15);
+        IReadOnlyList<string> offeredOptionKeys;
+        try
+        {
+            offeredOptionKeys = TeamsApprovalCardRenderer.GetOfferedOptionKeys(request);
+        }
+        catch (ArgumentException)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_card_invalid_contract");
+            Self.Tell(new DenyTeamsApprovalRequest(request));
+            return;
+        }
+
         Persist(new TeamsApprovalPendingCreated
         {
             CallId = request.CallId.Value,
@@ -1902,7 +1918,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             NonceHash = TeamsApprovalCardRenderer.HashNonce(nonce),
             RequesterSenderId = request.RequesterSenderId?.Value,
             RequesterPrincipal = request.RequesterPrincipal,
-            ExpiresAtUnixMilliseconds = expiresAt.ToUnixTimeMilliseconds()
+            ExpiresAtUnixMilliseconds = expiresAt.ToUnixTimeMilliseconds(),
+            OfferedOptionKeys = offeredOptionKeys,
+            IsMcpTool = request.ToolName.IsMcp
         }, created =>
         {
             ApplyApprovalPendingCreated(created);
@@ -2000,6 +2018,21 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
         }
 
+        if (pending.OfferedOptionKeys.Count == 0)
+        {
+            await DeliverTerminalCardAsync(destination, pending, "This approval is no longer available.");
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_legacy_unavailable");
+            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
+            return;
+        }
+
+        if (!pending.OfferedOptionKeys.Contains(action.Action, StringComparer.Ordinal))
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_option_unavailable");
+            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+            return;
+        }
+
         if (_dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds() >= pending.ExpiresAtUnixMilliseconds)
         {
             Persist(new TeamsApprovalConsumed
@@ -2047,14 +2080,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             {
                 SessionId = _sessionId,
                 CallId = new ToolCallId(pending.CallId),
-                SelectedKey = decision.Action == "approve"
-                    ? ApprovalOptionKeys.ApproveOnceKey
-                    : ApprovalOptionKeys.DenyKey,
+                SelectedKey = new ApprovalOptionKey(decision.Action),
                 SenderId = new SenderId(decision.SenderId)
             });
 
             var text = feedback is CommandAck
-                ? decision.Action == "approve" ? "Approved." : "Denied."
+                ? FormatApprovalDecision(pending, decision.Action)
                 : "This approval is no longer available.";
             await DeliverTerminalCardAsync(decision.Destination, pending, text);
         }
@@ -2149,7 +2180,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             || created.NonceHash.Length != 64
             || created.NonceHash.Any(static character => !char.IsAsciiHexDigit(character))
             || created.ExpiresAtUnixMilliseconds <= 0
-            || string.IsNullOrWhiteSpace(created.CallId))
+            || string.IsNullOrWhiteSpace(created.CallId)
+            || !HasValidOfferedOptionKeys(created.OfferedOptionKeys))
         {
             throw new InvalidOperationException("The Teams approval state is invalid.");
         }
@@ -2163,7 +2195,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             created.NonceHash,
             created.RequesterSenderId,
             created.RequesterPrincipal,
-            created.ExpiresAtUnixMilliseconds)))
+            created.ExpiresAtUnixMilliseconds,
+            created.OfferedOptionKeys.ToArray(),
+            created.IsMcpTool)))
         {
             throw new InvalidOperationException("The Teams approval state contains a duplicate correlation.");
         }
@@ -2183,13 +2217,32 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private void ApplyApprovalConsumed(TeamsApprovalConsumed consumed)
     {
         if (!_pendingApprovals.TryGetValue(consumed.CorrelationId, out var pending)
-            || (consumed.Decision is not "approve" and not "deny" and not "expired"))
+            || !IsValidPersistedDecision(pending, consumed.Decision))
         {
             throw new InvalidOperationException("The Teams approval terminal state is invalid.");
         }
 
         _pendingApprovals[consumed.CorrelationId] = pending with { Decision = consumed.Decision };
     }
+
+    private static bool HasValidOfferedOptionKeys(IReadOnlyList<string> optionKeys)
+    {
+        if (optionKeys.Count > TeamsApprovalCardRenderer.MaxOptionCount)
+            return false;
+
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        return optionKeys.All(key => TeamsApprovalAction.IsSupportedAction(key) && keys.Add(key));
+    }
+
+    private static bool IsValidPersistedDecision(TeamsPendingApproval pending, string decision) =>
+        decision == "expired"
+        || pending.OfferedOptionKeys.Contains(decision, StringComparer.Ordinal)
+        || (pending.OfferedOptionKeys.Count == 0 && decision is "approve" or "deny");
+
+    private static string FormatApprovalDecision(TeamsPendingApproval pending, string selectedKey) =>
+        selectedKey == ApprovalOptionKeys.Deny
+            ? "Denied."
+            : $"Approved: {ApprovalOptionKeys.LabelFor(selectedKey, pending.IsMcpTool)}.";
 
     private static void EnsureValidFingerprint(string fingerprint)
     {
@@ -2251,6 +2304,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         string? RequesterSenderId,
         PrincipalClassification? RequesterPrincipal,
         long ExpiresAtUnixMilliseconds,
+        IReadOnlyList<string> OfferedOptionKeys,
+        bool IsMcpTool,
         string? PromptId = null,
         string? Decision = null);
 

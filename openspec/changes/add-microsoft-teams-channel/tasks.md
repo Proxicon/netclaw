@@ -204,19 +204,40 @@ prerequisite:** final manifest/runtime details that depend on 0.2 observations.
 - [x] 9.1 Add manifest/assets/runbook covering registration, secret rotation,
   tunnel, sideloading, production publication, health, and rollback.
 
-## PR 10 — Hardening and tenant smoke
+## PR 10 — Tool-approval parity, hardening, and tenant smoke
 
-**Objective:** production readiness. **Areas:** rate limits, bounded ingress,
-telemetry/health, offline integration suite, opt-in tenant smoke, operations
-skill/OpenSpec updates. **Focused tests:** full offline matrix, opt-in live smoke,
-slopwatch, headers, diff check, strict OpenSpec validation. **Acceptance:** all
-tenant gates are evidenced or the feature stays disabled/non-released. **Tenant
-prerequisite:** complete configured test app and public HTTPS endpoint. **Rollback:**
-`Teams.Enabled=false`; binary rollback only where serialization tests prove it.
+**Objective:** make Teams a protocol-correct approval adapter, then prove its
+production boundary. **Areas:** Teams approval cards, SDK translation, binding
+state, protobuf contracts, persistence tests, rate limits, bounded ingress,
+telemetry/health, offline integration, opt-in tenant smoke, runbooks, and
+OpenSpec. **Focused tests:** option matrix, forged-option rejection,
+passivation/restart, old-journal recovery, serializer compatibility, full
+offline matrix, opt-in live smoke, slopwatch, headers, diff check, and strict
+OpenSpec validation. **Acceptance:** Teams renders only session-supplied
+options and forwards only a persisted offered key. All tenant gates need
+evidence, or the feature stays disabled and unreleased. **Tenant prerequisite:**
+a configured test app and a public HTTPS endpoint. **Rollback:** set
+`Teams.Enabled=false`. Do not claim binary rollback while a journal contains
+PR 10 approval state.
 
-- [ ] 10.1 Add rate limiting, bounded ingress, telemetry, contained health, and
-  offline daemon/TestServer integration coverage.
-- [ ] 10.2 Add secret-gated tenant smoke fixtures and document invocation without
-  making normal CI tenant-dependent.
-- [ ] 10.3 Run all applicable quality gates and update the operations system skill
-  and final OpenSpec artifacts.
+- [ ] 10.1 Replace the binary Teams card with a bounded native renderer of the
+  supplied `ToolInteractionRequest`. Preserve request option order, labels, and
+  canonical keys. Show bounded tool, request, candidate, scope, complex-command,
+  and adopted-context facts by existing display contracts. Do not put those facts
+  in authorization data. Cover normal shell, shallow cwd, session scratch,
+  multi-directory, messy/dynamic, non-shell, MCP, and adopted-context prompts.
+- [ ] 10.2 Persist the ordered offered canonical option keys before card delivery.
+  Validate a submitted key against that Teams-owned pending state before consume.
+  Forward the same key in `ToolInteractionResponse`. Extend protobuf state with
+  append-only fields and exact serializer mappings. Keep nonce, correlation,
+  requester, tenant, conversation, call ID, expiry, and consume-once checks.
+  Pre-PR 10 pending cards lack an offered-key set and must end unavailable without
+  forwarding a decision. Admit their legacy action tokens only for that terminal
+  result. Never map them to a canonical approval. Test replay, forged correlation
+  or nonce, unoffered keys, every valid scope, passivation, restart, compaction,
+  old journals, and rollback limits.
+- [ ] 10.3 Add rate limits, bounded ingress, telemetry, contained health, offline
+  daemon/TestServer integration coverage, and secret-gated tenant smoke fixtures.
+  Record a tenant matrix for every rendered option shape and terminal update.
+  Keep normal CI independent of tenant secrets. Update the Teams operations
+  runbook and final OpenSpec artifacts. Run all applicable quality gates.
