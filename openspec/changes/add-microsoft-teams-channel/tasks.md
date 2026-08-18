@@ -173,7 +173,7 @@ targets while preserving evidence.
 - [x] 8.2 Implement `Pending`/`Sending`/`Sent`/`FailedRetryable`/
   `FailedPermanent`/`DeliveryUnknown` state transitions and choose/document the
   explicit `DeliveryUnknown` recovery policy.
-- [ ] 8.3 Complete the CI-gated live channel proactive matrix. Personal
+- [x] 8.3 Complete the CI-gated live channel proactive matrix. Personal
   capture, delivery, and restart recovery passed. PR #16 added the structured
   exact Team audience override required for canonical identifiers containing
   configuration delimiters and merged after all required CI checks passed. A
@@ -201,7 +201,7 @@ no Graph/group/meeting/tab capability and no secret disclosure. **Tenant
 prerequisite:** final manifest/runtime details that depend on 0.2 observations.
 **Rollback:** withdraw package; `Teams.Enabled=false` removes ingress on restart.
 
-- [ ] 9.1 Add manifest/assets/runbook covering registration, secret rotation,
+- [x] 9.1 Add manifest/assets/runbook covering registration, secret rotation,
   tunnel, sideloading, production publication, health, and rollback.
 
 ## PR 10 — Hardening and tenant smoke
