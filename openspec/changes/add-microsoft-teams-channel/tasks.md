@@ -201,7 +201,7 @@ no Graph/group/meeting/tab capability and no secret disclosure. **Tenant
 prerequisite:** final manifest/runtime details that depend on 0.2 observations.
 **Rollback:** withdraw package; `Teams.Enabled=false` removes ingress on restart.
 
-- [ ] 9.1 Add manifest/assets/runbook covering registration, secret rotation,
+- [x] 9.1 Add manifest/assets/runbook covering registration, secret rotation,
   tunnel, sideloading, production publication, health, and rollback.
 
 ## PR 10 — Hardening and tenant smoke
