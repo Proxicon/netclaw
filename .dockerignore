@@ -15,3 +15,11 @@
 README.md
 docs
 openspec
+
+# The image build only publishes the CLI and daemon projects. These paths do
+# not affect their source build and make remote builder context transfers slow.
+benchmarks
+samples
+tests
+evals
+deploy/teams/*.png
