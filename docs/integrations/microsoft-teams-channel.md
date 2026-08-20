@@ -61,13 +61,17 @@ features.
 Run the package script from the Netclaw repository root:
 
 ```powershell
-pwsh ./deploy/teams/build-package.ps1 `
-  -AppId '<entra-application-id>' `
-  -DeveloperName '<operator-name>' `
-  -PrivacyUrl 'https://example.com/privacy' `
-  -TermsOfUseUrl 'https://example.com/terms' `
-  -Version '1.0.0' `
-  -OutputPath './artifacts/netclaw-teams.zip'
+$BuildPackage = @{
+    AppId = '00000000-0000-0000-0000-000000000000'
+    DeveloperName = 'Example Operator'
+    PrivacyUrl = 'https://example.com/privacy'
+    TermsOfUseUrl = 'https://example.com/terms'
+    OutputPath = './artifacts/netclaw-teams.zip'
+    Version = '1.0.0'
+    Verbose = $true
+}
+
+./deploy/teams/build-package.ps1 @BuildPackage
 ```
 
 The script requires absolute HTTPS policy URLs. It creates a ZIP file with

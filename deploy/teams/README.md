@@ -10,13 +10,17 @@ group chat, meeting, tab, calling, video, or file capabilities.
 Use public HTTPS pages for your privacy policy and terms of use.
 
 ```powershell
-pwsh ./deploy/teams/build-package.ps1 `
-  -AppId '00000000-0000-0000-0000-000000000000' `
-  -DeveloperName 'Example Operator' `
-  -PrivacyUrl 'https://example.com/privacy' `
-  -TermsOfUseUrl 'https://example.com/terms' `
-  -Version '1.0.0' `
-  -OutputPath './artifacts/netclaw-teams.zip'
+$BuildPackage = @{
+    AppId = '00000000-0000-0000-0000-000000000000'
+    DeveloperName = 'Example Operator'
+    PrivacyUrl = 'https://example.com/privacy'
+    TermsOfUseUrl = 'https://example.com/terms'
+    OutputPath = './artifacts/netclaw-teams.zip'
+    Version = '1.0.0'
+    Verbose = $true
+}
+
+./build-package.ps1 @BuildPackage
 ```
 
 The developer name has a 32-character limit. Increase the semantic version for
