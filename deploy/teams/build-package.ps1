@@ -32,7 +32,11 @@ foreach ($policyUrl in @($PrivacyUrl, $TermsOfUseUrl)) {
 }
 
 $outputFullPath = [IO.Path]::GetFullPath($OutputPath)
-if ((Test-Path -LiteralPath $outputFullPath) -and -not $Force) {
+if (Test-Path -LiteralPath $outputFullPath -PathType Container) {
+    throw "OutputPath must name a ZIP file, not a directory: $outputFullPath"
+}
+
+if ((Test-Path -LiteralPath $outputFullPath -PathType Leaf) -and -not $Force) {
     throw "The output package already exists: $outputFullPath. Use -Force to replace it."
 }
 
@@ -56,7 +60,9 @@ try {
     $manifest.developer.termsOfUseUrl = $TermsOfUseUrl.AbsoluteUri
 
     $manifestPath = Join-Path $stagingPath 'manifest.json'
-    $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM
+    $manifestJson = $manifest | ConvertTo-Json -Depth 20
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($manifestPath, $manifestJson, $utf8NoBom)
 
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'color.png') -Destination $stagingPath
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'outline.png') -Destination $stagingPath
