@@ -28,6 +28,7 @@ public sealed class TeamsAppPackageTests
 
         Assert.Equal("1.28", root.GetProperty("manifestVersion").GetString());
         Assert.Equal("${{TEAMS_APP_ID}}", root.GetProperty("id").GetString());
+        Assert.Equal("tier1", root.GetProperty("supportsChannelFeatures").GetString());
         Assert.DoesNotContain("secret", root.GetRawText(), StringComparison.OrdinalIgnoreCase);
 
         var bots = root.GetProperty("bots");
@@ -105,6 +106,7 @@ public sealed class TeamsAppPackageTests
 
             Assert.Equal(appId.ToString(), root.GetProperty("id").GetString());
             Assert.Equal("1.2.3", root.GetProperty("version").GetString());
+            Assert.Equal("tier1", root.GetProperty("supportsChannelFeatures").GetString());
             Assert.Equal(appId.ToString(), root.GetProperty("bots")[0].GetProperty("botId").GetString());
             Assert.Equal("Netclaw Test Operator", root.GetProperty("developer").GetProperty("name").GetString());
             Assert.Equal("https://example.test/privacy", root.GetProperty("developer").GetProperty("privacyUrl").GetString());
