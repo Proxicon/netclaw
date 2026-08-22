@@ -90,6 +90,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         };
         if (value.RequesterSenderId is not null) proto.RequesterSenderId = value.RequesterSenderId;
         if (value.RequesterPrincipal is { } principal) proto.RequesterPrincipal = (int)principal;
+        proto.OfferedOptionKeys.AddRange(value.OfferedOptionKeys);
+        proto.IsMcpTool = value.IsMcpTool;
         return proto;
     }
 
@@ -100,7 +102,9 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         NonceHash = value.NonceHash,
         RequesterSenderId = value.HasRequesterSenderId ? value.RequesterSenderId : null,
         RequesterPrincipal = value.HasRequesterPrincipal ? (PrincipalClassification)value.RequesterPrincipal : null,
-        ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds
+        ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds,
+        OfferedOptionKeys = value.OfferedOptionKeys.ToArray(),
+        IsMcpTool = value.IsMcpTool
     };
 
     private static Proto.TeamsApprovalCardDeliveredProto ToProto(TeamsApprovalCardDelivered value) => new()
@@ -205,6 +209,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         if (value.RequesterPrincipal is { } principal) proto.RequesterPrincipal = (int)principal;
         if (value.PromptId is not null) proto.PromptId = value.PromptId;
         if (value.Decision is not null) proto.Decision = value.Decision;
+        proto.OfferedOptionKeys.AddRange(value.OfferedOptionKeys);
+        proto.IsMcpTool = value.IsMcpTool;
         return proto;
     }
 
@@ -214,6 +220,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         RequesterSenderId = value.HasRequesterSenderId ? value.RequesterSenderId : null,
         RequesterPrincipal = value.HasRequesterPrincipal ? (PrincipalClassification)value.RequesterPrincipal : null,
         ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds,
+        OfferedOptionKeys = value.OfferedOptionKeys.ToArray(),
+        IsMcpTool = value.IsMcpTool,
         PromptId = value.HasPromptId ? value.PromptId : null, Decision = value.HasDecision ? value.Decision : null
     };
 
