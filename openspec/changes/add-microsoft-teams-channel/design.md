@@ -582,33 +582,64 @@ remote-chat configuration and diagnostic surfaces used by the daemon.
 
 #### PR 6 interactive approval record (2026-08-03)
 
-`TeamsSessionBindingActor` owns each approval state. It journals a generated
-opaque correlation value, a SHA-256 nonce hash, requester authority, expiry,
-and terminal decision. It does not journal a raw nonce, card JSON, tool
-arguments, service URL, token, or SDK object. The actor creates 256-bit nonces
-and 192-bit correlation values with `RandomNumberGenerator`. It compares nonce
-hashes with `CryptographicOperations.FixedTimeEquals`.
+PR 6 added a replay-safe binary approval path. It stores a correlation value,
+a nonce hash, requester authority, expiry, prompt locator, and decision. It
+does not store a raw nonce, card JSON, tool arguments, service URL, token, or
+SDK object. The actor uses generated 256-bit nonces and 192-bit correlations.
+It compares nonce hashes with `CryptographicOperations.FixedTimeEquals`.
 
-Each card has generic text and only `approve` and `deny` Action.Execute values.
-The payload carries bounded opaque correlation and nonce values only. The daemon
-edge converts the authenticated SDK invoke into an SDK-free action record. The
-actor checks the canonical session, tenant-derived ACL, sender, captured card
-ID, correlation, nonce, action, expiry, and terminal state. It rejects all
-other values without feedback to the tool workflow.
+The PR 6 card has generic text and `approve` or `deny` action values. The actor
+checks the session, ACL, sender, prompt ID, correlation, nonce, action, expiry,
+and terminal state. It records the decision before it sends a response. A card
+update has one update attempt and one reply fallback. Presentation failure does
+not reopen a decision. The binding retains at most 128 approval states.
 
-The actor journals the terminal decision before it forwards one existing
-`ToolInteractionResponse`. A crash after that journal write can lose the
-continuation, but it cannot repeat the decision or claim exactly-once tool
-execution. A terminal card update has one update attempt and one reply fallback.
-Presentation failure does not reopen the decision. The binding snapshot holds
-the complete bounded approval state before journal compaction removes approval
-events. The actor retains at most 128 approval states and lazily marks expiry
-during an action.
+#### PR 10 approval-option parity record (2026-08-19)
 
-Older binaries do not recognize the new approval protobuf manifests. Operators
-must disable Teams instead of using binary rollback against a journal that
-contains PR 6 approval state. Offline tests cover the contract and serializer.
-Live tenant validation remains a release gate.
+`ToolAccessPolicy` is the approval authority. It computes the ordered options
+for each call. Teams must not recreate this policy. The adapter renders only
+the options in `ToolInteractionRequest.Options`, in that order. Each action
+carries the supplied canonical option key, correlation, and nonce. The card
+payload remains correlation data, not authority.
+
+The stable keys are `approve_once`, `approve_session`, `approve_always`,
+`approve_everywhere`, and `deny`. An eligible shell call can offer all five.
+A shallow or session-scratch scope omits `approve_always`. A messy or dynamic
+call, and a session-scratch retry, offers only `approve_once` and `deny`.
+Non-shell tools omit `approve_always`. An MCP `approve_everywhere` option uses
+the supplied label `Always allow this tool`. Its decision saves a canonical-tool
+grant, not a directory grant.
+
+PR 10 stores the ordered offered keys in the pending Teams state before card
+delivery. The state also stores only bounded facts needed for a terminal label.
+It must not store raw arguments, request text, card JSON, SDK objects, or a raw
+nonce. The action validator checks that the canonical submitted key exists in
+this stored set before its consume transition. It then forwards that exact key
+in `ToolInteractionResponse`.
+
+The session journal also stores option keys. The binding must not query it or
+recompute policy during an action. Such a cross-actor lookup cannot protect the
+binding consume transition. The Teams state is the local authority for the card
+that it posted.
+
+A pre-PR 10 pending entry has no offered-key set. A new binary must treat its
+action as unavailable and must not forward a decision. This is fail closed.
+The translator may admit its legacy `approve` or `deny` token only to return
+that terminal result. It must not map a legacy token to a canonical key.
+New protobuf fields use unused append-only numbers. Current code must read old
+journals. An older binary cannot process PR 10 card values safely. Operators
+must disable Teams before a binary rollback where PR 10 approval state exists.
+
+The card must give an operator useful bounded context. It shows the tool, a
+bounded request display, and the supplied fixed option labels. It shows bounded
+candidate verbs or patterns, the effective scope summary, complex-command state,
+and adopted-context presence when supplied. The renderer uses existing display
+and truncation contracts. It must not persist raw display data only for recovery.
+
+The actor still records the terminal decision before feedback. A crash can lose
+the continuation. It cannot repeat a tool decision. A terminal card update still
+has one update attempt and one reply fallback. Tenant proof must cover every
+option shape and its terminal display.
 
 ## Migration Plan
 

@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Netclaw.Actors.Protocol;
+using Netclaw.Channels;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Channels.Teams;
@@ -17,6 +18,12 @@ namespace Netclaw.Channels.Teams;
 /// </summary>
 public static class TeamsApprovalCardRenderer
 {
+    internal const int MaxOptionCount = 16;
+    internal const int MaxOptionLabelLength = 128;
+    internal const int MaxToolNameChars = 128;
+    internal const int MaxRequestDisplayChars = 2_048;
+    internal const int MaxSummaryChars = 512;
+
     public static TeamsApprovalCard CreatePending(
         ToolInteractionRequest request,
         string correlationId,
@@ -28,15 +35,26 @@ public static class TeamsApprovalCardRenderer
         if (!TeamsApprovalAction.IsBoundedOpaqueValue(nonce, TeamsApprovalAction.MaxNonceLength))
             throw new ArgumentException("The approval nonce must be bounded and opaque.", nameof(nonce));
 
+        ValidateOptions(request.Options);
         var card = new TeamsApprovalCard(
-            "Approval required",
-            "Netclaw needs approval to continue.",
-            [
-                new TeamsApprovalCardAction("Approve", "approve", correlationId, nonce),
-                new TeamsApprovalCardAction("Deny", "deny", correlationId, nonce)
-            ]);
+            request.ToolName.IsMcp ? "MCP tool approval required" : "Tool approval required",
+            BuildPendingBody(request),
+            request.Options
+                .Select(option => new TeamsApprovalCardAction(
+                    option.Label,
+                    option.Key.Value,
+                    correlationId,
+                    nonce))
+                .ToArray());
         EnsureBounded(card);
         return card;
+    }
+
+    public static IReadOnlyList<string> GetOfferedOptionKeys(ToolInteractionRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateOptions(request.Options);
+        return request.Options.Select(static option => option.Key.Value).ToArray();
     }
 
     public static TeamsApprovalCard CreateTerminal(string message)
@@ -87,6 +105,54 @@ public static class TeamsApprovalCardRenderer
 
     private static string Truncate(string value, int maximumLength)
         => value.Length <= maximumLength ? value : value[..maximumLength];
+
+    private static string BuildPendingBody(ToolInteractionRequest request)
+    {
+        var requestLabel = request.ToolName.IsMcp ? "Invocation" : "Request";
+        var lines = new List<string>
+        {
+            $"Tool: {ApprovalDisplayTextFormatter.Truncate(request.ToolName.Value, MaxToolNameChars)}",
+            $"{requestLabel}: {ApprovalDisplayTextFormatter.Truncate(request.DisplayText, MaxRequestDisplayChars)}"
+        };
+
+        var candidates = request.CandidateVerbs.Count > 0 ? request.CandidateVerbs : request.Patterns;
+        if (candidates.Count > 0)
+            lines.Add($"Candidates: {ApprovalDisplayTextFormatter.Truncate(string.Join(", ", candidates), MaxSummaryChars)}");
+        if (!string.IsNullOrWhiteSpace(request.Cwd))
+            lines.Add($"Working directory: {ApprovalDisplayTextFormatter.Truncate(request.Cwd, MaxSummaryChars)}");
+        if (request.IsMessy)
+            lines.Add("Reusable approval is unavailable for this request.");
+        if (request.HasAdoptedContext)
+        {
+            lines.Add("Adopted context: present.");
+            if (request.AdoptedSpeakerIds.Count > 0)
+            {
+                lines.Add(
+                    $"Speakers: {ApprovalDisplayTextFormatter.Truncate(string.Join(", ", request.AdoptedSpeakerIds), MaxSummaryChars)}");
+            }
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private static void ValidateOptions(IReadOnlyList<ToolInteractionOption> options)
+    {
+        if (options.Count is 0 or > MaxOptionCount)
+            throw new ArgumentException("The approval option count is invalid.", nameof(options));
+
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var option in options)
+        {
+            if (!TeamsApprovalAction.IsSupportedAction(option.Key.Value)
+                || !keys.Add(option.Key.Value)
+                || string.IsNullOrWhiteSpace(option.Label)
+                || option.Label.Length > MaxOptionLabelLength
+                || option.Label.Any(char.IsControl))
+            {
+                throw new ArgumentException("The approval options are invalid.", nameof(options));
+            }
+        }
+    }
 
     private static string Base64Url(byte[] bytes) => Convert.ToBase64String(bytes)
         .TrimEnd('=')

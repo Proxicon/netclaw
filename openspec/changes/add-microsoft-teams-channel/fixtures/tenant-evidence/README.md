@@ -21,3 +21,9 @@ facts from the PR 8 upload capture. It deliberately contains no activity,
 tenant, user, file, URL, message, or provider values. The reference-bearing
 JSON-string HTML attachment with channel data is unsupported and must be
 rejected before routing.
+
+`channel-root-html-wrapper-channel-data.json` is a synthetic regression
+fixture. It models the normal HTML rendering wrapper with channel data and a
+non-Graph rendering reference. The classifier uses the scalar HTML envelope,
+not channel data, to separate this metadata from the upload reference shape.
+All values are synthetic.
