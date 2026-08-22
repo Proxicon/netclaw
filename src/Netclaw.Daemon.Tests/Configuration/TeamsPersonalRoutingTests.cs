@@ -79,6 +79,34 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public void Teams_approval_persistence_roundtrips_offered_keys_and_tool_scope()
+    {
+        var value = new TeamsApprovalPendingCreated
+        {
+            CallId = "call-approval",
+            CorrelationId = "correlation_123",
+            NonceHash = new string('a', 64),
+            RequesterSenderId = "user-a",
+            ExpiresAtUnixMilliseconds = 4_102_444_800_000,
+            OfferedOptionKeys =
+            [
+                ApprovalOptionKeys.ApproveOnce,
+                ApprovalOptionKeys.ApproveEverywhere,
+                ApprovalOptionKeys.Deny
+            ],
+            IsMcpTool = true
+        };
+
+        var serializer = Sys.Serialization.FindSerializerFor(value);
+        var manifest = Assert.IsAssignableFrom<SerializerWithStringManifest>(serializer).Manifest(value);
+        var restored = Assert.IsType<TeamsApprovalPendingCreated>(
+            Sys.Serialization.Deserialize(serializer.ToBinary(value), serializer.Identifier, manifest));
+
+        Assert.Equal(value.OfferedOptionKeys, restored.OfferedOptionKeys);
+        Assert.True(restored.IsMcpTool);
+    }
+
+    [Fact]
     public void Binding_snapshot_roundtrips_the_last_invalidated_destination_generation()
     {
         var value = new TeamsBindingSnapshot([])
@@ -1890,8 +1918,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             DisplayText = "Approve safe tool use.",
             Options =
             [
-                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, "Approve"),
-                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, "Deny")
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, ApprovalOptionKeys.ApproveOnceLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, ApprovalOptionKeys.DenyLabel)
             ],
             RequesterSenderId = new SenderId("user-a"),
             RequesterPrincipal = PrincipalClassification.TrustedInternal
@@ -1899,7 +1927,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
         var card = replyClient.Messages[0].ApprovalCard;
         Assert.NotNull(card);
-        var approve = Assert.Single(card!.Actions, action => action.Action == "approve");
+        var approve = Assert.Single(card!.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
 
         Watch(first);
         first.Tell(PoisonPill.Instance);
@@ -1911,7 +1939,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             "conversation-approval-restart",
             approve.CorrelationId,
             approve.Nonce,
-            "synthetic-activity");
+            "synthetic-activity",
+            approve.Action);
         var accepted = await recovered.Ask<TeamsApprovalActionResult>(
             new TeamsBindingApprovalAction(action, TestContext.Current.CancellationToken),
             TestContext.Current.CancellationToken);
@@ -1926,6 +1955,155 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             TestContext.Current.CancellationToken);
         Assert.Equal(TeamsApprovalActionDisposition.AlreadyProcessed, duplicate.Disposition);
         Assert.Single(pipeline.Feedback);
+    }
+
+    [Fact]
+    public async Task Approval_action_forwards_each_persisted_option_key_unchanged()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-options");
+        var actor = CreateBindingActor(sessionId, CreateDependencies(pipeline, replyClient: replyClient), "teams-approval-options");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-approval-options", "tenant-a", "conversation-approval-options"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        var optionKeys = new[]
+        {
+            ApprovalOptionKeys.ApproveOnce,
+            ApprovalOptionKeys.ApproveSession,
+            ApprovalOptionKeys.ApproveAlways,
+            ApprovalOptionKeys.ApproveEverywhere,
+            ApprovalOptionKeys.Deny
+        };
+
+        for (var index = 0; index < optionKeys.Length; index++)
+        {
+            var optionKey = optionKeys[index];
+            subscriber.Tell(CreateApprovalRequest(sessionId, $"call-option-{index}", CreateStandardApprovalOptions()));
+            await AwaitAssertAsync(
+                () => Assert.Equal(index + 1, replyClient.Messages.Count(message => message.ApprovalCard?.Actions.Count > 0)),
+                cancellationToken: TestContext.Current.CancellationToken);
+            var card = replyClient.Messages.Last(message => message.ApprovalCard?.Actions.Count > 0).ApprovalCard!;
+            var selected = Assert.Single(card.Actions, action => action.Action == optionKey);
+
+            var result = await actor.Ask<TeamsApprovalActionResult>(
+                new TeamsBindingApprovalAction(
+                    CreateApprovalAction(
+                        "tenant-a",
+                        "conversation-approval-options",
+                        selected.CorrelationId,
+                        selected.Nonce,
+                        "synthetic-activity",
+                        optionKey),
+                    TestContext.Current.CancellationToken),
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(TeamsApprovalActionDisposition.Accepted, result.Disposition);
+            await AwaitAssertAsync(() => Assert.Equal(index + 1, pipeline.Feedback.Count), cancellationToken: TestContext.Current.CancellationToken);
+            var feedback = Assert.IsType<ToolInteractionResponse>(pipeline.Feedback[index]);
+            Assert.Equal(optionKey, feedback.SelectedKey.Value);
+        }
+    }
+
+    [Fact]
+    public async Task Approval_action_rejects_a_key_that_was_not_offered_without_consuming_the_prompt()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-unoffered");
+        var actor = CreateBindingActor(sessionId, CreateDependencies(pipeline, replyClient: replyClient), "teams-approval-unoffered");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-approval-unoffered", "tenant-a", "conversation-approval-unoffered"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(CreateApprovalRequest(
+            sessionId,
+            "call-unoffered",
+            [
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, ApprovalOptionKeys.ApproveOnceLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, ApprovalOptionKeys.DenyLabel)
+            ]));
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var card = Assert.IsType<TeamsApprovalCard>(Assert.Single(replyClient.Messages).ApprovalCard);
+        var approve = Assert.Single(card.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        var rejected = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-unoffered",
+                    approve.CorrelationId,
+                    approve.Nonce,
+                    "synthetic-activity",
+                    ApprovalOptionKeys.ApproveEverywhere),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Rejected, rejected.Disposition);
+        Assert.Empty(pipeline.Feedback);
+
+        var accepted = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-unoffered",
+                    approve.CorrelationId,
+                    approve.Nonce,
+                    "synthetic-activity",
+                    ApprovalOptionKeys.ApproveOnce),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Accepted, accepted.Disposition);
+        await AwaitAssertAsync(() => Assert.Single(pipeline.Feedback), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(ApprovalOptionKeys.ApproveOnce, Assert.IsType<ToolInteractionResponse>(pipeline.Feedback[0]).SelectedKey.Value);
+    }
+
+    [Fact]
+    public async Task Pre_pr10_pending_approval_recovers_as_unavailable()
+    {
+        const string correlationId = "legacy-approval-correlation";
+        const string nonce = "legacy-approval-nonce";
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-legacy");
+        await SeedJournalAsync(
+            BindingPersistenceId(sessionId),
+            new TeamsApprovalPendingCreated
+            {
+                CallId = "legacy-call",
+                CorrelationId = correlationId,
+                NonceHash = TeamsApprovalCardRenderer.HashNonce(nonce),
+                RequesterSenderId = "user-a",
+                ExpiresAtUnixMilliseconds = 4_102_444_800_000
+            },
+            new TeamsApprovalCardDelivered
+            {
+                CorrelationId = correlationId,
+                PromptId = "synthetic-activity"
+            });
+
+        var replyClient = new RecordingTeamsReplyClient();
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var actor = CreateBindingActor(sessionId, CreateDependencies(pipeline, replyClient: replyClient), "teams-approval-legacy");
+
+        var result = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-legacy",
+                    correlationId,
+                    nonce,
+                    "synthetic-activity",
+                    "approve"),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Unavailable, result.Disposition);
+        Assert.Empty(pipeline.Feedback);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("This approval is no longer available.", Assert.Single(replyClient.Messages).Text);
     }
 
     private IActorRef CreateBindingActor(
@@ -2360,7 +2538,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         string conversationId,
         string correlationId,
         string nonce,
-        string promptActivityId) => new(
+        string promptActivityId,
+        string action) => new(
         new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
@@ -2374,12 +2553,36 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             TimeProvider.System.GetUtcNow()),
         correlationId,
         nonce,
-        "approve",
+        action,
         null,
         null,
         null,
         promptActivityId,
         "https://service.invalid/");
+
+    private static ToolInteractionRequest CreateApprovalRequest(
+        SessionId sessionId,
+        string callId,
+        IReadOnlyList<ToolInteractionOption> options) => new()
+    {
+        SessionId = sessionId,
+        Kind = "approval",
+        CallId = new ToolCallId(callId),
+        ToolName = new ToolName("safe_tool"),
+        DisplayText = "Approve safe tool use.",
+        Options = options,
+        RequesterSenderId = new SenderId("user-a"),
+        RequesterPrincipal = PrincipalClassification.TrustedInternal
+    };
+
+    private static IReadOnlyList<ToolInteractionOption> CreateStandardApprovalOptions() =>
+    [
+        new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, ApprovalOptionKeys.ApproveOnceLabel),
+        new ToolInteractionOption(ApprovalOptionKeys.ApproveSessionKey, ApprovalOptionKeys.ApproveSessionLabel),
+        new ToolInteractionOption(ApprovalOptionKeys.ApproveAlwaysKey, ApprovalOptionKeys.ApproveAlwaysLabel),
+        new ToolInteractionOption(ApprovalOptionKeys.ApproveEverywhereKey, ApprovalOptionKeys.ApproveEverywhereLabel),
+        new ToolInteractionOption(ApprovalOptionKeys.DenyKey, ApprovalOptionKeys.DenyLabel)
+    ];
 
     private static DeliverTrustedSessionTurn CreateReminder(
         SessionId sessionId,

@@ -60,7 +60,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         var data = invokeAction.Data;
         if (!TryGetOpaqueValue(data, "correlation", TeamsApprovalAction.MaxCorrelationLength, out var correlation)
             || !TryGetOpaqueValue(data, "nonce", TeamsApprovalAction.MaxNonceLength, out var nonce)
-            || !TryGetOpaqueValue(data, "action", 16, out var action)
+            || !TryGetOpaqueValue(data, "action", TeamsApprovalAction.MaxActionLength, out var action)
             || !TeamsApprovalAction.IsSupportedAction(action)
             || !TeamsApprovalAction.IsBoundedOpaqueValue(correlation, TeamsApprovalAction.MaxCorrelationLength)
             || !TeamsApprovalAction.IsBoundedOpaqueValue(nonce, TeamsApprovalAction.MaxNonceLength))

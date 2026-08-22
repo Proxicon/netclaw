@@ -236,12 +236,21 @@ public sealed record TeamsApprovalAction(
 {
     public const int MaxCorrelationLength = 128;
     public const int MaxNonceLength = 128;
+    public const int MaxActionLength = 64;
 
     public bool IsChannel => Trust.Scope == TeamsConversationScope.Channel;
 
+    /// <summary>
+    /// Validates the bounded wire shape of a session-supplied approval key.
+    /// The binding actor checks membership in its persisted offered-key set.
+    /// This contract must not contain an independent approval-policy list.
+    /// </summary>
     public static bool IsSupportedAction(string? action) =>
-        string.Equals(action, "approve", StringComparison.Ordinal)
-        || string.Equals(action, "deny", StringComparison.Ordinal);
+        !string.IsNullOrWhiteSpace(action)
+        && action.Length <= MaxActionLength
+        && action.All(static character => character is >= 'a' and <= 'z'
+                                           || char.IsAsciiDigit(character)
+                                           || character is '-' or '_');
 
     public static bool IsBoundedOpaqueValue(string? value, int maximumLength) =>
         !string.IsNullOrWhiteSpace(value)
