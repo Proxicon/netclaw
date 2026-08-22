@@ -1,7 +1,7 @@
 # Release image for netclawd: the Netclaw autonomous operations daemon.
 #
 # Supports multi-arch builds (linux/amd64, linux/arm64) via buildx.
-# For multi-arch, pre-built binaries are laid out as:
+# The normal release path uses pre-built binaries laid out as:
 #   publish/cli-{amd64,arm64}/netclaw
 #   publish/daemon-{amd64,arm64}/netclawd
 # The TARGETARCH arg (injected by buildx) selects the right directory.
@@ -11,6 +11,11 @@
 # hard-link-copies them to publish/cli-${arch}/ and publish/daemon-${arch}/
 # and passes --build-arg TARGETARCH=$arch explicitly so the same Dockerfile
 # works for both buildx (multi-arch) and plain `docker build` (single-arch).
+#
+# Operators that use a dedicated Docker builder can select
+# ARTIFACTS_STAGE=source-artifacts. That stage creates the same artifacts from
+# source inside the builder. It lets Komodo build on its dedicated builder
+# without installing .NET on the deployment server.
 #
 # Why TARGETARCH has no default value (#1091): buildx auto-injects the
 # predefined TARGETARCH per-platform, but ONLY if the in-stage `ARG`
@@ -36,6 +41,47 @@
 # can invoke it from inside the container (e.g., `netclaw doctor`).
 ARG TARGETARCH
 ARG NETCLAW_VERSION=unknown
+ARG ARTIFACTS_STAGE=prebuilt-artifacts
+
+# The standard release path consumes artifacts from
+# scripts/docker/build-image.sh. Keep this stage as the default so local and
+# release builds retain their established contract.
+FROM scratch AS prebuilt-artifacts
+ARG TARGETARCH
+COPY publish/cli-${TARGETARCH}/netclaw /artifacts/cli-${TARGETARCH}/netclaw
+COPY publish/daemon-${TARGETARCH}/netclawd /artifacts/daemon-${TARGETARCH}/netclawd
+
+# A dedicated builder can compile the self-contained artifacts without any
+# host .NET dependency. This stage is not part of the default release path.
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble AS source-artifacts
+ARG TARGETARCH
+ARG NETCLAW_VERSION=unknown
+WORKDIR /src
+COPY . .
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+RUN set -eux; \
+    case "$TARGETARCH" in \
+        amd64) runtime_id=linux-x64 ;; \
+        arm64) runtime_id=linux-arm64 ;; \
+        *) echo "ERROR: unsupported TARGETARCH '$TARGETARCH'" >&2; exit 1 ;; \
+    esac; \
+    version_args=(); \
+    if [[ "$NETCLAW_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then \
+        version_args=(--version "${NETCLAW_VERSION#v}"); \
+    fi; \
+    bash scripts/build/publish-binaries.sh \
+        --rid "$runtime_id" \
+        --component all \
+        --output-dir /publish \
+        "${version_args[@]}"; \
+    install -D -m 0755 /publish/cli/netclaw \
+        "/artifacts/cli-${TARGETARCH}/netclaw"; \
+    install -D -m 0755 /publish/daemon/netclawd \
+        "/artifacts/daemon-${TARGETARCH}/netclawd"
+
+# Docker only evaluates the selected artifact stage. The default uses published
+# artifacts, while Komodo selects source-artifacts with a build argument.
+FROM ${ARTIFACTS_STAGE} AS artifacts
 
 FROM ubuntu:24.04
 ARG TARGETARCH
@@ -89,8 +135,8 @@ WORKDIR /opt/netclaw
 
 # Self-contained single-file binaries. TARGETARCH selects the right
 # platform directory (amd64 or arm64). Schemas are embedded in the CLI binary.
-COPY publish/cli-${TARGETARCH}/netclaw /opt/netclaw/cli/netclaw
-COPY publish/daemon-${TARGETARCH}/netclawd /opt/netclaw/daemon/netclawd
+COPY --from=artifacts /artifacts/cli-${TARGETARCH}/netclaw /opt/netclaw/cli/netclaw
+COPY --from=artifacts /artifacts/daemon-${TARGETARCH}/netclawd /opt/netclaw/daemon/netclawd
 COPY docker/entrypoint.sh /opt/netclaw/entrypoint.sh
 # `netclaw` on PATH is a self-dropping launcher (not a bare symlink) so a
 # root-context `docker exec`/`kubectl exec -- netclaw <cmd>` re-execs as the

@@ -125,7 +125,28 @@ public sealed class TeamsTenantEvidenceFixtureTests
             HasContentUrl: false,
             HasEmbeddedContentReference: true,
             HasEmbeddedGraphBackedContentReference: false,
-            ContentKind: TeamsAttachmentContentKind.NonEmptyText));
+            ContentKind: TeamsAttachmentContentKind.NonEmptyText,
+            HasHtmlRenderingMarkup: true));
+
+        Assert.Equal(TeamsAttachmentClassification.InlineTextRendering, result.Classification);
+        Assert.Null(result.ReasonCode);
+    }
+
+    [Fact]
+    public void Channel_root_html_wrapper_with_channel_data_and_a_non_graph_rendering_reference_is_inline_rendering_metadata()
+    {
+        var attachment = Load("channel-root-html-wrapper-channel-data.json")["attachments"]![0]!;
+
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+            attachment["contentType"]!.GetValue<string>(),
+            HasName: false,
+            ContentUrl: null,
+            HasContentUrl: false,
+            HasEmbeddedContentReference: true,
+            HasEmbeddedGraphBackedContentReference: false,
+            ContentKind: TeamsAttachmentContentKind.NonEmptyText,
+            HasChannelData: true,
+            HasHtmlRenderingMarkup: true));
 
         Assert.Equal(TeamsAttachmentClassification.InlineTextRendering, result.Classification);
         Assert.Null(result.ReasonCode);
@@ -166,12 +187,28 @@ public sealed class TeamsTenantEvidenceFixtureTests
         Assert.DoesNotContain("rendering metadata", result.Activity.Text, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Channel_root_html_wrapper_with_channel_data_preserves_the_canonical_mentioned_root_without_model_visible_wrapper_content()
+    {
+        var fixture = Load("channel-root-html-wrapper-channel-data.json");
+
+        var result = CreateTranslator().Translate(CreateSdkMessage(fixture), "TENANT_TEST_001");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.True(result.Activity!.IsMentioned);
+        Assert.Equal("ACTIVITY_ROOT_HTML_WRAPPER_CHANNEL_DATA_TEST_001", result.Activity.Reply!.RootActivityId);
+        Assert.Equal(" harmless HTML wrapper channel root probe", result.Activity.Text);
+        Assert.Empty(result.Activity.Attachments);
+        Assert.DoesNotContain("rendering metadata", result.Activity.Text, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("personal-message.json", TeamsConversationScope.Personal, false)]
     [InlineData("channel-root-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-reply-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-second-root-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-root-formatted-wrapper.json", TeamsConversationScope.Channel, true)]
+    [InlineData("channel-root-html-wrapper-channel-data.json", TeamsConversationScope.Channel, true)]
     [InlineData("channel-root-live-wrapper-variant.json", TeamsConversationScope.Channel, true)]
     public void Complete_message_fixtures_translate_with_the_expected_scope_root_and_mention(
         string fixtureName,
@@ -220,6 +257,7 @@ public sealed class TeamsTenantEvidenceFixtureTests
             "bot-plus-user-mention.json",
             "channel-reply-message.json",
             "channel-root-formatted-wrapper.json",
+            "channel-root-html-wrapper-channel-data.json",
             "channel-root-live-wrapper-variant.json",
             "channel-root-message.json",
             "channel-root-upload-reference.json",

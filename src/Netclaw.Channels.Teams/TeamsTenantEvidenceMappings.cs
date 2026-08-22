@@ -92,11 +92,12 @@ public static class TeamsTenantEvidenceMappings
                // scalar HTML rendering wrapper. It is not an attachment URL:
                // the wrapper remains safe only when there is no attachment
                // metadata and no known Graph-backed provider reference. The
-               // reference-bearing SDK wrapper was evidenced only without
-               // channel data; a channel-data-bearing reference is an
-               // unsupported upload shape and must fail closed.
+               // A channel-data object describes the conversation. It does
+               // not describe an attachment. A scalar HTML wrapper remains
+               // rendering metadata when it contains an HTML envelope.
+               // A bare reference remains an unsupported upload shape.
                && !evidence.HasEmbeddedGraphBackedContentReference
-               && (!evidence.HasEmbeddedContentReference || !evidence.HasChannelData)
+               && (!evidence.HasEmbeddedContentReference || evidence.HasHtmlRenderingMarkup)
                && evidence.ContentKind == TeamsAttachmentContentKind.NonEmptyText;
     }
 
@@ -210,7 +211,8 @@ public sealed record TeamsAttachmentClassificationResult(TeamsAttachmentClassifi
 /// <summary>
 /// Attachment facts copied by the daemon from the SDK object. This descriptor
 /// never enters actor state, telemetry, persistence, or a model request. The
-/// channel-data flag is a structural context discriminator, not identity data.
+/// channel-data and HTML-envelope flags are structural facts. They contain no
+/// identity, markup, URL, or file data.
 /// </summary>
 public sealed record TeamsAttachmentEvidence(
     string? ContentType,
@@ -221,6 +223,7 @@ public sealed record TeamsAttachmentEvidence(
     bool HasEmbeddedGraphBackedContentReference = false,
     TeamsAttachmentContentKind ContentKind = TeamsAttachmentContentKind.Missing,
     bool HasThumbnailUrl = false,
-    bool HasChannelData = false);
+    bool HasChannelData = false,
+    bool HasHtmlRenderingMarkup = false);
 
 public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);

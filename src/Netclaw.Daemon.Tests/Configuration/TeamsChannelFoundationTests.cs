@@ -22,9 +22,11 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.AdaptiveCards;
 using Microsoft.Teams.Api.Entities;
 using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Netclaw.Actors.Channels;
+using Netclaw.Actors.Protocol;
 using Netclaw.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Channels.Telemetry;
@@ -40,6 +42,7 @@ using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
 using TeamsConversation = Microsoft.Teams.Api.Conversation;
 using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
 using TeamsTeam = Microsoft.Teams.Api.Team;
+using AdaptiveCardsActivity = Microsoft.Teams.Api.Activities.Invokes.AdaptiveCards;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -654,6 +657,25 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal(TeamsConversationScope.Personal, accepted.Activity.Trust.Scope);
         Assert.Equal(TeamsTranslationDisposition.RejectedPendingTenantEvidence, missingTenant.Disposition);
         Assert.Equal(TeamsTranslationDisposition.RejectedUnsupportedScope, groupChat.Disposition);
+    }
+
+    [Theory]
+    [InlineData(ApprovalOptionKeys.ApproveOnce)]
+    [InlineData(ApprovalOptionKeys.ApproveSession)]
+    [InlineData(ApprovalOptionKeys.ApproveAlways)]
+    [InlineData(ApprovalOptionKeys.ApproveEverywhere)]
+    [InlineData(ApprovalOptionKeys.Deny)]
+    public void Translator_accepts_each_bounded_canonical_approval_key(string optionKey)
+    {
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "tenant" },
+            new FakeTimeProvider());
+
+        var result = translator.Translate(CreateSdkApprovalAction(optionKey), "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.NotNull(result.ApprovalAction);
+        Assert.Equal(optionKey, result.ApprovalAction.Action);
     }
 
     [Fact]
@@ -1543,6 +1565,28 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_rejects_a_channel_reference_inside_an_unknown_html_envelope_before_routing()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.ChannelData = new TeamsChannelData();
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = JsonDocument.Parse("\"<span><a href=\\\"https://rendering.invalid/opaque\\\">synthetic</a></span>\"").RootElement.Clone()
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
+        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Null(result.Activity);
+    }
+
+    [Fact]
     public void Translator_rejects_inline_attachment_content_before_routing()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
@@ -1789,6 +1833,33 @@ public sealed class TeamsChannelFoundationTests
             ServiceUrl = "https://service.invalid/",
             Conversation = new TeamsConversation { Id = "conversation", TenantId = "tenant", Type = type ?? TeamsConversationType.Personal }
         };
+
+    private static AdaptiveCardsActivity.ActionActivity CreateSdkApprovalAction(string action) => new()
+    {
+        Id = "approval-action",
+        ReplyToId = "approval-prompt",
+        From = new TeamsAccount { Id = "sender" },
+        ServiceUrl = "https://service.invalid/",
+        Conversation = new TeamsConversation
+        {
+            Id = "conversation",
+            TenantId = "tenant",
+            Type = TeamsConversationType.Personal
+        },
+        Value = new InvokeValue
+        {
+            Action = new InvokeAction
+            {
+                Type = ActionType.Execute,
+                Data = new Dictionary<string, object>
+                {
+                    ["correlation"] = "correlation_123",
+                    ["nonce"] = "nonce_123",
+                    ["action"] = action
+                }
+            }
+        }
+    };
 
     private static TeamsInboundActivity CreateInboundActivity(string tenantId = "tenant", string conversationId = "conversation", string activityId = "activity")
         => new(
