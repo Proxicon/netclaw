@@ -1,5 +1,17 @@
 # NetClaw Release Notes
 
+## 0.26.0-beta.5 (2026-08-22)
+
+### Features
+- **Microsoft Teams tool approval parity** — Teams approval cards now support the same option keys as other Netclaw approval surfaces.
+
+### Bug Fixes
+- **Teams channel-root rendering metadata accepted** — A bounded HTML rendering wrapper on a normal mentioned channel-root post no longer blocks translation. Graph-backed, file, upload, and unknown attachment shapes remain rejected before model dispatch.
+- **Teams app package build works in Windows PowerShell** — The package script now uses an encoding mode that Windows PowerShell supports.
+
+### Internal Improvements
+- **Komodo source build stage** — The development deployment can build the configured Netclaw source through Komodo.
+
 ## 0.26.0-beta.4 (2026-08-12)
 
 ### Features
