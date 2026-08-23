@@ -86,8 +86,31 @@ follow-up rather than an ACL, routing, or delivery failure.
 
 Result: **THREADS ROOT LIVE PASS**.
 
+## Requested established-thread continuation policy
+
+The current mention-only policy deliberately ignores every unmentioned channel
+message. On 2026-08-23, the operator tested two unmentioned continuations in
+previously successful standard Threads roots. Neither received a reply. The
+sanitized application counters did not change: no event reached Netclaw, no
+route or turn ran, and no outbound reply was attempted. This is consistent with
+the current upstream mention-only filter.
+
+The requested product behaviour is different: after an approved human starts
+a specific standard channel root with a genuine bot mention, later messages
+from that same approved human in that same root should continue the existing
+session without another mention. This is a new capability, not a regression in
+the current mention-only implementation.
+
+The implementation must not disable mention-only globally. It must retain the
+tenant, team, channel, audience, and approved-human checks, and must admit an
+unmentioned message only when its canonical root maps to an established bot
+thread for that same human. Unmentioned new roots, replies in an unestablished
+root, and replies from a different human must stay ignored. Add sanitized
+fixtures and offline coverage before changing the ingress filter, then repeat
+the controlled live continuation smoke.
+
 ## Remaining work
 
 The next planned Teams capability is PR 10 tool-approval parity and its tenant
-matrix. The mention-only, continuation, and root-isolation behaviour matrix
-also remains unproven for the Threads layout.
+matrix. The established-thread continuation capability above and root-isolation
+coverage also remain open for the Threads layout.
