@@ -392,7 +392,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
 
     private static TeamsAttachmentEvidence CreateAttachmentEvidence(Attachment attachment, bool hasChannelData)
     {
-        var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference, hasHtmlRenderingMarkup) = GetContentFacts(attachment.Content);
+        var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup) = GetContentFacts(attachment.Content);
         return new TeamsAttachmentEvidence(
             GetBoundedAttachmentMetadata(attachment.ContentType?.Value, MaxAttachmentContentTypeLength),
             attachment.Name is not null,
@@ -403,7 +403,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             contentKind,
             attachment.ThumbnailUrl is not null,
             hasChannelData,
-            hasHtmlRenderingMarkup);
+            hasHtmlRenderingMarkup,
+            hasParagraphRenderingMarkup);
     }
 
     private TeamsConversationScope? GetScope(IActivity activity) => activity.Conversation?.Type switch
@@ -443,10 +444,10 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return "other";
     }
 
-    private static (TeamsAttachmentContentKind ContentKind, bool HasReference, bool HasGraphBackedReference, bool HasHtmlRenderingMarkup) GetContentFacts(object? content)
+    private static (TeamsAttachmentContentKind ContentKind, bool HasReference, bool HasGraphBackedReference, bool HasHtmlRenderingMarkup, bool HasParagraphRenderingMarkup) GetContentFacts(object? content)
     {
         if (content is null)
-            return (TeamsAttachmentContentKind.Missing, false, false, false);
+            return (TeamsAttachmentContentKind.Missing, false, false, false, false);
 
         // The Teams SDK declares attachment Content as object. System.Text.Json
         // therefore materializes the normal text/html rendering wrapper as a
@@ -455,22 +456,23 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         // arrays remain structured attachment evidence and fail closed.
         var text = GetScalarAttachmentText(content);
         if (text is null)
-            return (TeamsAttachmentContentKind.Structured, false, false, false);
+            return (TeamsAttachmentContentKind.Structured, false, false, false, false);
         if (string.IsNullOrWhiteSpace(text))
-            return (TeamsAttachmentContentKind.EmptyText, false, false, false);
+            return (TeamsAttachmentContentKind.EmptyText, false, false, false, false);
 
         var hasReference = text.Contains("http://", StringComparison.OrdinalIgnoreCase)
                            || text.Contains("https://", StringComparison.OrdinalIgnoreCase);
         var hasHtmlRenderingMarkup = HasHtmlRenderingMarkup(text);
+        var hasParagraphRenderingMarkup = HasParagraphRenderingMarkup(text);
         if (!hasReference)
-            return (TeamsAttachmentContentKind.NonEmptyText, false, false, hasHtmlRenderingMarkup);
+            return (TeamsAttachmentContentKind.NonEmptyText, false, false, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup);
 
         var hasGraphBackedReference = text.Contains("graph.microsoft.com", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains(".sharepoint.com", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains(".sharepoint.us", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains(".onedrive.com", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains("onedrive.live.com", StringComparison.OrdinalIgnoreCase);
-        return (TeamsAttachmentContentKind.NonEmptyText, true, hasGraphBackedReference, hasHtmlRenderingMarkup);
+        return (TeamsAttachmentContentKind.NonEmptyText, true, hasGraphBackedReference, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup);
     }
 
     private static string? GetScalarAttachmentText(object? content) => content switch
@@ -521,6 +523,13 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                && trimmed.Contains("<a ", StringComparison.OrdinalIgnoreCase)
                && trimmed.Contains("href=", StringComparison.OrdinalIgnoreCase)
                && trimmed.Contains("</a>", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasParagraphRenderingMarkup(string text)
+    {
+        var trimmed = text.AsSpan().Trim();
+        return trimmed.StartsWith("<p", StringComparison.OrdinalIgnoreCase)
+               && trimmed.EndsWith("</p>", StringComparison.OrdinalIgnoreCase);
     }
 
     private static ImmutableArray<TeamsMention> TranslateMentions(IList<IEntity>? entities)
