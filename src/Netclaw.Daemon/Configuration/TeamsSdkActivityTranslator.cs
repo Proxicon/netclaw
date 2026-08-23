@@ -81,6 +81,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 continue;
             }
 
+            var (htmlEnvelopeKind, htmlAnchorExists, htmlHrefExists, htmlClosingEnvelopeExists) = DescribeHtmlEnvelope(attachment.Content);
+
             return new TeamsRejectedAttachmentDiagnostic(
                 Scope: DescribeScope(scope),
                 TenantMatch: !string.IsNullOrWhiteSpace(authenticatedTenantId)
@@ -107,6 +109,10 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 AttachmentThumbnailExists: evidence.HasThumbnailUrl,
                 ChannelDataExists: evidence.HasChannelData,
                 AttachmentHtmlRenderingMarkupExists: evidence.HasHtmlRenderingMarkup,
+                AttachmentHtmlEnvelopeKind: htmlEnvelopeKind,
+                AttachmentHtmlAnchorExists: htmlAnchorExists,
+                AttachmentHtmlHrefExists: htmlHrefExists,
+                AttachmentHtmlClosingEnvelopeExists: htmlClosingEnvelopeExists,
                 MentionCount: mentions.Length,
                 ReplyToIdExists: !string.IsNullOrWhiteSpace(message.ReplyToId));
         }
@@ -447,12 +453,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         // JSON string element on live inbound activities, not a CLR string.
         // Only that scalar representation is equivalent to text; objects and
         // arrays remain structured attachment evidence and fail closed.
-        var text = content switch
-        {
-            string value => value,
-            JsonElement { ValueKind: JsonValueKind.String } json => json.GetString(),
-            _ => null
-        };
+        var text = GetScalarAttachmentText(content);
         if (text is null)
             return (TeamsAttachmentContentKind.Structured, false, false, false);
         if (string.IsNullOrWhiteSpace(text))
@@ -470,6 +471,46 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                                       || text.Contains(".onedrive.com", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains("onedrive.live.com", StringComparison.OrdinalIgnoreCase);
         return (TeamsAttachmentContentKind.NonEmptyText, true, hasGraphBackedReference, hasHtmlRenderingMarkup);
+    }
+
+    private static string? GetScalarAttachmentText(object? content) => content switch
+    {
+        string value => value,
+        JsonElement { ValueKind: JsonValueKind.String } json => json.GetString(),
+        _ => null
+    };
+
+    private static (string EnvelopeKind, bool HasAnchor, bool HasHref, bool HasClosingEnvelope) DescribeHtmlEnvelope(object? content)
+    {
+        var text = GetScalarAttachmentText(content);
+        if (string.IsNullOrWhiteSpace(text))
+            return ("none", false, false, false);
+
+        var trimmed = text.AsSpan().Trim();
+        var envelopeKind = trimmed.StartsWith("<div", StringComparison.OrdinalIgnoreCase)
+            ? "div"
+            : trimmed.StartsWith("<p", StringComparison.OrdinalIgnoreCase)
+                ? "paragraph"
+                : trimmed.StartsWith("<span", StringComparison.OrdinalIgnoreCase)
+                    ? "span"
+                    : trimmed.StartsWith("<a", StringComparison.OrdinalIgnoreCase)
+                        ? "anchor"
+                        : !trimmed.IsEmpty && trimmed[0] == '<'
+                            ? "other_html"
+                            : "text";
+        var closingTag = envelopeKind switch
+        {
+            "div" => "</div>",
+            "paragraph" => "</p>",
+            "span" => "</span>",
+            "anchor" => "</a>",
+            _ => string.Empty
+        };
+        return (
+            envelopeKind,
+            trimmed.Contains("<a ", StringComparison.OrdinalIgnoreCase),
+            trimmed.Contains("href=", StringComparison.OrdinalIgnoreCase),
+            closingTag.Length > 0 && trimmed.EndsWith(closingTag, StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool HasHtmlRenderingMarkup(string text)
@@ -543,5 +584,9 @@ internal sealed record TeamsRejectedAttachmentDiagnostic(
     bool AttachmentThumbnailExists,
     bool ChannelDataExists,
     bool AttachmentHtmlRenderingMarkupExists,
+    string AttachmentHtmlEnvelopeKind,
+    bool AttachmentHtmlAnchorExists,
+    bool AttachmentHtmlHrefExists,
+    bool AttachmentHtmlClosingEnvelopeExists,
     int MentionCount,
     bool ReplyToIdExists);
