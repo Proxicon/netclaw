@@ -36,8 +36,7 @@ replace the processing reply, recorded that expected failure, and then posted
 the completed reply as its normal fallback. The source now disables this
 unsupported update attempt by default. A later transport can opt in only when
 it implements activity updates. The focused actor and transport tests passed
-for both paths. The next fresh Threads smoke must confirm that the completed
-reply still appears and that the failed-reply counter does not increase.
+for both paths.
 
 The two dropped activities have no persisted reason code in the runtime
 snapshot. They did not prevent the visible completed reply. Keep this as a
@@ -52,10 +51,66 @@ same uninterrupted container found zero bearer-value-like entries. No
 credential exposure is confirmed and no credential rotation is required from
 the available evidence.
 
+### Processing-update follow-up
+
+The deployed source is `753fcce3`. Komodo built and deployed development image
+`0.0.13` from that source. The container is healthy, the readiness endpoint
+returns HTTP 200, and the restart count is zero.
+
+One fresh genuine mention root was then sent in the standard Threads-layout
+channel. The Teams client showed both the processing reply and the completed
+reply beneath that same root, and the reply composer remained scoped to the
+thread.
+
+The pre-message counters were zero for received, routed, dropped, posted,
+rejected, and failed Teams activity. The sanitized post-message counters were:
+
+- one received Teams activity;
+- two routed boundaries (ingress and binding);
+- one completed turn;
+- two posted replies;
+- zero rejected replies; and
+- zero failed replies.
+
+The new `channel_activity_mapping_stored`, `proactive_destination_captured`,
+and rendering-wrapper counters each increased once. This confirms that the
+unsupported update path is no longer used and that the completed response is
+delivered normally.
+
+The aggregate dropped counter increased once, but the runtime snapshot does
+not retain a reason code. The redaction-only log classifier found no known
+Teams drop-reason marker in the smoke window. The successful callback, route,
+completion, and two successful deliveries show that this counter did not block
+the tested root. Treat reason-level dropped-event telemetry as an observability
+follow-up rather than an ACL, routing, or delivery failure.
+
 Result: **THREADS ROOT LIVE PASS**.
+
+## Requested established-thread continuation policy
+
+The current mention-only policy deliberately ignores every unmentioned channel
+message. On 2026-08-23, the operator tested two unmentioned continuations in
+previously successful standard Threads roots. Neither received a reply. The
+sanitized application counters did not change: no event reached Netclaw, no
+route or turn ran, and no outbound reply was attempted. This is consistent with
+the current upstream mention-only filter.
+
+The requested product behaviour is different: after an approved human starts
+a specific standard channel root with a genuine bot mention, later messages
+from that same approved human in that same root should continue the existing
+session without another mention. This is a new capability, not a regression in
+the current mention-only implementation.
+
+The implementation must not disable mention-only globally. It must retain the
+tenant, team, channel, audience, and approved-human checks, and must admit an
+unmentioned message only when its canonical root maps to an established bot
+thread for that same human. Unmentioned new roots, replies in an unestablished
+root, and replies from a different human must stay ignored. Add sanitized
+fixtures and offline coverage before changing the ingress filter, then repeat
+the controlled live continuation smoke.
 
 ## Remaining work
 
 The next planned Teams capability is PR 10 tool-approval parity and its tenant
-matrix. The mention-only, continuation, and root-isolation behaviour matrix
-also remains unproven for the Threads layout.
+matrix. The established-thread continuation capability above and root-isolation
+coverage also remain open for the Threads layout.

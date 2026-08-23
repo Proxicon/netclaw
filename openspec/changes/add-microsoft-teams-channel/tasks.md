@@ -34,11 +34,12 @@ none. **Rollback:** discard this uncommitted OpenSpec change.
   Sanitized fixtures:
   `src/Netclaw.Daemon.Tests/Fixtures/Teams/TenantEvidence/`.
   On 2026-08-23, independent standard Posts and Threads mentioned roots passed
-  live. The Threads root reached model completion and produced two replies in
-  the correct root. Privacy-safe counters found one extra failed reply attempt
-  and a potential bearer-value logging issue. The evidence is recorded in
-  `docs/teams/live-validation-evidence.md`. These findings do not complete
-  the remaining 0.2 tenant matrix.
+  live. A follow-up Threads root on deployed source `753fcce3` reached model
+  completion and produced two replies in the correct root with zero rejected
+  or failed deliveries. The aggregate dropped-event counter still lacks a
+  persisted reason code. The evidence is recorded in
+  `docs/teams/live-validation-evidence.md`. These findings do not complete the
+  remaining 0.2 tenant matrix.
   PR 4 prerequisite subset is complete: canonical channel root/reply identity,
   qualified bot mention identity/span shapes, update/delete identity, and
   Graph-free attachment rejection. PR 5 still requires personal reply evidence;
@@ -247,3 +248,25 @@ PR 10 approval state.
   Record a tenant matrix for every rendered option shape and terminal update.
   Keep normal CI independent of tenant secrets. Update the Teams operations
   runbook and final OpenSpec artifacts. Run all applicable quality gates.
+
+## Future follow-up — established Threads continuation without repeat mention
+
+**Status:** requested during live validation; not started. The current
+mention-only behavior is conformant with the existing specifications: it drops
+all unmentioned standard-channel messages before Netclaw routing. A live test
+confirmed that unmentioned replies beneath previously successful Threads roots
+produce no callback, route, turn, or reply.
+
+- [ ] 11.1 Amend the Teams ACL and channel specifications for an explicit,
+  narrow exception: an unmentioned reply may continue only the same canonical
+  root previously established by a genuine bot mention from the same approved
+  human. Preserve all tenant, team, channel, audience, and human ACL checks.
+  Unmentioned new roots, unknown roots, and messages from another human remain
+  ignored.
+- [ ] 11.2 Move or refine the SDK-level mention filter so eligible established
+  replies can reach the bounded Netclaw policy. Add sanitized regression
+  fixtures and focused tests for the permitted continuation and every denied
+  case before production code changes.
+- [ ] 11.3 Deploy through the standard PR-to-`dev` and Komodo procedure, then
+  rerun one genuine-mentioned root followed by one same-human unmentioned
+  continuation. Record only privacy-safe counters and structural result.
