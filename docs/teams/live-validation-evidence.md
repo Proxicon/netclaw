@@ -109,24 +109,46 @@ root, and replies from a different human must stay ignored. Add sanitized
 fixtures and offline coverage before changing the ingress filter, then repeat
 the controlled live continuation smoke.
 
-### RSC continuation implementation awaiting app upgrade
+### RSC established-thread continuation live pass
 
-The follow-up source change requests the Teams RSC permission
-`ChannelMessage.Read.Group` and keeps model dispatch fail closed. It persists a
-SHA-256 fingerprint of the approved human with a root established by a genuine
-bot mention. An unmentioned reply is admitted only when that fingerprint, the
-canonical root, and every normal ACL check match. Pre-upgrade root mappings
-have no sender fingerprint and remain ineligible until the user sends a new
-genuine-mentioned root.
+PR #32 was merged to `dev` as `4f3fb55a`, and Komodo built and deployed image
+`0.0.15` from that commit. The source requests the Teams RSC permission
+`ChannelMessage.Read.Group` but remains fail closed: it persists a SHA-256
+fingerprint of the approved human with a root established by a genuine bot
+mention. An unmentioned reply is admitted only when that fingerprint, the
+canonical root, and every normal ACL check match. Roots created before this
+change lack that fingerprint and remain ineligible.
 
-Focused policy, routing, persistence, SDK reply, and package tests passed
-before release. The change is not live until its PR is merged, Komodo deploys
-it, and the team owner upgrades or reinstalls the app package and accepts the
-RSC request. The next live proof is one new mentioned root followed by one
-same-human unmentioned continuation.
+The first package attempt declared a different Entra application ID than the
+active Teams `ClientId`/`BotId`. It therefore did not activate the intended RSC
+delivery path. Package version `1.0.3` corrected the package `AppId`, bot ID,
+and `webApplicationInfo.id` to the active Entra application (client) ID. The
+package was then upgraded or reinstalled in the exact test Team and the owner
+accepted its RSC request. No application, tenant, team, channel, user, URL, or
+secret identifier is recorded here.
+
+A new genuine-mentioned Threads root and one unmentioned reply from the same
+approved human both received normal processing and completed replies in that
+same root. The reply composer remained thread scoped. The safe process totals
+at the end of the positive smoke were `received=8`, `routed=6`, `replied=6`,
+`rejected=0`, and `failed=0`; three activity-root mappings and two proactive
+destinations had been captured. These totals include other non-content activity
+boundaries and are not interpreted as message bodies or identifiers.
+
+One new unmentioned Threads root was then sent. Teams delivered it: the safe
+`received` counter increased from 8 to 9 and its rendering-wrapper diagnostic
+increased from 4 to 5. The `routed`, `replied`, root-mapping, and proactive
+destination counts did not change, and no reply was visible. This proves the
+RSC transport delivery is active while Netclaw rejects an unmentioned new root
+before session or model dispatch.
+
+Result: **THREADS ESTABLISHED CONTINUATION LIVE PASS** and **RSC NEW-ROOT
+FAIL-CLOSED LIVE PASS**.
 
 ## Remaining work
 
 The next planned Teams capability is PR 10 tool-approval parity and its tenant
-matrix. The established-thread continuation capability above and root-isolation
-coverage also remain open for the Threads layout.
+matrix. The established-thread continuation capability is now live validated.
+The optional remaining negative live check is a different approved human
+attempting an unmentioned continuation; the equivalent offline policy coverage
+already passes.

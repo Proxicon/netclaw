@@ -269,6 +269,14 @@ genuine mention. Structured mentions remove only the exact entity spans that
 match recipient ID and `28:` plus configured bot ID; display text and literal
 user-like text cannot grant or remove access. Audience overrides select
 `team/channel`, then `team`, then Public only after explicit access succeeds.
+
+The Teams package `AppId`, `bots[0].botId`, and
+`webApplicationInfo.id` must all equal the active Entra application (client)
+ID configured as the Teams `ClientId` and `BotId`. An Entra object ID or a
+Teams `28:` identifier is not interchangeable. Updating the manifest version
+is insufficient on its own: the exact target Team must upgrade or reinstall
+the package and its owner must accept the RSC request before Teams delivers
+unmentioned messages.
 PR 4 leaves all output, cards, attachments, Graph history, and proactive
 behavior deferred. Personal reply and personal proactive transport evidence
 remain open Phase 0.2 gates for PR 5 and PR 8.
