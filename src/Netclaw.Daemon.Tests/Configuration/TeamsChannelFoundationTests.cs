@@ -1775,6 +1775,10 @@ public sealed class TeamsChannelFoundationTests
         Assert.False(diagnostic.AttachmentThumbnailExists);
         Assert.True(diagnostic.ChannelDataExists);
         Assert.False(diagnostic.AttachmentHtmlRenderingMarkupExists);
+        Assert.Equal("span", diagnostic.AttachmentHtmlEnvelopeKind);
+        Assert.True(diagnostic.AttachmentHtmlAnchorExists);
+        Assert.True(diagnostic.AttachmentHtmlHrefExists);
+        Assert.True(diagnostic.AttachmentHtmlClosingEnvelopeExists);
         Assert.Equal(1, diagnostic.MentionCount);
         Assert.False(diagnostic.ReplyToIdExists);
     }
