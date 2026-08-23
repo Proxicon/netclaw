@@ -193,6 +193,11 @@ and `replied` counters increase.
 Check structured daemon logs for the stage and outcome. Do not enable payload
 logging or retain tenant identifiers as evidence.
 
+Record each live result with only counters and structural facts. Do not record
+message bodies, activity payloads, identifiers, URLs, headers, tokens, or
+secrets. See [live validation evidence](../teams/live-validation-evidence.md)
+for the current standard Posts and Threads root results and open follow-ups.
+
 ## Rotate the client secret
 
 1. Create a new Entra client secret.
