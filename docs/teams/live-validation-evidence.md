@@ -36,8 +36,7 @@ replace the processing reply, recorded that expected failure, and then posted
 the completed reply as its normal fallback. The source now disables this
 unsupported update attempt by default. A later transport can opt in only when
 it implements activity updates. The focused actor and transport tests passed
-for both paths. The next fresh Threads smoke must confirm that the completed
-reply still appears and that the failed-reply counter does not increase.
+for both paths.
 
 The two dropped activities have no persisted reason code in the runtime
 snapshot. They did not prevent the visible completed reply. Keep this as a
@@ -51,6 +50,39 @@ secret was read, stored, or printed. A follow-up redaction-only scan of the
 same uninterrupted container found zero bearer-value-like entries. No
 credential exposure is confirmed and no credential rotation is required from
 the available evidence.
+
+### Processing-update follow-up
+
+The deployed source is `753fcce3`. Komodo built and deployed development image
+`0.0.13` from that source. The container is healthy, the readiness endpoint
+returns HTTP 200, and the restart count is zero.
+
+One fresh genuine mention root was then sent in the standard Threads-layout
+channel. The Teams client showed both the processing reply and the completed
+reply beneath that same root, and the reply composer remained scoped to the
+thread.
+
+The pre-message counters were zero for received, routed, dropped, posted,
+rejected, and failed Teams activity. The sanitized post-message counters were:
+
+- one received Teams activity;
+- two routed boundaries (ingress and binding);
+- one completed turn;
+- two posted replies;
+- zero rejected replies; and
+- zero failed replies.
+
+The new `channel_activity_mapping_stored`, `proactive_destination_captured`,
+and rendering-wrapper counters each increased once. This confirms that the
+unsupported update path is no longer used and that the completed response is
+delivered normally.
+
+The aggregate dropped counter increased once, but the runtime snapshot does
+not retain a reason code. The redaction-only log classifier found no known
+Teams drop-reason marker in the smoke window. The successful callback, route,
+completion, and two successful deliveries show that this counter did not block
+the tested root. Treat reason-level dropped-event telemetry as an observability
+follow-up rather than an ACL, routing, or delivery failure.
 
 Result: **THREADS ROOT LIVE PASS**.
 

@@ -34,11 +34,12 @@ none. **Rollback:** discard this uncommitted OpenSpec change.
   Sanitized fixtures:
   `src/Netclaw.Daemon.Tests/Fixtures/Teams/TenantEvidence/`.
   On 2026-08-23, independent standard Posts and Threads mentioned roots passed
-  live. The Threads root reached model completion and produced two replies in
-  the correct root. Privacy-safe counters found one extra failed reply attempt
-  and a potential bearer-value logging issue. The evidence is recorded in
-  `docs/teams/live-validation-evidence.md`. These findings do not complete
-  the remaining 0.2 tenant matrix.
+  live. A follow-up Threads root on deployed source `753fcce3` reached model
+  completion and produced two replies in the correct root with zero rejected
+  or failed deliveries. The aggregate dropped-event counter still lacks a
+  persisted reason code. The evidence is recorded in
+  `docs/teams/live-validation-evidence.md`. These findings do not complete the
+  remaining 0.2 tenant matrix.
   PR 4 prerequisite subset is complete: canonical channel root/reply identity,
   qualified bot mention identity/span shapes, update/delete identity, and
   Graph-free attachment rejection. PR 5 still requires personal reply evidence;
