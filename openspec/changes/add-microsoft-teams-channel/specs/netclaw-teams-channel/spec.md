@@ -48,18 +48,26 @@ The Teams channel SHALL be disabled by default. When enabled, it SHALL accept
 only SDK-authenticated activities from its configured tenant, process only
 personal and channel scopes, apply the Teams ACL before model execution, and
 expose contained health without leaking secrets. Unsupported or unauthorized
-activity is rejected; allowed but unmentioned channel activity is ignored when
-mention-only policy is enabled.
+activity is rejected. With mention-only policy enabled, an unmentioned channel
+message is ignored unless the same approved human previously established its
+canonical root with a genuine bot mention.
 
 #### Scenario: Activity from another tenant is denied
 
 - **WHEN** an authenticated Teams activity has a tenant other than the configured tenant
 - **THEN** it is rejected before session dispatch with a safe denial reason
 
-#### Scenario: Unmentioned allowed channel message is ignored
+#### Scenario: Unmentioned new or unknown channel message is ignored
 
 - **WHEN** an otherwise allowed channel message omits the Netclaw mention while mention-only policy is enabled
+- **AND** its canonical root is new or unknown
 - **THEN** no session turn is created
+
+#### Scenario: Unmentioned same-human reply continues an established channel root
+
+- **WHEN** an approved human established a canonical channel root with a genuine bot mention
+- **AND** the same human later replies in that root without a mention
+- **THEN** the existing session receives the turn
 
 #### Scenario: Allowed personal sender is dispatched
 

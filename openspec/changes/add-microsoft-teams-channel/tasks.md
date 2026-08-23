@@ -257,13 +257,13 @@ all unmentioned standard-channel messages before Netclaw routing. A live test
 confirmed that unmentioned replies beneath previously successful Threads roots
 produce no callback, route, turn, or reply.
 
-- [ ] 11.1 Amend the Teams ACL and channel specifications for an explicit,
+- [x] 11.1 Amend the Teams ACL and channel specifications for an explicit,
   narrow exception: an unmentioned reply may continue only the same canonical
   root previously established by a genuine bot mention from the same approved
   human. Preserve all tenant, team, channel, audience, and human ACL checks.
   Unmentioned new roots, unknown roots, and messages from another human remain
   ignored.
-- [ ] 11.2 Move or refine the SDK-level mention filter so eligible established
+- [x] 11.2 Move or refine the SDK-level mention filter so eligible established
   replies can reach the bounded Netclaw policy. Add sanitized regression
   fixtures and focused tests for the permitted continuation and every denied
   case before production code changes.

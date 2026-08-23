@@ -229,12 +229,14 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         var proto = new Proto.TeamsChannelActivityMappedProto { ActivityFingerprint = value.ActivityFingerprint, SessionId = value.SessionId };
         if (value.EvictedActivityFingerprint is not null) proto.EvictedActivityFingerprint = value.EvictedActivityFingerprint;
+        if (value.SenderFingerprint is not null) proto.SenderFingerprint = value.SenderFingerprint;
         return proto;
     }
 
     private static TeamsChannelActivityMapped FromProto(Proto.TeamsChannelActivityMappedProto value) => new(
         value.ActivityFingerprint, value.SessionId,
-        value.HasEvictedActivityFingerprint ? value.EvictedActivityFingerprint : null);
+        value.HasEvictedActivityFingerprint ? value.EvictedActivityFingerprint : null,
+        value.HasSenderFingerprint ? value.SenderFingerprint : null);
 
     private static Proto.TeamsChannelActivityIndexSnapshotProto ToProto(TeamsChannelActivityIndexSnapshot value)
     {
