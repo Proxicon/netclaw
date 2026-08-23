@@ -279,6 +279,7 @@ shape, confirm that strict-default fallback is active, or verify that
 | `Enabled` | bool | `true` | Whether the server is loaded at startup. |
 | `GrantCategory` | string? | `null` | Optional ACL grant category. Defaults to `mcp:{serverName}` when omitted. |
 | `OAuthClientId` | string? | `null` | Static OAuth client ID for servers without dynamic client registration. |
+| `OAuthClientSecret` | secret | `null` | Confidential-client secret. Store it only in the encrypted `secrets.json` MCP overlay. |
 | `OAuthScope` | string? | `null` | Optional OAuth scope override. |
 
 ### Slack

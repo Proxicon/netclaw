@@ -88,6 +88,32 @@ public sealed class McpSdkOAuthFlowIntegrationTests
     }
 
     [Fact]
+    public async Task ExplicitAuthorization_UsesConfiguredConfidentialClientSecret()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var server = await FakeOAuthMcpServer.StartAsync(ct);
+        using var directory = new DisposableTempDir();
+        const string clientId = "configured-client";
+        const string clientSecret = "configured-secret";
+        server.RegisterConfiguredClient(clientId, clientSecret, RedirectUri);
+        await using var harness = CreateManagerHarness(
+            server,
+            directory.Path,
+            oauthClientId: clientId,
+            oauthClientSecret: new SensitiveString(clientSecret));
+
+        var started = await harness.Manager.StartAuthorizationAsync(harness.ServerName, ct);
+        var authorization = await server.AuthorizeAsync(new Uri(started.AuthorizationUrl), RedirectUri, ct);
+        var flow = harness.Broker.GetForCallback(started.State);
+        flow.DeliverAuthorizationResponse(authorization.Code, authorization.State, null);
+
+        Assert.Equal(McpOAuthFlowStatus.Completed, (await flow.WaitForTerminalAsync(ct)).Status);
+        Assert.Empty(server.DynamicClientRegistrations);
+        Assert.Equal(clientId, server.TokenRequests.Single().ClientId);
+        Assert.Equal(clientSecret, server.TokenRequests.Single().ClientSecret);
+    }
+
+    [Fact]
     public async Task ExplicitAuthorizationGivesTheOperatorTimeToFinishInTheBrowser()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -727,6 +753,8 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         Dictionary<string, SensitiveString>? headers = null,
         string? endpointOverride = null,
         bool enabled = true,
+        string? oauthClientId = null,
+        SensitiveString? oauthClientSecret = null,
         TimeProvider? timeProvider = null)
     {
         timeProvider ??= TimeProvider.System;
@@ -751,6 +779,8 @@ public sealed class McpSdkOAuthFlowIntegrationTests
                     Transport = "http",
                     Url = endpointOverride ?? server.McpEndpoint.ToString(),
                     Headers = headers,
+                    OAuthClientId = oauthClientId,
+                    OAuthClientSecret = oauthClientSecret,
                 },
             },
             new ToolRegistry(),
@@ -952,6 +982,9 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         public IReadOnlyDictionary<string, string> LastMcpHeaders => _state.LastMcpHeaders;
 
         public void RejectClient(string clientId) => _state.RejectClient(clientId);
+
+        public void RegisterConfiguredClient(string clientId, string clientSecret, Uri redirectUri)
+            => _state.RegisterConfiguredClient(clientId, clientSecret, redirectUri);
 
         public void AcceptBearer(string token) => _state.AcceptBearer(token);
 
@@ -1393,6 +1426,9 @@ public sealed class McpSdkOAuthFlowIntegrationTests
         }
 
         public void AcceptBearer(string token) => _acceptedAccessTokens[token] = 0;
+
+        public void RegisterConfiguredClient(string clientId, string clientSecret, Uri redirectUri)
+            => _clients[clientId] = new RegisteredClient(clientId, clientSecret, [redirectUri.ToString()]);
 
         public void AcceptRefreshToken(string token, string clientId) => _refreshTokens[token] = clientId;
 
