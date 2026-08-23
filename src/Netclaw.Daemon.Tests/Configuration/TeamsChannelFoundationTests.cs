@@ -1255,6 +1255,61 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_uses_entra_object_id_for_channel_user_acl_identity()
+    {
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant",
+            BotId = "bot",
+            AllowedTeamIds = ["team"],
+            AllowedChannelIds = ["channel"],
+            AllowedUserIds = ["operator-aad-object"],
+            ChannelAudienceOverrides = [new TeamsChannelAudienceOverride
+            {
+                TeamId = "team",
+                ChannelId = "channel",
+                Audience = "Team"
+            }]
+        };
+        var translator = new TeamsSdkActivityTranslator(options, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.From = new TeamsAccount { Id = "opaque-transport-sender", AadObjectId = "operator-aad-object" };
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.ChannelData = new TeamsChannelData
+        {
+            Team = new TeamsTeam { Id = "team" },
+            Channel = new TeamsChannel { Id = "channel" }
+        };
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "<at>Netclaw</at>"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("operator-aad-object", result.Activity!.Trust.SenderId);
+        Assert.Equal(TeamsChannelPolicyDisposition.Allowed, TeamsChannelAclPolicy.Evaluate(result.Activity, options).Disposition);
+    }
+
+    [Fact]
+    public void Translator_retains_transport_sender_id_when_entra_object_id_is_unavailable()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage();
+        activity.From = new TeamsAccount { Id = "opaque-transport-sender" };
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("opaque-transport-sender", result.Activity!.Trust.SenderId);
+    }
+
+    [Fact]
     public void Translator_accepts_plain_text_without_a_wrapper_before_channel_routing()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);

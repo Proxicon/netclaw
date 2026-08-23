@@ -92,8 +92,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 ChannelMatch: !string.IsNullOrWhiteSpace(channelId)
                               && options.AllowedChannelIds.Contains(channelId, StringComparer.Ordinal),
                 SenderMatch: options.AllowedUserIds.Length == 0
-                             || (!string.IsNullOrWhiteSpace(message.From?.Id)
-                                 && options.AllowedUserIds.Contains(message.From.Id, StringComparer.Ordinal)),
+                             || (message.From is { } sender
+                                 && options.AllowedUserIds.Contains(GetCanonicalSenderId(sender), StringComparer.Ordinal)),
                 Mentioned: mentions.Any(mention => IsQualifiedBotMention(mention, message.Recipient?.Id, options.BotId)),
                 RootActivityValid: rootActivityValid,
                 AudienceValid: HasSingleTeamAudienceOverride(teamId, channelId),
@@ -288,13 +288,16 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             PrincipalClassification.UntrustedExternal,
             TrustBoundary.Public,
             new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
-            activity.From.Id,
+            GetCanonicalSenderId(activity.From),
             authenticatedTenantId,
             activity.Conversation.Id,
             scope,
             activity.Id,
             timeProvider.GetUtcNow(),
             activity.Timestamp is { } timestamp ? new DateTimeOffset(timestamp.ToUniversalTime()) : null);
+
+    private static string GetCanonicalSenderId(Account sender) =>
+        string.IsNullOrWhiteSpace(sender.AadObjectId) ? sender.Id : sender.AadObjectId;
 
     private bool TryValidateCommon(
         IActivity activity,
