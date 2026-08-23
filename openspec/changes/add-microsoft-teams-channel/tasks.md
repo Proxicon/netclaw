@@ -37,9 +37,13 @@ none. **Rollback:** discard this uncommitted OpenSpec change.
   live. A follow-up Threads root on deployed source `753fcce3` reached model
   completion and produced two replies in the correct root with zero rejected
   or failed deliveries. The aggregate dropped-event counter still lacks a
-  persisted reason code. The evidence is recorded in
-  `docs/teams/live-validation-evidence.md`. These findings do not complete the
-  remaining 0.2 tenant matrix.
+  persisted reason code. PR #32 subsequently added the RSC-gated established
+  continuation policy. After the package was corrected to use the active Entra
+  application (client) ID and upgraded in the test Team with owner RSC consent,
+  a new mentioned root and same-human unmentioned continuation both passed;
+  an unmentioned new root was delivered and ignored before model dispatch. The
+  evidence is recorded in `docs/teams/live-validation-evidence.md`. These
+  findings do not complete the remaining 0.2 tenant matrix.
   PR 4 prerequisite subset is complete: canonical channel root/reply identity,
   qualified bot mention identity/span shapes, update/delete identity, and
   Graph-free attachment rejection. PR 5 still requires personal reply evidence;
@@ -251,11 +255,10 @@ PR 10 approval state.
 
 ## Future follow-up — established Threads continuation without repeat mention
 
-**Status:** requested during live validation; not started. The current
-mention-only behavior is conformant with the existing specifications: it drops
-all unmentioned standard-channel messages before Netclaw routing. A live test
-confirmed that unmentioned replies beneath previously successful Threads roots
-produce no callback, route, turn, or reply.
+**Status:** completed live validation on 2026-08-23. Teams RSC delivers
+unmentioned standard-channel messages after the target Team upgrades or
+reinstalls the package and its owner grants consent. Netclaw still fail-closes
+unmentioned new and unknown roots before session or model dispatch.
 
 - [x] 11.1 Amend the Teams ACL and channel specifications for an explicit,
   narrow exception: an unmentioned reply may continue only the same canonical
@@ -267,6 +270,10 @@ produce no callback, route, turn, or reply.
   replies can reach the bounded Netclaw policy. Add sanitized regression
   fixtures and focused tests for the permitted continuation and every denied
   case before production code changes.
-- [ ] 11.3 Deploy through the standard PR-to-`dev` and Komodo procedure, then
+- [x] 11.3 Deploy through the standard PR-to-`dev` and Komodo procedure, then
   rerun one genuine-mentioned root followed by one same-human unmentioned
-  continuation. Record only privacy-safe counters and structural result.
+  continuation. Record only privacy-safe counters and structural result. PR
+  #32 was deployed as image `0.0.15`; package `1.0.3` uses the active Entra
+  application (client) ID and has the team-owner RSC grant. The same-human
+  continuation replied in its established root. A new unmentioned root was
+  received and ignored with no route, mapping, model turn, or reply.
