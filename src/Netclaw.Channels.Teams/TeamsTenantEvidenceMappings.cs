@@ -97,7 +97,9 @@ public static class TeamsTenantEvidenceMappings
                // rendering metadata when it contains an HTML envelope.
                // A bare reference remains an unsupported upload shape.
                && !evidence.HasEmbeddedGraphBackedContentReference
-               && (!evidence.HasEmbeddedContentReference || evidence.HasHtmlRenderingMarkup)
+               && (!evidence.HasEmbeddedContentReference
+                   || evidence.HasHtmlRenderingMarkup
+                   || evidence.HasParagraphRenderingMarkup)
                && evidence.ContentKind == TeamsAttachmentContentKind.NonEmptyText;
     }
 
@@ -224,6 +226,7 @@ public sealed record TeamsAttachmentEvidence(
     TeamsAttachmentContentKind ContentKind = TeamsAttachmentContentKind.Missing,
     bool HasThumbnailUrl = false,
     bool HasChannelData = false,
-    bool HasHtmlRenderingMarkup = false);
+    bool HasHtmlRenderingMarkup = false,
+    bool HasParagraphRenderingMarkup = false);
 
 public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);
