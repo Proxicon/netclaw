@@ -11,6 +11,7 @@ using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Activities;
 using Microsoft.Teams.Plugins.AspNetCore;
 using Microsoft.Teams.Plugins.AspNetCore.Extensions;
+using Microsoft.Extensions.Logging;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Channels.Telemetry;
@@ -73,6 +74,7 @@ internal static class TeamsActivityEndpointExtensions
         var teamsApp = app.UseTeams(routing: false);
         var translator = app.Services.GetRequiredService<TeamsSdkActivityTranslator>();
         var ingress = app.Services.GetRequiredService<TeamsIngressActorHost>();
+        var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(TeamsActivityEndpointExtensions));
         teamsApp.OnActivity(async (context, cancellationToken) =>
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventReceived("activity");
@@ -99,6 +101,7 @@ internal static class TeamsActivityEndpointExtensions
             else
             {
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(result.ReasonCode);
+                RecordRejectedAttachmentDiagnostic(logger, translator, context.Activity, ResolveTenantId(context.Activity, context.TenantId), result);
                 RecordTranslationTelemetry(result);
             }
 
@@ -121,6 +124,43 @@ internal static class TeamsActivityEndpointExtensions
         };
         if (telemetryCode is not null)
             ChannelTelemetry.For(ChannelType.Teams).RecordExtra(telemetryCode);
+    }
+
+    private static void RecordRejectedAttachmentDiagnostic(
+        ILogger logger,
+        TeamsSdkActivityTranslator translator,
+        IActivity activity,
+        string? authenticatedTenantId,
+        TeamsTranslationResult result)
+    {
+        var diagnostic = translator.DescribeRejectedAttachment(activity, authenticatedTenantId, result);
+        if (diagnostic is null)
+            return;
+
+        logger.LogWarning(
+            "Teams attachment diagnostic: scope={Scope}; tenant_match={TenantMatch}; team_match={TeamMatch}; channel_match={ChannelMatch}; sender_match={SenderMatch}; mentioned={Mentioned}; root_activity_valid={RootActivityValid}; audience_valid={AudienceValid}; policy_reason={PolicyReason}; attachment_count={AttachmentCount}; attachment_content_type={AttachmentContentType}; attachment_content_kind={AttachmentContentKind}; attachment_content_exists={AttachmentContentExists}; attachment_content_url_exists={AttachmentContentUrlExists}; attachment_reference_exists={AttachmentReferenceExists}; attachment_graph_reference_exists={AttachmentGraphReferenceExists}; attachment_name_exists={AttachmentNameExists}; attachment_thumbnail_exists={AttachmentThumbnailExists}; channel_data_exists={ChannelDataExists}; attachment_html_rendering_markup_exists={AttachmentHtmlRenderingMarkupExists}; mention_count={MentionCount}; reply_to_id_exists={ReplyToIdExists}",
+            diagnostic.Scope,
+            diagnostic.TenantMatch,
+            diagnostic.TeamMatch,
+            diagnostic.ChannelMatch,
+            diagnostic.SenderMatch,
+            diagnostic.Mentioned,
+            diagnostic.RootActivityValid,
+            diagnostic.AudienceValid,
+            diagnostic.PolicyReason,
+            diagnostic.AttachmentCount,
+            diagnostic.AttachmentContentType,
+            diagnostic.AttachmentContentKind,
+            diagnostic.AttachmentContentExists,
+            diagnostic.AttachmentContentUrlExists,
+            diagnostic.AttachmentReferenceExists,
+            diagnostic.AttachmentGraphReferenceExists,
+            diagnostic.AttachmentNameExists,
+            diagnostic.AttachmentThumbnailExists,
+            diagnostic.ChannelDataExists,
+            diagnostic.AttachmentHtmlRenderingMarkupExists,
+            diagnostic.MentionCount,
+            diagnostic.ReplyToIdExists);
     }
 
     /// <summary>

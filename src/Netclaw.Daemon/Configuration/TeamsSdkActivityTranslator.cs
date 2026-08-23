@@ -42,6 +42,78 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         };
     }
 
+    /// <summary>
+    /// Creates bounded diagnostic facts for a rejected attachment. This exists
+    /// only to capture one tenant-safe structural sample for a compatibility
+    /// investigation. It never returns SDK payload values or platform IDs.
+    /// </summary>
+    internal TeamsRejectedAttachmentDiagnostic? DescribeRejectedAttachment(
+        IActivity activity,
+        string? authenticatedTenantId,
+        TeamsTranslationResult result)
+    {
+        ArgumentNullException.ThrowIfNull(activity);
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (result.ReasonCode != "unsupported_attachment_shape" || activity is not MessageActivity message)
+            return null;
+
+        var attachments = message.Attachments;
+        if (attachments is null || attachments.Count == 0)
+            return null;
+
+        var scope = GetScope(message);
+        var teamId = message.ChannelData?.Team?.Id;
+        var channelId = message.ChannelData?.Channel?.Id;
+        var mentions = TranslateMentions(message.Entities);
+        var rootActivityValid = scope == TeamsConversationScope.Channel
+            && TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(message.Conversation?.Id, out _);
+
+        foreach (var attachment in attachments)
+        {
+            if (attachment is null)
+                continue;
+
+            var evidence = CreateAttachmentEvidence(attachment, message.ChannelData is not null);
+            if (TeamsTenantEvidenceMappings.ClassifyAttachment(evidence).Classification
+                == TeamsAttachmentClassification.InlineTextRendering)
+            {
+                continue;
+            }
+
+            return new TeamsRejectedAttachmentDiagnostic(
+                Scope: DescribeScope(scope),
+                TenantMatch: !string.IsNullOrWhiteSpace(authenticatedTenantId)
+                             && string.Equals(authenticatedTenantId, options.TenantId, StringComparison.Ordinal),
+                TeamMatch: !string.IsNullOrWhiteSpace(teamId)
+                           && options.AllowedTeamIds.Contains(teamId, StringComparer.Ordinal),
+                ChannelMatch: !string.IsNullOrWhiteSpace(channelId)
+                              && options.AllowedChannelIds.Contains(channelId, StringComparer.Ordinal),
+                SenderMatch: options.AllowedUserIds.Length == 0
+                             || (!string.IsNullOrWhiteSpace(message.From?.Id)
+                                 && options.AllowedUserIds.Contains(message.From.Id, StringComparer.Ordinal)),
+                Mentioned: mentions.Any(mention => IsQualifiedBotMention(mention, message.Recipient?.Id, options.BotId)),
+                RootActivityValid: rootActivityValid,
+                AudienceValid: HasSingleTeamAudienceOverride(teamId, channelId),
+                PolicyReason: result.ReasonCode,
+                AttachmentCount: attachments.Count,
+                AttachmentContentType: DescribeContentType(evidence.ContentType),
+                AttachmentContentKind: evidence.ContentKind.ToString(),
+                AttachmentContentExists: evidence.ContentKind != TeamsAttachmentContentKind.Missing,
+                AttachmentContentUrlExists: evidence.HasContentUrl,
+                AttachmentReferenceExists: evidence.HasEmbeddedContentReference,
+                AttachmentGraphReferenceExists: evidence.HasEmbeddedGraphBackedContentReference,
+                AttachmentNameExists: evidence.HasName,
+                AttachmentThumbnailExists: evidence.HasThumbnailUrl,
+                ChannelDataExists: evidence.HasChannelData,
+                AttachmentHtmlRenderingMarkupExists: evidence.HasHtmlRenderingMarkup,
+                MentionCount: mentions.Length,
+                ReplyToIdExists: !string.IsNullOrWhiteSpace(message.ReplyToId));
+        }
+
+        return null;
+    }
+
     private TeamsTranslationResult TranslateApprovalAction(
         AdaptiveCards.ActionActivity activity,
         string? authenticatedTenantId)
@@ -286,18 +358,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 continue;
             }
 
-            var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference, hasHtmlRenderingMarkup) = GetContentFacts(attachment.Content);
-            var evidence = new TeamsAttachmentEvidence(
-                GetBoundedAttachmentMetadata(attachment.ContentType?.Value, MaxAttachmentContentTypeLength),
-                attachment.Name is not null,
-                GetBoundedAttachmentMetadata(attachment.ContentUrl, MaxAttachmentContentUrlLength),
-                attachment.ContentUrl is not null,
-                hasEmbeddedContentReference,
-                hasEmbeddedGraphBackedContentReference,
-                contentKind,
-                attachment.ThumbnailUrl is not null,
-                hasChannelData,
-                hasHtmlRenderingMarkup);
+            var evidence = CreateAttachmentEvidence(attachment, hasChannelData);
 
             var classification = TeamsTenantEvidenceMappings.ClassifyAttachment(evidence);
             if (classification.Classification == TeamsAttachmentClassification.InlineTextRendering)
@@ -322,6 +383,59 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
 
     private static string? GetBoundedAttachmentMetadata(string? value, int maximumLength)
         => value is { Length: > 0 } && value.Length <= maximumLength ? value : null;
+
+    private static TeamsAttachmentEvidence CreateAttachmentEvidence(Attachment attachment, bool hasChannelData)
+    {
+        var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference, hasHtmlRenderingMarkup) = GetContentFacts(attachment.Content);
+        return new TeamsAttachmentEvidence(
+            GetBoundedAttachmentMetadata(attachment.ContentType?.Value, MaxAttachmentContentTypeLength),
+            attachment.Name is not null,
+            GetBoundedAttachmentMetadata(attachment.ContentUrl, MaxAttachmentContentUrlLength),
+            attachment.ContentUrl is not null,
+            hasEmbeddedContentReference,
+            hasEmbeddedGraphBackedContentReference,
+            contentKind,
+            attachment.ThumbnailUrl is not null,
+            hasChannelData,
+            hasHtmlRenderingMarkup);
+    }
+
+    private TeamsConversationScope? GetScope(IActivity activity) => activity.Conversation?.Type switch
+    {
+        { IsChannel: true } => TeamsConversationScope.Channel,
+        { IsPersonal: true } => TeamsConversationScope.Personal,
+        _ => null
+    };
+
+    private bool HasSingleTeamAudienceOverride(string? teamId, string? channelId)
+    {
+        if (string.IsNullOrWhiteSpace(teamId) || string.IsNullOrWhiteSpace(channelId))
+            return false;
+
+        var matches = options.ChannelAudienceOverrides
+            .Where(audienceOverride => string.Equals(audienceOverride.TeamId, teamId, StringComparison.Ordinal)
+                                       && string.Equals(audienceOverride.ChannelId, channelId, StringComparison.Ordinal))
+            .ToArray();
+        return matches is [{ Audience: "Team" }];
+    }
+
+    private static string DescribeScope(TeamsConversationScope? scope) => scope switch
+    {
+        TeamsConversationScope.Channel => "channel",
+        TeamsConversationScope.Personal => "personal",
+        _ => "unsupported"
+    };
+
+    private static string DescribeContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+            return "missing";
+        if (contentType.StartsWith("text/html", StringComparison.OrdinalIgnoreCase))
+            return "text_html";
+        if (contentType.StartsWith("application/vnd.microsoft.teams.file.download.info", StringComparison.OrdinalIgnoreCase))
+            return "teams_file_download_info";
+        return "other";
+    }
 
     private static (TeamsAttachmentContentKind ContentKind, bool HasReference, bool HasGraphBackedReference, bool HasHtmlRenderingMarkup) GetContentFacts(object? content)
     {
@@ -403,3 +517,31 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return value.Length <= maximumLength;
     }
 }
+
+/// <summary>
+/// Contains finite attachment facts for a temporary tenant-safe diagnostic.
+/// It cannot carry message content, a URL, a token, or a platform identifier.
+/// </summary>
+internal sealed record TeamsRejectedAttachmentDiagnostic(
+    string Scope,
+    bool TenantMatch,
+    bool TeamMatch,
+    bool ChannelMatch,
+    bool SenderMatch,
+    bool Mentioned,
+    bool RootActivityValid,
+    bool AudienceValid,
+    string PolicyReason,
+    int AttachmentCount,
+    string AttachmentContentType,
+    string AttachmentContentKind,
+    bool AttachmentContentExists,
+    bool AttachmentContentUrlExists,
+    bool AttachmentReferenceExists,
+    bool AttachmentGraphReferenceExists,
+    bool AttachmentNameExists,
+    bool AttachmentThumbnailExists,
+    bool ChannelDataExists,
+    bool AttachmentHtmlRenderingMarkupExists,
+    int MentionCount,
+    bool ReplyToIdExists);
