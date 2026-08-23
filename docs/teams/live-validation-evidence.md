@@ -109,6 +109,22 @@ root, and replies from a different human must stay ignored. Add sanitized
 fixtures and offline coverage before changing the ingress filter, then repeat
 the controlled live continuation smoke.
 
+### RSC continuation implementation awaiting app upgrade
+
+The follow-up source change requests the Teams RSC permission
+`ChannelMessage.Read.Group` and keeps model dispatch fail closed. It persists a
+SHA-256 fingerprint of the approved human with a root established by a genuine
+bot mention. An unmentioned reply is admitted only when that fingerprint, the
+canonical root, and every normal ACL check match. Pre-upgrade root mappings
+have no sender fingerprint and remain ineligible until the user sends a new
+genuine-mentioned root.
+
+Focused policy, routing, persistence, SDK reply, and package tests passed
+before release. The change is not live until its PR is merged, Komodo deploys
+it, and the team owner upgrades or reinstalls the app package and accepts the
+RSC request. The next live proof is one new mentioned root followed by one
+same-human unmentioned continuation.
+
 ## Remaining work
 
 The next planned Teams capability is PR 10 tool-approval parity and its tenant

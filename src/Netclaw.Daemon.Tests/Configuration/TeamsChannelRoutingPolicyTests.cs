@@ -75,6 +75,7 @@ public sealed class TeamsChannelRoutingPolicyTests
         var unmentioned = CreateActivity(isMentioned: false);
 
         Assert.Equal(TeamsChannelPolicyDisposition.Ignored, TeamsChannelAclPolicy.Evaluate(unmentioned, AllowedOptions()).Disposition);
+        Assert.Equal(TeamsChannelPolicyDisposition.Allowed, TeamsChannelAclPolicy.EvaluateAccess(unmentioned, AllowedOptions()).Disposition);
         Assert.Equal(TeamsChannelPolicyDisposition.Allowed, TeamsChannelAclPolicy.Evaluate(
             unmentioned, CreateOptions(mentionOnly: false)).Disposition);
     }

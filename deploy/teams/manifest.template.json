@@ -15,7 +15,7 @@
   },
   "description": {
     "short": "Run your own secure operations agent in Microsoft Teams.",
-    "full": "Netclaw is a self-hosted operations agent. This package enables personal chats and standard team channel messages with explicit access controls."
+    "full": "Netclaw is a self-hosted operations agent. It receives standard team channel messages only to continue approved users' established bot threads and discards all other unmentioned messages before model processing."
   },
   "icons": {
     "outline": "outline.png",
@@ -23,6 +23,20 @@
   },
   "accentColor": "#6D4AFF",
   "supportsChannelFeatures": "tier1",
+  "webApplicationInfo": {
+    "id": "${{TEAMS_APP_ID}}",
+    "resource": "https://netclaw"
+  },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        {
+          "type": "Application",
+          "name": "ChannelMessage.Read.Group"
+        }
+      ]
+    }
+  },
   "bots": [
     {
       "botId": "${{TEAMS_APP_ID}}",
