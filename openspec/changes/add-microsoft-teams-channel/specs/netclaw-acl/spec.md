@@ -12,10 +12,12 @@ user allow-list SHALL additionally restrict channel senders. Mention policy
 SHALL run after identity/access checks and before model dispatch.
 
 Unauthorized or malformed activities SHALL be rejected with a safe reason code.
-Otherwise allowed channel activity that is unmentioned while mention-only is
-enabled SHALL be ignored without a model turn. Neither outcome may create a
-session actor or model turn, except for a non-session audit record required by
-existing diagnostics.
+With mention-only enabled, an unmentioned channel message SHALL be ignored
+without a model turn unless its canonical root was established by a genuine bot
+mention from the same approved human. New roots, unknown roots, and a different
+approved human in an established root SHALL remain ignored. Neither outcome may
+create a session actor or model turn, except for a non-session audit record
+required by existing diagnostics.
 
 #### Scenario: Wrong tenant is rejected
 
@@ -42,9 +44,21 @@ existing diagnostics.
 - **WHEN** direct messages are disabled or the personal sender is not explicitly allowed
 - **THEN** the activity is rejected before model execution
 
-#### Scenario: Unmentioned allowed channel activity is ignored
+#### Scenario: Unmentioned new or unknown channel activity is ignored
 
 - **WHEN** a fully allowed channel message is unmentioned and mention-only is enabled
+- **AND** its canonical root is new or was not established by a genuine bot mention
+- **THEN** it is ignored without a session actor or model turn
+
+#### Scenario: Same-human established-root continuation is dispatchable
+
+- **WHEN** an approved human established a channel root with a genuine bot mention
+- **AND** that same human sends an unmentioned reply with the same canonical root
+- **THEN** it may continue the existing session
+
+#### Scenario: Another human cannot continue an established root without a mention
+
+- **WHEN** a different approved human sends an unmentioned reply with an established canonical root
 - **THEN** it is ignored without a session actor or model turn
 
 #### Scenario: Mentioned allowed channel activity is dispatchable

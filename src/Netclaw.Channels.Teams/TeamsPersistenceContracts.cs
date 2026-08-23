@@ -102,7 +102,8 @@ public sealed record TeamsBindingSnapshot(
 public sealed record TeamsChannelActivityMapped(
     string ActivityFingerprint,
     string SessionId,
-    string? EvictedActivityFingerprint) : ITeamsPersistenceMessage;
+    string? EvictedActivityFingerprint,
+    string? SenderFingerprint = null) : ITeamsPersistenceMessage;
 
 public sealed record TeamsChannelActivityIndexSnapshot(
     IReadOnlyList<TeamsChannelActivityMapped> Entries) : ITeamsPersistenceMessage;

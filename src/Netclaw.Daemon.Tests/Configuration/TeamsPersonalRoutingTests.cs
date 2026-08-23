@@ -131,6 +131,23 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public void Channel_activity_mapping_roundtrips_the_established_sender_fingerprint()
+    {
+        var value = new TeamsChannelActivityMapped(
+            ActivityFingerprint.Create("channel-root"),
+            "channel-session",
+            null,
+            ActivityFingerprint.Create("approved-human"));
+
+        var serializer = Sys.Serialization.FindSerializerFor(value);
+        var manifest = Assert.IsAssignableFrom<SerializerWithStringManifest>(serializer).Manifest(value);
+        var restored = Assert.IsType<TeamsChannelActivityMapped>(
+            Sys.Serialization.Deserialize(serializer.ToBinary(value), serializer.Identifier, manifest));
+
+        Assert.Equal(value, restored);
+    }
+
+    [Fact]
     public async Task Http_personal_capture_survives_request_scope_disposal_and_uses_the_app_level_reply_client()
     {
         var requestLifetime = new RequestLifetimeProbe();
@@ -492,7 +509,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", root.Trust.ConversationId, "root-a", out var expected, out _));
         Assert.Equal(expected, first.SessionId);
 
-        var reply = CreateChannelActivity("reply-a", "conversation-a;messageid=root-a");
+        var reply = CreateChannelActivity("reply-a", "conversation-a;messageid=root-a", isMentioned: false);
         Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(reply, TestContext.Current.CancellationToken));
 
         var update = CreateChannelActivity("root-a", "conversation-a;messageid=root-a", TeamsIngressActivityKind.MessageUpdate);
@@ -537,6 +554,61 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Equal(
             TeamsBindingRouteDisposition.Accepted,
             (await RouteConversationAsync(recovered, update)).Disposition);
+    }
+
+    [Fact]
+    public async Task Channel_unmentioned_continuation_requires_the_established_root_owner()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var dependencies = new TeamsConversationDependencies(
+            new TeamsChannelOptions
+            {
+                TenantId = "tenant-a",
+                MentionOnly = true,
+                AllowedTeamIds = ["team-a"],
+                AllowedChannelIds = ["channel-a"],
+                AllowedUserIds = ["user-a", "user-b"]
+            },
+            pipeline,
+            new TestTeamsReplyClient(),
+            new TeamsOutputRenderer(),
+            TimeProvider.System);
+        const string conversationId = "conversation-continuation;messageid=root-a";
+        var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId), dependencies));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, CreateChannelActivity("root-a", conversationId))).Disposition);
+        ReceiveDispatchedMessage();
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Ignored,
+            (await RouteConversationAsync(parent, CreateChannelActivity(
+                "reply-other",
+                conversationId,
+                isMentioned: false,
+                senderId: "user-b"))).Disposition);
+        const string unknownConversationId = "conversation-unestablished;messageid=root-unmentioned";
+        var unknownParent = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", unknownConversationId), dependencies));
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Ignored,
+            (await RouteConversationAsync(unknownParent, CreateChannelActivity(
+                "root-unmentioned",
+                unknownConversationId,
+                rootActivityId: "root-unmentioned",
+                isMentioned: false))).Disposition);
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, CreateChannelActivity(
+                "reply-owner",
+                conversationId,
+                isMentioned: false))).Disposition);
+        ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var continuation = ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", conversationId, "root-a", out var expected, out _));
+        Assert.Equal(expected, continuation.SessionId);
     }
 
     [Fact]
@@ -756,9 +828,10 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     public async Task Legacy_channel_index_recovers_to_a_teams_v2_snapshot()
     {
         const string conversationId = "conversation-legacy-channel;messageid=root-a";
+        var conversationActorId = CreateSessionId("tenant-a", conversationId);
         var sessionId = CreateChannelSessionId(conversationId);
-        var persistenceId = "teams-channel-conversation-" + Uri.EscapeDataString(sessionId.Value);
-        var fingerprint = ActivityFingerprint.Create("legacy-channel-root");
+        var persistenceId = "teams-channel-conversation-" + Uri.EscapeDataString(conversationActorId.Value);
+        var fingerprint = ActivityFingerprint.Create("root-a");
         await SeedJournalAsync(persistenceId, DecodeLegacy("dtcam-v1", new LegacyProto.DurableTeamsChannelActivityMappedProto
         {
             ActivityFingerprint = fingerprint,
@@ -778,7 +851,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             new TestTeamsReplyClient(),
             new TeamsOutputRenderer(),
             TimeProvider.System);
-        var first = Sys.ActorOf(TeamsConversationActor.CreateProps(sessionId, dependencies), "legacy-channel-index");
+        var first = Sys.ActorOf(TeamsConversationActor.CreateProps(conversationActorId, dependencies), "legacy-channel-index");
         var snapshot = await WaitForSnapshotAsync<TeamsChannelActivityIndexSnapshot>(persistenceId);
 
         var entry = Assert.Single(snapshot.Entries);
@@ -789,8 +862,14 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Watch(first);
         first.Tell(PoisonPill.Instance);
         ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
-        Sys.ActorOf(TeamsConversationActor.CreateProps(sessionId, dependencies), "legacy-channel-index-recovered");
+        var recovered = Sys.ActorOf(TeamsConversationActor.CreateProps(conversationActorId, dependencies), "legacy-channel-index-recovered");
         Assert.Equal(fingerprint, Assert.Single((await WaitForSnapshotAsync<TeamsChannelActivityIndexSnapshot>(persistenceId)).Entries).ActivityFingerprint);
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Ignored,
+            (await RouteConversationAsync(recovered, CreateChannelActivity(
+                "legacy-unmentioned-reply",
+                conversationId,
+                isMentioned: false))).Disposition);
     }
 
     [Fact]
@@ -2548,13 +2627,15 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         string activityId,
         string conversationId,
         TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message,
-        string rootActivityId = "root-a") => new(
+        string rootActivityId = "root-a",
+        bool isMentioned = true,
+        string senderId = "user-a") => new(
         new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
             TrustBoundary.Public,
             new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
-            "user-a",
+            senderId,
             "tenant-a",
             conversationId,
             TeamsConversationScope.Channel,
@@ -2562,7 +2643,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             TimeProvider.System.GetUtcNow()),
         kind == TeamsIngressActivityKind.Message ? "hello" : string.Empty,
         new TeamsReplyMetadata(null, rootActivityId, "https://service.invalid/"),
-        isMentioned: true,
+        isMentioned: isMentioned,
         kind: kind,
         teamId: "team-a",
         channelId: "channel-a");

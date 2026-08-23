@@ -259,14 +259,19 @@ edit or delete to resolve safely without content routing or an LLM turn.
 
 Channel ACL is fail closed: a message requires configured tenant, nonempty
 allowed team and channel lists, exact team/channel matches, and an optional
-nonempty sender allow-list match. Mention-only messages without a qualified bot
-mention are ignored before binding creation. Structured mentions remove only
-the exact entity spans that match recipient ID and `28:` plus configured bot ID;
-display text and literal user-like text cannot grant or remove access. Audience
-overrides select `team/channel`, then `team`, then Public only after explicit
-access succeeds. PR 4 leaves all output, cards, attachments, Graph, and
-proactive behavior deferred. Personal reply and personal proactive transport
-evidence remain open Phase 0.2 gates for PR 5 and PR 8.
+nonempty sender allow-list match. The RSC package permission
+`ChannelMessage.Read.Group` can deliver unmentioned channel messages, but it
+does not broaden model dispatch. With mention-only enabled, a new or unknown
+root without a qualified bot mention is ignored before binding creation. The
+only exception is an unmentioned reply whose canonical root index contains the
+SHA-256 fingerprint of the same approved human who established that root with a
+genuine mention. Structured mentions remove only the exact entity spans that
+match recipient ID and `28:` plus configured bot ID; display text and literal
+user-like text cannot grant or remove access. Audience overrides select
+`team/channel`, then `team`, then Public only after explicit access succeeds.
+PR 4 leaves all output, cards, attachments, Graph history, and proactive
+behavior deferred. Personal reply and personal proactive transport evidence
+remain open Phase 0.2 gates for PR 5 and PR 8.
 
 ### Preserve the two-segment session grammar
 
