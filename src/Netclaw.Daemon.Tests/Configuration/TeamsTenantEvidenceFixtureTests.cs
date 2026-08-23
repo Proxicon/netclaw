@@ -153,6 +153,26 @@ public sealed class TeamsTenantEvidenceFixtureTests
     }
 
     [Fact]
+    public void Channel_posts_paragraph_wrapper_with_a_non_graph_rendering_reference_is_inline_rendering_metadata()
+    {
+        var attachment = Load("channel-posts-paragraph-wrapper.json")["attachments"]![0]!;
+
+        var result = TeamsTenantEvidenceMappings.ClassifyAttachment(new TeamsAttachmentEvidence(
+            attachment["contentType"]!.GetValue<string>(),
+            HasName: false,
+            ContentUrl: null,
+            HasContentUrl: false,
+            HasEmbeddedContentReference: true,
+            HasEmbeddedGraphBackedContentReference: false,
+            ContentKind: TeamsAttachmentContentKind.NonEmptyText,
+            HasChannelData: true,
+            HasParagraphRenderingMarkup: true));
+
+        Assert.Equal(TeamsAttachmentClassification.InlineTextRendering, result.Classification);
+        Assert.Null(result.ReasonCode);
+    }
+
+    [Fact]
     public void Channel_root_upload_reference_shape_is_rejected_before_routing()
     {
         var attachment = Load("channel-root-upload-reference.json")["attachment"]!;
@@ -207,6 +227,7 @@ public sealed class TeamsTenantEvidenceFixtureTests
     [InlineData("channel-root-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-reply-message.json", TeamsConversationScope.Channel, false)]
     [InlineData("channel-second-root-message.json", TeamsConversationScope.Channel, false)]
+    [InlineData("channel-posts-paragraph-wrapper.json", TeamsConversationScope.Channel, true)]
     [InlineData("channel-root-formatted-wrapper.json", TeamsConversationScope.Channel, true)]
     [InlineData("channel-root-html-wrapper-channel-data.json", TeamsConversationScope.Channel, true)]
     [InlineData("channel-root-live-wrapper-variant.json", TeamsConversationScope.Channel, true)]
@@ -255,6 +276,7 @@ public sealed class TeamsTenantEvidenceFixtureTests
             "attachment-shell.json",
             "bot-message-update-address.json",
             "bot-plus-user-mention.json",
+            "channel-posts-paragraph-wrapper.json",
             "channel-reply-message.json",
             "channel-root-formatted-wrapper.json",
             "channel-root-html-wrapper-channel-data.json",
