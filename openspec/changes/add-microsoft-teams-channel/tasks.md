@@ -248,3 +248,25 @@ PR 10 approval state.
   Record a tenant matrix for every rendered option shape and terminal update.
   Keep normal CI independent of tenant secrets. Update the Teams operations
   runbook and final OpenSpec artifacts. Run all applicable quality gates.
+
+## Future follow-up — established Threads continuation without repeat mention
+
+**Status:** requested during live validation; not started. The current
+mention-only behavior is conformant with the existing specifications: it drops
+all unmentioned standard-channel messages before Netclaw routing. A live test
+confirmed that unmentioned replies beneath previously successful Threads roots
+produce no callback, route, turn, or reply.
+
+- [ ] 11.1 Amend the Teams ACL and channel specifications for an explicit,
+  narrow exception: an unmentioned reply may continue only the same canonical
+  root previously established by a genuine bot mention from the same approved
+  human. Preserve all tenant, team, channel, audience, and human ACL checks.
+  Unmentioned new roots, unknown roots, and messages from another human remain
+  ignored.
+- [ ] 11.2 Move or refine the SDK-level mention filter so eligible established
+  replies can reach the bounded Netclaw policy. Add sanitized regression
+  fixtures and focused tests for the permitted continuation and every denied
+  case before production code changes.
+- [ ] 11.3 Deploy through the standard PR-to-`dev` and Komodo procedure, then
+  rerun one genuine-mentioned root followed by one same-human unmentioned
+  continuation. Record only privacy-safe counters and structural result.
