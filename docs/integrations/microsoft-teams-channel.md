@@ -13,9 +13,21 @@ The app package grants only these bot scopes:
 - `personal`
 - `team`
 
-The package does not request Graph, group chat, meeting, tab, calling, video,
-or file capabilities. It supports personal chats and standard team channels.
-It does not enable private or shared channels.
+The package requests one team-scoped RSC permission:
+
+- `ChannelMessage.Read.Group`
+
+This permission is required for Teams to deliver an unmentioned channel reply
+to the bot. The team owner consents to it during app installation or upgrade.
+It delivers standard channel messages from that installed team to the bot
+endpoint. Netclaw retains `MentionOnly=true` as its model-dispatch policy: it
+admits an unmentioned message only when its canonical root was established by a
+genuine bot mention from the same approved human. New roots, unknown roots, and
+other senders are ignored before a session or model turn.
+
+The package does not request `ChatMessage.Read.Chat`, message-write, group
+chat, meeting, tab, calling, video, or file capabilities. It supports personal
+chats and standard team channels. It does not enable private or shared channels.
 
 Netclaw rejects every Teams file attachment before model dispatch. Send the
 required content as message text.
@@ -53,7 +65,8 @@ and team messages.
 Use the application ID for the Azure Bot, package `AppId`, `ClientId`, and
 `BotId`. Copy the client secret value, not the secret ID.
 
-Do not add Microsoft Graph permissions. Do not enable calling or meeting
+Do not add permissions beyond the package's required
+`ChannelMessage.Read.Group` RSC entry. Do not enable calling or meeting
 features.
 
 ## Build the Teams package
@@ -127,8 +140,10 @@ allow-list accepts any sender in an allowed channel.
 Personal chats require `AllowDirectMessages: true` and an exact
 `AllowedUserIds` match. Production configurations must list approved user IDs.
 
-`MentionOnly` defaults to `true`. Keep it enabled unless the approved channel
-must process every message.
+`MentionOnly` defaults to `true`. Keep it enabled. With the package RSC
+permission, it still ignores every unmentioned new or unknown root and permits
+only the same approved human's continuation of a root they established with a
+genuine bot mention.
 
 Use `ChannelAudienceOverrides` for canonical IDs that contain configuration
 delimiters. An exact team and channel entry takes precedence over a team entry.
@@ -154,7 +169,8 @@ Never publish a tunnel URL in a log, document, commit, or test fixture.
 3. Select **Upload an app**.
 4. Select **Upload a custom app**.
 5. Upload the generated ZIP file.
-6. Add the app to the approved personal or team scope.
+6. Upgrade or reinstall the app in the approved team.
+7. Have the team owner approve the `ChannelMessage.Read.Group` request.
 
 Your tenant policy can disable custom app upload. Ask a Teams administrator to
 approve or upload the package when required.
@@ -163,7 +179,8 @@ approve or upload the package when required.
 
 1. Complete the privacy, legal, security, and ownership review.
 2. Build a package with the production app ID and policy URLs.
-3. Confirm that the manifest requests only `personal` and `team` bot scopes.
+3. Confirm that the manifest requests only `personal` and `team` bot scopes and
+   the single `ChannelMessage.Read.Group` RSC permission.
 4. Submit the package through the Teams admin center.
 5. Ask a Teams administrator to approve and publish the app.
 6. Install the app only in approved teams and accounts.
@@ -186,6 +203,12 @@ release. The readiness endpoint proves only daemon liveness.
 
 Confirm that an approved message gets a reply under its original root. A
 request without valid Bot Framework authentication cannot reach model dispatch.
+
+After a package upgrade that adds RSC, first send one genuine-mentioned root.
+Then send one unmentioned reply from the same approved human in that root. It
+must continue the same session and reply in the same root. Confirm separately
+that an unmentioned new root and an unmentioned reply from another human do not
+create a session or model turn.
 
 Run `netclaw status` after the smoke. Confirm that the Teams `recv`, `routed`,
 and `replied` counters increase.
@@ -214,8 +237,9 @@ either secret during diagnosis.
 
 - A disconnected connector usually indicates invalid credentials or an
   unreachable Bot Framework service.
-- A channel message without a qualified bot mention is rejected when
-  `MentionOnly` is `true`.
+- An unmentioned new or unknown channel root is ignored when `MentionOnly` is
+  `true`. An unmentioned continuation is admitted only for the approved human
+  who established that root with a genuine bot mention.
 - A channel identity outside either allow-list is rejected before dispatch.
 - A user outside `AllowedUserIds` is rejected before dispatch.
 - An unmapped channel uses the `public` audience and cannot use restricted
@@ -238,5 +262,6 @@ session, approval, destination, or delivery evidence.
 
 - [Register an Entra application](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)
 - [Configure Azure Bot authentication](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/authentication/add-authentication)
+- [Enable RSC channel-message delivery](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/channel-messages-for-bots-and-agents)
 - [Upload a custom Teams app](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload)
 - [Publish a Teams app](https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-publish-overview)

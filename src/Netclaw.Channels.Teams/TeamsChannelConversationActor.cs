@@ -30,7 +30,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
     private readonly SessionId _conversationId;
     private readonly TeamsConversationDependencies _dependencies;
     private readonly ILoggingAdapter _log;
-    private readonly Dictionary<string, SessionId> _activitySessions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TeamsChannelActivityMapped> _activityMappings = new(StringComparer.Ordinal);
     private readonly Queue<string> _activityOrder = new();
     private bool _requiresMigrationSnapshot;
 
@@ -91,14 +91,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
             return;
         }
 
-        var policy = TeamsChannelAclPolicy.Evaluate(ingress.Activity, _dependencies.Options);
-        if (policy.Disposition == TeamsChannelPolicyDisposition.Ignored)
-        {
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("channel_unmentioned");
-            replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Ignored));
-            return;
-        }
-
+        var policy = TeamsChannelAclPolicy.EvaluateAccess(ingress.Activity, _dependencies.Options);
         if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed)
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(policy.ReasonCode);
@@ -131,35 +124,60 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
             return;
         }
 
-        var fingerprint = ActivityFingerprint.Create(ingress.Activity.Trust.ActivityId);
-        if (_activitySessions.TryGetValue(fingerprint, out var indexedSessionId))
+        var isEstablishedThreadContinuation = ingress.Activity.Kind == TeamsIngressActivityKind.Message
+                                            && _dependencies.Options.MentionOnly
+                                            && !ingress.Activity.IsMentioned;
+        if (isEstablishedThreadContinuation
+            && !IsEstablishedThreadContinuation(ingress.Activity, sessionId))
         {
-            if (indexedSessionId != sessionId)
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("channel_unmentioned_not_established_owner");
+            replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Ignored));
+            return;
+        }
+
+        var fingerprint = ActivityFingerprint.Create(ingress.Activity.Trust.ActivityId);
+        if (_activityMappings.TryGetValue(fingerprint, out var indexed))
+        {
+            if (!string.Equals(indexed.SessionId, sessionId.Value, StringComparison.Ordinal))
             {
                 replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Denied));
                 return;
             }
 
-            Self.Tell(new RouteChannelBinding(ingress.Activity, sessionId, replyTo, ingress.CancellationToken));
+            Self.Tell(new RouteChannelBinding(
+                ingress.Activity,
+                sessionId,
+                replyTo,
+                ingress.CancellationToken,
+                isEstablishedThreadContinuation));
             return;
         }
 
         var evicted = _activityOrder.Count == ActivityIndexCapacity ? _activityOrder.Peek() : null;
         Persist(
-            new TeamsChannelActivityMapped(fingerprint, sessionId.Value, evicted),
+            new TeamsChannelActivityMapped(
+                fingerprint,
+                sessionId.Value,
+                evicted,
+                ActivityFingerprint.Create(ingress.Activity.Trust.SenderId)),
             mapped =>
             {
                 ApplyMapped(mapped);
                 SaveSnapshotWhenDue();
                 ChannelTelemetry.For(ChannelType.Teams).RecordExtra("channel_activity_mapping_stored");
-                Self.Tell(new RouteChannelBinding(ingress.Activity, sessionId, replyTo, ingress.CancellationToken));
+                Self.Tell(new RouteChannelBinding(
+                    ingress.Activity,
+                    sessionId,
+                    replyTo,
+                    ingress.CancellationToken,
+                    isEstablishedThreadContinuation));
             });
     }
 
     private void HandleMutation(TeamsInboundActivity activity, IActorRef replyTo)
     {
         var fingerprint = ActivityFingerprint.Create(activity.Trust.ActivityId);
-        if (!_activitySessions.TryGetValue(fingerprint, out _))
+        if (!_activityMappings.ContainsKey(fingerprint))
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("unknown_activity_mapping");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Ignored));
@@ -186,7 +204,10 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         try
         {
             var result = await binding.Ask<TeamsBindingRouteResult>(
-                new TeamsBindingIngress(route.Activity, route.CancellationToken),
+                new TeamsBindingIngress(
+                    route.Activity,
+                    route.CancellationToken,
+                    route.IsEstablishedThreadContinuation),
                 BindingRouteTimeout,
                 route.CancellationToken);
             route.ReplyTo.Tell(result);
@@ -308,6 +329,8 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
     private void ApplyMapped(TeamsChannelActivityMapped mapped)
     {
         EnsureFingerprint(mapped.ActivityFingerprint);
+        if (mapped.SenderFingerprint is not null)
+            EnsureFingerprint(mapped.SenderFingerprint);
         if (!TeamsSessionIdentifierCodec.TryParse(new SessionId(mapped.SessionId), out var parsed, out _)
             || parsed.Scope != TeamsConversationScope.Channel)
         {
@@ -319,7 +342,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
             EnsureFingerprint(evicted);
             if (_activityOrder.Count == 0
                 || !string.Equals(_activityOrder.Peek(), evicted, StringComparison.Ordinal)
-                || !_activitySessions.Remove(evicted))
+                || !_activityMappings.Remove(evicted))
             {
                 throw new InvalidOperationException("The Teams channel activity index has invalid retention ordering.");
             }
@@ -329,7 +352,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         else if (_activityOrder.Count >= ActivityIndexCapacity)
             throw new InvalidOperationException("The Teams channel activity index exceeds its retention limit.");
 
-        if (!_activitySessions.TryAdd(mapped.ActivityFingerprint, new SessionId(mapped.SessionId)))
+        if (!_activityMappings.TryAdd(mapped.ActivityFingerprint, mapped))
             throw new InvalidOperationException("The Teams channel activity index contains a duplicate entry.");
         _activityOrder.Enqueue(mapped.ActivityFingerprint);
     }
@@ -339,7 +362,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         if (snapshot.Entries.Count > ActivityIndexCapacity)
             throw new InvalidOperationException("The Teams channel activity index snapshot exceeds its retention limit.");
 
-        _activitySessions.Clear();
+        _activityMappings.Clear();
         _activityOrder.Clear();
         foreach (var entry in snapshot.Entries)
             ApplyMapped(entry with { EvictedActivityFingerprint = null });
@@ -380,8 +403,9 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
 
         SaveSnapshot(new TeamsChannelActivityIndexSnapshot(_activityOrder.Select(fingerprint => new TeamsChannelActivityMapped(
             fingerprint,
-            _activitySessions[fingerprint].Value,
-            null)).ToArray()));
+            _activityMappings[fingerprint].SessionId,
+            null,
+            _activityMappings[fingerprint].SenderFingerprint)).ToArray()));
         _requiresMigrationSnapshot = false;
     }
 
@@ -391,10 +415,23 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         {
             var entries = _activityOrder.Select(fingerprint => new TeamsChannelActivityMapped(
                 fingerprint,
-                _activitySessions[fingerprint].Value,
-                null)).ToArray();
+                _activityMappings[fingerprint].SessionId,
+                null,
+                _activityMappings[fingerprint].SenderFingerprint)).ToArray();
             SaveSnapshot(new TeamsChannelActivityIndexSnapshot(entries));
         }
+    }
+
+    private bool IsEstablishedThreadContinuation(TeamsInboundActivity activity, SessionId sessionId)
+    {
+        var rootActivityId = activity.Reply!.RootActivityId!;
+        return _activityMappings.TryGetValue(ActivityFingerprint.Create(rootActivityId), out var root)
+               && string.Equals(root.SessionId, sessionId.Value, StringComparison.Ordinal)
+               && root.SenderFingerprint is { } ownerFingerprint
+               && string.Equals(
+                   ownerFingerprint,
+                   ActivityFingerprint.Create(activity.Trust.SenderId),
+                   StringComparison.Ordinal);
     }
 
     private static void EnsureFingerprint(string fingerprint)
@@ -407,7 +444,8 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         TeamsInboundActivity Activity,
         SessionId SessionId,
         IActorRef ReplyTo,
-        CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
+        CancellationToken CancellationToken,
+        bool IsEstablishedThreadContinuation) : INoSerializationVerificationNeeded;
 
     private sealed record SaveTeamsChannelMigrationSnapshot : INoSerializationVerificationNeeded;
 }

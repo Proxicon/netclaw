@@ -27,6 +27,20 @@ public sealed record TeamsChannelPolicyDecision(
 public static class TeamsChannelAclPolicy
 {
     public static TeamsChannelPolicyDecision Evaluate(TeamsInboundActivity activity, TeamsChannelOptions options)
+        => EvaluateCore(activity, options, enforceMentionOnly: true);
+
+    /// <summary>
+    /// Evaluates every identity, channel, and audience gate without applying
+    /// the message mention rule. The durable channel conversation actor applies
+    /// that rule after it has resolved an established root.
+    /// </summary>
+    public static TeamsChannelPolicyDecision EvaluateAccess(TeamsInboundActivity activity, TeamsChannelOptions options)
+        => EvaluateCore(activity, options, enforceMentionOnly: false);
+
+    private static TeamsChannelPolicyDecision EvaluateCore(
+        TeamsInboundActivity activity,
+        TeamsChannelOptions options,
+        bool enforceMentionOnly)
     {
         ArgumentNullException.ThrowIfNull(activity);
         ArgumentNullException.ThrowIfNull(options);
@@ -53,7 +67,10 @@ public static class TeamsChannelAclPolicy
             || !TeamsSessionIdentifierCodec.IsValidActivityIdentifier(rootActivityId))
             return Deny("invalid_channel_root_identity");
 
-        if (activity.Kind == TeamsIngressActivityKind.Message && options.MentionOnly && !activity.IsMentioned)
+        if (enforceMentionOnly
+            && activity.Kind == TeamsIngressActivityKind.Message
+            && options.MentionOnly
+            && !activity.IsMentioned)
             return new TeamsChannelPolicyDecision(TeamsChannelPolicyDisposition.Ignored, "channel_unmentioned");
 
         if (!TryResolveAudience(

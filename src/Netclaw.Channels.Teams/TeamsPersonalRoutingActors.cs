@@ -50,7 +50,8 @@ public sealed record TeamsConversationIngress(
 
 public sealed record TeamsBindingIngress(
     TeamsInboundActivity Activity,
-    CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
+    CancellationToken CancellationToken,
+    bool IsEstablishedThreadContinuation = false) : INoSerializationVerificationNeeded;
 
 public sealed record TeamsBindingApprovalAction(
     TeamsApprovalAction Action,
@@ -193,9 +194,7 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         if (activity.Trust.Scope != TeamsConversationScope.Channel)
             return TeamsIngressSinkResult.Unavailable;
 
-        var policy = TeamsChannelAclPolicy.Evaluate(activity, _options);
-        if (policy.Disposition == TeamsChannelPolicyDisposition.Ignored)
-            return TeamsIngressSinkResult.Ignored;
+        var policy = TeamsChannelAclPolicy.EvaluateAccess(activity, _options);
         if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed)
             return TeamsIngressSinkResult.Denied;
 
@@ -781,6 +780,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return;
         }
 
+        if (!IsAuthorizedChannelContinuation(ingress))
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("channel_unmentioned_not_established_owner");
+            replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Ignored));
+            return;
+        }
+
         var activityFingerprint = ActivityFingerprint.Create(ingress.Activity.Trust.ActivityId);
         if (_processedActivityIds.Contains(activityFingerprint))
         {
@@ -1084,8 +1090,20 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return personal.IsAllowed ? personal : null;
         }
 
-        var channel = TeamsChannelAclPolicy.Evaluate(activity, _dependencies.Options);
+        var channel = TeamsChannelAclPolicy.EvaluateAccess(activity, _dependencies.Options);
         return channel.Disposition == TeamsChannelPolicyDisposition.Allowed ? channel.Acl : null;
+    }
+
+    private bool IsAuthorizedChannelContinuation(TeamsBindingIngress ingress)
+    {
+        if (!_isChannelBinding
+            || !_dependencies.Options.MentionOnly
+            || ingress.Activity.IsMentioned)
+        {
+            return true;
+        }
+
+        return ingress.IsEstablishedThreadContinuation;
     }
 
 

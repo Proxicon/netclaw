@@ -55,6 +55,7 @@ try {
     $manifest.id = $AppId.ToString()
     $manifest.version = $Version
     $manifest.bots[0].botId = $AppId.ToString()
+    $manifest.webApplicationInfo.id = $AppId.ToString()
     $manifest.developer.name = $DeveloperName
     $manifest.developer.privacyUrl = $PrivacyUrl.AbsoluteUri
     $manifest.developer.termsOfUseUrl = $TermsOfUseUrl.AbsoluteUri
