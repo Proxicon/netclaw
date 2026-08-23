@@ -105,6 +105,40 @@ public sealed class McpCommandTests : IDisposable
         Assert.Equal("Bearer tok-123", loaded["myapi"].Headers?["Authorization"].Value);
     }
 
+    [Fact]
+    public async Task Add_WithOAuthClientSecret_WritesEncryptedSecretAndRedactsIt()
+    {
+        const string secret = "synthetic-oauth-client-secret";
+        var args = new[]
+        {
+            "mcp", "add", "--transport", "http",
+            "--client-id", "helpdesk-client",
+            "--client-secret", secret,
+            "helpdesk", "https://helpdesk.example/mcp"
+        };
+
+        var exitCode = await McpCommand.RunAsync(args, _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+        var config = File.ReadAllText(_paths.NetclawConfigPath);
+        Assert.DoesNotContain(secret, config, StringComparison.Ordinal);
+        var secrets = ReadConfigFile(_paths.SecretsPath);
+        var encrypted = secrets.RootElement
+            .GetProperty("McpServers")
+            .GetProperty("helpdesk")
+            .GetProperty("OAuthClientSecret")
+            .GetString();
+        Assert.StartsWith("ENC:", encrypted);
+
+        var loaded = McpCommand.LoadMcpServers(_paths);
+        Assert.Equal(secret, loaded["helpdesk"].OAuthClientSecret?.Value);
+
+        _output.GetStringBuilder().Clear();
+        Assert.Equal(0, await McpCommand.RunAsync(["mcp", "get", "helpdesk"], _paths, output: _output));
+        Assert.Contains("Client secret: ***REDACTED***", _output.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(secret, _output.ToString(), StringComparison.Ordinal);
+    }
+
     // ── Fail-closed defaults for new MCP servers ──
 
     [Fact]

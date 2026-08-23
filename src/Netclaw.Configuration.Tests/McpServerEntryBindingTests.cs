@@ -3,6 +3,7 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Netclaw.Configuration.Secrets;
 using Netclaw.Tests.Utilities;
@@ -33,6 +34,27 @@ public sealed class McpServerEntryBindingTests : IDisposable
     {
         SensitiveStringTypeConverter.Protector = _previousProtector;
         _dir.Dispose();
+    }
+
+    [Fact]
+    public void EncryptedOAuthClientSecret_BindsWithoutSerializingThePlaintext()
+    {
+        const string secret = "mcp-oauth-client-secret";
+        SensitiveStringTypeConverter.Protector = new NullSecretsProtector();
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["McpServers:helpdesk:OAuthClientSecret"] = secret,
+            })
+            .Build();
+
+        var entry = config.GetSection("McpServers:helpdesk").Get<McpServerEntry>();
+
+        Assert.NotNull(entry);
+        Assert.Equal(secret, entry.OAuthClientSecret?.Value);
+        var serialized = JsonSerializer.Serialize(entry);
+        Assert.DoesNotContain(secret, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(nameof(McpServerEntry.OAuthClientSecret), serialized, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -68,9 +68,10 @@ internal static class McpCommand
         TextWriter writer,
         DaemonApi? daemonApi = null)
     {
-        // Parse: netclaw mcp add [--transport <type>] [--client-id <id>] [--scope <scopes>] [--env KEY=VALUE]... [--header "Key: Value"]... [--grant-all] [--auth] <name> [command/url] [-- args...]
+        // Parse: netclaw mcp add [--transport <type>] [--client-id <id>] [--client-secret <secret>] [--scope <scopes>] [--env KEY=VALUE]... [--header "Key: Value"]... [--grant-all] [--auth] <name> [command/url] [-- args...]
         string? transport = null;
         string? oauthClientId = null;
+        string? oauthClientSecret = null;
         string? oauthScope = null;
         var envVars = new Dictionary<string, string>();
         var headers = new Dictionary<string, string>();
@@ -121,6 +122,12 @@ internal static class McpCommand
                 continue;
             }
 
+            if (args[i] == "--client-secret" && i + 1 < args.Length)
+            {
+                oauthClientSecret = args[++i];
+                continue;
+            }
+
             if (args[i] == "--scope" && i + 1 < args.Length)
             {
                 oauthScope = args[++i];
@@ -150,7 +157,7 @@ internal static class McpCommand
 
         if (positional.Count < 1)
         {
-            writer.WriteLine("Usage: netclaw mcp add [--transport stdio|http|sse] [--env KEY=VALUE] <name> [command|url] [-- args...]");
+            writer.WriteLine("Usage: netclaw mcp add [--transport stdio|http|sse] [--client-id <id>] [--client-secret <secret>] [--scope <scopes>] [--env KEY=VALUE] <name> [command|url] [-- args...]");
             return 1;
         }
 
@@ -222,7 +229,7 @@ internal static class McpCommand
         WriteConfigFile(paths.NetclawConfigPath, config);
 
         // Write sensitive values to secrets.json
-        if (envVars.Count > 0 || headers.Count > 0)
+        if (envVars.Count > 0 || headers.Count > 0 || !string.IsNullOrWhiteSpace(oauthClientSecret))
         {
             UpdateSecretsFile(paths, secrets =>
             {
@@ -233,6 +240,8 @@ internal static class McpCommand
                     serverSecrets["EnvironmentVariables"] = envVars;
                 if (headers.Count > 0)
                     serverSecrets["Headers"] = headers;
+                if (!string.IsNullOrWhiteSpace(oauthClientSecret))
+                    serverSecrets["OAuthClientSecret"] = oauthClientSecret;
 
                 secretMcp[serverName.Value] = JsonSerializer.SerializeToElement(serverSecrets);
                 return true;
@@ -762,6 +771,8 @@ internal static class McpCommand
 
         if (entry.OAuthClientId is not null)
             writer.WriteLine($"Client ID:  {entry.OAuthClientId}");
+        if (entry.OAuthClientSecret is not null)
+            writer.WriteLine("Client secret: ***REDACTED***");
         if (entry.OAuthScope is not null)
             writer.WriteLine($"Scope:      {entry.OAuthScope}");
 
@@ -1010,6 +1021,12 @@ internal static class McpCommand
                         var decrypted = ConfigFileHelper.DecryptIfEncrypted(paths, h.Value.GetString());
                         entry.Headers[h.Name] = new SensitiveString(decrypted);
                     }
+                }
+
+                if (prop.Value.TryGetProperty("OAuthClientSecret", out var clientSecret))
+                {
+                    var decrypted = ConfigFileHelper.DecryptIfEncrypted(paths, clientSecret.GetString());
+                    entry.OAuthClientSecret = new SensitiveString(decrypted);
                 }
             }
         }
@@ -1409,6 +1426,8 @@ internal static class McpCommand
         writer.WriteLine("  --auth       Start the OAuth flow immediately after adding (HTTP/SSE only).");
         writer.WriteLine("  --client-id  Pre-registered OAuth client ID for servers that do not support");
         writer.WriteLine("               dynamic client registration.");
+        writer.WriteLine("  --client-secret  Secret for a pre-registered confidential OAuth client.");
+        writer.WriteLine("                   Netclaw encrypts it in secrets.json. Avoid shell history.");
         writer.WriteLine();
         writer.WriteLine("On add, HTTP/SSE servers without an Authorization header print a hint to run");
         writer.WriteLine("`netclaw mcp auth` first. The daemon detects OAuth requirements at auth time.");

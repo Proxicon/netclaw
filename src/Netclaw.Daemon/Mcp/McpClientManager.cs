@@ -1278,7 +1278,8 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
         {
             RedirectUri = BuildRedirectUri(),
             ClientId = entry.OAuthClientId ?? identity.ClientId,
-            ClientSecret = entry.OAuthClientId is null ? identity.ClientSecret : null,
+            ClientSecret = entry.OAuthClientSecret?.Value
+                ?? (entry.OAuthClientId is null ? identity.ClientSecret : null),
             Scopes = ParseScopes(entry.OAuthScope),
             TokenCache = cache,
 
