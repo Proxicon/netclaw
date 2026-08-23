@@ -34,7 +34,15 @@ public sealed record TeamsConversationDependencies(
     ISessionPipeline Pipeline,
     ITeamsReplyClient ReplyClient,
     TeamsOutputRenderer OutputRenderer,
-    TimeProvider TimeProvider);
+    TimeProvider TimeProvider)
+{
+    /// <summary>
+    /// Enables replacement of a processing activity with the final reply when
+    /// the configured transport implements activity updates. The default is
+    /// false because the SDK transport currently posts normal replies only.
+    /// </summary>
+    public bool SupportsActivityUpdates { get; init; }
+}
 
 public sealed record TeamsConversationIngress(
     TeamsInboundActivity Activity,
@@ -1667,7 +1675,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             if (_processingActivityId is null)
             {
                 var processing = await DeliverAsync(CreateMessage(_destination, "Processing..."));
-                if (processing.IsSuccess)
+                if (_dependencies.SupportsActivityUpdates && processing.IsSuccess)
                     _processingActivityId = IsBoundedActivityId(processing.ActivityId)
                         ? processing.ActivityId
                         : null;

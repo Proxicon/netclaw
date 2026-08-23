@@ -1780,7 +1780,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var sessionId = CreateSessionId("tenant-a", "conversation-processing");
         var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
             sessionId,
-            CreateDependencies(pipeline, replyClient: replyClient)));
+            CreateDependencies(pipeline, replyClient: replyClient, supportsActivityUpdates: true)));
 
         Assert.Equal(
             TeamsBindingRouteDisposition.Accepted,
@@ -1805,6 +1805,36 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Default_transport_posts_the_final_reply_without_an_unsupported_update_attempt()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var replyClient = new RecordingTeamsReplyClient(
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "processing"),
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
+        var sessionId = CreateSessionId("tenant-a", "conversation-processing-default-transport");
+        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-processing-default-transport", "tenant-a", "conversation-processing-default-transport"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        var telemetryBefore = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
+
+        subscriber.Tell(new ProcessingStateOutput(true) { SessionId = sessionId });
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
+        await AwaitAssertAsync(() => Assert.Equal(2, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.All(replyClient.Messages, message => Assert.Null(message.UpdateActivityId));
+        Assert.Equal("final reply", replyClient.Messages[1].Text);
+        var telemetryAfter = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
+        Assert.Equal(telemetryBefore.RepliesPosted + 2, telemetryAfter.RepliesPosted);
+        Assert.Equal(telemetryBefore.RepliesFailed, telemetryAfter.RepliesFailed);
+    }
+
+    [Fact]
     public async Task Processing_delivery_never_retains_an_unbounded_activity_id()
     {
         var pipeline = CreatePipeline(TestActor);
@@ -1814,7 +1844,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var sessionId = CreateSessionId("tenant-a", "conversation-processing-bound");
         var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
             sessionId,
-            CreateDependencies(pipeline, replyClient: replyClient)));
+            CreateDependencies(pipeline, replyClient: replyClient, supportsActivityUpdates: true)));
 
         Assert.Equal(
             TeamsBindingRouteDisposition.Accepted,
@@ -2405,7 +2435,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         string[]? allowedUserIds = null,
         string tenantId = "tenant-a",
         bool enabled = false,
-        ITeamsReplyClient? replyClient = null) => new(
+        ITeamsReplyClient? replyClient = null,
+        bool supportsActivityUpdates = false) => new(
         new TeamsChannelOptions
         {
             Enabled = enabled,
@@ -2416,7 +2447,10 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         pipeline,
         replyClient ?? new TestTeamsReplyClient(),
         new TeamsOutputRenderer(),
-        TimeProvider.System);
+        TimeProvider.System)
+    {
+        SupportsActivityUpdates = supportsActivityUpdates
+    };
 
     private sealed class TestTeamsReplyClient : ITeamsReplyClient
     {
