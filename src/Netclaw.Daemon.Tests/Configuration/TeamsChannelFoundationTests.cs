@@ -1713,6 +1713,73 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_describes_an_unsupported_channel_attachment_without_payload_data()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions
+        {
+            TenantId = "tenant",
+            BotId = "bot",
+            AllowedTeamIds = ["team"],
+            AllowedChannelIds = ["channel"],
+            AllowedUserIds = ["user"],
+            ChannelAudienceOverrides = [new TeamsChannelAudienceOverride
+            {
+                TeamId = "team",
+                ChannelId = "channel",
+                Audience = "Team"
+            }]
+        }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.From = new TeamsAccount { Id = "user" };
+        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.ChannelData = new TeamsChannelData
+        {
+            Team = new TeamsTeam { Id = "team" },
+            Channel = new TeamsChannel { Id = "channel" }
+        };
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "<at>Netclaw</at>"
+        }];
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = TeamsContentType.Html,
+            Content = JsonDocument.Parse("\"<span><a href=\\\"https://rendering.invalid/opaque\\\">synthetic</a></span>\"").RootElement.Clone()
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+        var diagnostic = translator.DescribeRejectedAttachment(activity, "tenant", result);
+
+        Assert.NotNull(diagnostic);
+        Assert.Equal("channel", diagnostic.Scope);
+        Assert.True(diagnostic.TenantMatch);
+        Assert.True(diagnostic.TeamMatch);
+        Assert.True(diagnostic.ChannelMatch);
+        Assert.True(diagnostic.SenderMatch);
+        Assert.True(diagnostic.Mentioned);
+        Assert.True(diagnostic.RootActivityValid);
+        Assert.True(diagnostic.AudienceValid);
+        Assert.Equal("unsupported_attachment_shape", diagnostic.PolicyReason);
+        Assert.Equal(1, diagnostic.AttachmentCount);
+        Assert.Equal("text_html", diagnostic.AttachmentContentType);
+        Assert.Equal(nameof(TeamsAttachmentContentKind.NonEmptyText), diagnostic.AttachmentContentKind);
+        Assert.True(diagnostic.AttachmentContentExists);
+        Assert.False(diagnostic.AttachmentContentUrlExists);
+        Assert.True(diagnostic.AttachmentReferenceExists);
+        Assert.False(diagnostic.AttachmentGraphReferenceExists);
+        Assert.False(diagnostic.AttachmentNameExists);
+        Assert.False(diagnostic.AttachmentThumbnailExists);
+        Assert.True(diagnostic.ChannelDataExists);
+        Assert.False(diagnostic.AttachmentHtmlRenderingMarkupExists);
+        Assert.Equal(1, diagnostic.MentionCount);
+        Assert.False(diagnostic.ReplyToIdExists);
+    }
+
+    [Fact]
     public void Translation_telemetry_uses_safe_wrapper_and_attachment_reason_codes()
     {
         var telemetry = ChannelTelemetry.For(ChannelType.Teams);
