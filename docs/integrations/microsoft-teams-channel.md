@@ -62,8 +62,12 @@ proxy needs a non-loopback daemon address and explicit `Daemon.TrustedProxies`.
 Azure Bot supports one messaging endpoint. Use the same endpoint for personal
 and team messages.
 
-Use the application ID for the Azure Bot, package `AppId`, `ClientId`, and
-`BotId`. Copy the client secret value, not the secret ID.
+Use the Entra application **(client) ID** for the Azure Bot, package `AppId`,
+`ClientId`, and `BotId`; all four values must represent the same application.
+Do not use the Entra object ID or the Teams `28:` bot identifier. Increment the
+package version for every manifest update, then upgrade or reinstall that
+package in the exact target Team so its owner can grant the requested RSC
+permission. Copy the client secret value, not the secret ID.
 
 Do not add permissions beyond the package's required
 `ChannelMessage.Read.Group` RSC entry. Do not enable calling or meeting
