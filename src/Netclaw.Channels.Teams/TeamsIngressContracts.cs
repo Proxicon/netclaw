@@ -272,11 +272,23 @@ public sealed record TeamsApprovalCard(
     public const int MaxSerializedBytes = 80 * 1024;
 }
 
+/// <summary>
+/// The Adaptive Card action styles that represent the shared approval choices.
+/// The style is display-only. The persisted offered key remains the authority.
+/// </summary>
+public enum TeamsApprovalActionStyle
+{
+    Default,
+    Positive,
+    Destructive
+}
+
 public sealed record TeamsApprovalCardAction(
     string Title,
     string Action,
     string CorrelationId,
-    string Nonce);
+    string Nonce,
+    TeamsApprovalActionStyle Style);
 
 /// <summary>
 /// SDK-free destination captured only after a Teams activity passes the future

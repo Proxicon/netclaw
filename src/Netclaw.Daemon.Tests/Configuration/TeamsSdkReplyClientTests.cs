@@ -4,9 +4,12 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Net;
+using System.Text.Json;
+using Netclaw.Actors.Protocol;
 using Netclaw.Channels.Teams;
 using Netclaw.Daemon.Configuration;
 using Xunit;
+using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -76,6 +79,38 @@ public sealed class TeamsSdkReplyClientTests
         Assert.Equal(TeamsDeliveryStatus.Failed, failure.Status);
         Assert.Equal("sdk_delivery_failed", failure.ReasonCode);
         Assert.DoesNotContain("secret", failure.ReasonCode, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Approval_card_payload_preserves_the_canonical_button_styles()
+    {
+        var request = new ToolInteractionRequest
+        {
+            SessionId = new SessionId("teams~tenant~personal~conversation/conversation"),
+            Kind = "approval",
+            CallId = new ToolCallId("call-approval"),
+            ToolName = new ToolName("shell_execute"),
+            DisplayText = "rmdir /home/sto/.netclaw/workspaces/testapproval",
+            Options =
+            [
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, ApprovalOptionKeys.ApproveOnceLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveSessionKey, ApprovalOptionKeys.ApproveSessionLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveAlwaysKey, ApprovalOptionKeys.ApproveAlwaysLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveEverywhereKey, ApprovalOptionKeys.ApproveEverywhereLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, ApprovalOptionKeys.DenyLabel)
+            ]
+        };
+
+        var approvalCard = TeamsApprovalCardRenderer.CreatePending(request, "correlation_123", "nonce_123");
+        var payload = TeamsAdaptiveCardPayloadBuilder.Create(approvalCard);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+        var actions = document.RootElement.GetProperty("actions").EnumerateArray().ToArray();
+
+        Assert.Equal(request.Options.Select(option => option.Label), actions.Select(action => action.GetProperty("title").GetString()));
+        Assert.Equal(
+            ["positive", "default", "default", "destructive", "destructive"],
+            actions.Select(action => action.GetProperty("style").GetString()));
+        Assert.All(actions, action => Assert.Equal("Action.Execute", action.GetProperty("type").GetString()));
     }
 
     private static TeamsOutboundMessage CreateMessage(string? updateActivityId = null) => new(
