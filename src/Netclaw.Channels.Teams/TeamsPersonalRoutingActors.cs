@@ -2081,6 +2081,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             }, consumed =>
             {
                 ApplyApprovalConsumed(consumed);
+                // Expiry is a fail-closed decision. The pending tool call must
+                // receive a denial so the session can continue to accept later
+                // messages in the same Teams root.
+                Self.Tell(new ForwardTeamsApprovalDecision(
+                    pending.CorrelationId,
+                    ApprovalOptionKeys.Deny,
+                    action.Trust.SenderId));
                 expiredReplyTo.Tell(new TeamsApprovalActionResult(
                     TeamsApprovalActionDisposition.Expired,
                     CreateTerminalCard(pending, "This approval has expired.")));
