@@ -43,6 +43,15 @@ public sealed class TeamsInteractiveApprovalTests
         Assert.Equal("Tool approval required", card.Title);
         Assert.Equal(request.Options.Select(option => option.Key.Value), card.Actions.Select(action => action.Action));
         Assert.Equal(request.Options.Select(option => option.Label), card.Actions.Select(action => action.Title));
+        Assert.Equal(
+            [
+                TeamsApprovalActionStyle.Positive,
+                TeamsApprovalActionStyle.Default,
+                TeamsApprovalActionStyle.Default,
+                TeamsApprovalActionStyle.Destructive,
+                TeamsApprovalActionStyle.Destructive
+            ],
+            card.Actions.Select(action => action.Style));
         Assert.Contains("Tool: execute_shell", card.Body, StringComparison.Ordinal);
         Assert.Contains("Request: git push origin main", card.Body, StringComparison.Ordinal);
         Assert.Contains("Candidates: git push, git status", card.Body, StringComparison.Ordinal);
@@ -87,6 +96,13 @@ public sealed class TeamsInteractiveApprovalTests
         Assert.Equal(
             [ApprovalOptionKeys.ApproveOnce, ApprovalOptionKeys.ApproveEverywhere, ApprovalOptionKeys.Deny],
             TeamsApprovalCardRenderer.GetOfferedOptionKeys(request));
+        Assert.Equal(
+            [
+                TeamsApprovalActionStyle.Positive,
+                TeamsApprovalActionStyle.Destructive,
+                TeamsApprovalActionStyle.Destructive
+            ],
+            card.Actions.Select(action => action.Style));
     }
 
     [Fact]
