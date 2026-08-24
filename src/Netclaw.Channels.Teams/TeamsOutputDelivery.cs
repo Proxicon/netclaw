@@ -49,6 +49,15 @@ public sealed record TeamsDeliveryResult(TeamsDeliveryStatus Status, string? Act
 public interface ITeamsReplyClient
 {
     Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends a transient native Teams typing indication. Unlike a message,
+    /// this has no durable activity identifier and must never gate delivery
+    /// of the eventual response.
+    /// </summary>
+    Task<TeamsDeliveryResult> SendTypingAsync(
+        TeamsOutboundDestination destination,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>

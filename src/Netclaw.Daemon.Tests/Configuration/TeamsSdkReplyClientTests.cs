@@ -31,6 +31,32 @@ public sealed class TeamsSdkReplyClientTests
         Assert.Equal(2, operations.Requests.Count);
     }
 
+    [Fact]
+    public async Task Reply_client_sends_native_typing_without_requiring_a_message_activity_id()
+    {
+        var operations = new FakeOperations();
+        var client = new TeamsSdkReplyClient(operations);
+        var destination = CreateMessage().Destination;
+
+        var result = await client.SendTypingAsync(destination, TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsDeliveryStatus.Delivered, result.Status);
+        Assert.Null(result.ActivityId);
+        Assert.Equal(destination, Assert.Single(operations.TypingDestinations));
+    }
+
+    [Fact]
+    public async Task Reply_client_maps_typing_transport_failures_to_safe_results()
+    {
+        var operations = new FakeOperations { TypingOutcome = "unavailable" };
+        var client = new TeamsSdkReplyClient(operations);
+
+        var result = await client.SendTypingAsync(CreateMessage().Destination, TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsDeliveryStatus.Unavailable, result.Status);
+        Assert.Equal("sdk_unavailable", result.ReasonCode);
+    }
+
     [Theory]
     [InlineData("unavailable")]
     [InlineData("unauthorized")]
@@ -149,6 +175,10 @@ public sealed class TeamsSdkReplyClientTests
 
         public List<TeamsOutboundMessage> Requests { get; } = [];
 
+        public List<TeamsOutboundDestination> TypingDestinations { get; } = [];
+
+        public string TypingOutcome { get; init; } = "delivered";
+
         public Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken)
         {
             Requests.Add(message);
@@ -162,6 +192,19 @@ public sealed class TeamsSdkReplyClientTests
                 "cancelled" => Task.FromException<string?>(new OperationCanceledException()),
                 "secret" => Task.FromException<string?>(new InvalidOperationException("secret tenant service URL body")),
                 _ => Task.FromResult<string?>(outcome)
+            };
+        }
+
+        public Task SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken)
+        {
+            TypingDestinations.Add(destination);
+            return TypingOutcome switch
+            {
+                "unavailable" => Task.FromException(new HttpRequestException("transport unavailable")),
+                "unauthorized" => Task.FromException(new UnauthorizedAccessException("credential failure")),
+                "cancelled" => Task.FromException(new OperationCanceledException()),
+                "secret" => Task.FromException(new InvalidOperationException("secret tenant service URL body")),
+                _ => Task.CompletedTask
             };
         }
     }
