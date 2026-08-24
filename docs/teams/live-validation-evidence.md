@@ -165,6 +165,16 @@ without creating or deleting anything.
 
 Result: **PERSONAL APPROVAL CARD DENY AND ONCE LIVE PASS**.
 
+## Team tool-approval card live pass
+
+Posts and Threads both passed the controlled Team approval matrix. A fresh
+**Deny** test replaced the source card in place and produced one text outcome.
+The command did not run. A fresh **Once** test replaced the source card in
+place and reached the harmless nonexistent target. The target did not exist,
+so the command failed without any creation or deletion.
+
+Result: **TEAM APPROVAL CARD DENY AND ONCE LIVE PASS**.
+
 ## Native typing-indicator follow-up
 
 The earlier persistent `Processing...` post is an application-created message,
@@ -179,8 +189,8 @@ persisted `Processing...` message.
 
 ## Remaining work
 
-After the native typing deployment, run the tool-approval card matrix in both
-approved Team channels:
+The current source improves approval-card presentation. After its deployment,
+repeat the card matrix in both approved Team channels:
 
 - Posts: one fresh **Deny** and one fresh **Once** using an agreed harmless,
   nonexistent target.

@@ -40,7 +40,7 @@ public sealed class TeamsInteractiveApprovalTests
 
         var card = TeamsApprovalCardRenderer.CreatePending(request, "correlation_123", "nonce_123");
 
-        Assert.Equal("Tool approval required", card.Title);
+        Assert.Equal("🔒 Tool approval required", card.Title);
         Assert.Equal(request.Options.Select(option => option.Key.Value), card.Actions.Select(action => action.Action));
         Assert.Equal(request.Options.Select(option => option.Label), card.Actions.Select(action => action.Title));
         Assert.Equal(
@@ -58,6 +58,15 @@ public sealed class TeamsInteractiveApprovalTests
         Assert.Contains("Working directory: /work/netclaw", card.Body, StringComparison.Ordinal);
         Assert.Contains("Adopted context: present.", card.Body, StringComparison.Ordinal);
         Assert.Contains("Speakers: user-a, user-b", card.Body, StringComparison.Ordinal);
+        Assert.Equal(
+            [
+                new TeamsApprovalCardField("Tool", "execute_shell"),
+                new TeamsApprovalCardField("Request", "git push origin main"),
+                new TeamsApprovalCardField("Candidates", "git push, git status"),
+                new TeamsApprovalCardField("Working directory", "/work/netclaw")
+            ],
+            card.Fields);
+        Assert.Equal("Adopted context: present.\nSpeakers: user-a, user-b", card.Summary);
         Assert.All(card.Actions, action =>
         {
             Assert.Equal("correlation_123", action.CorrelationId);
@@ -89,7 +98,7 @@ public sealed class TeamsInteractiveApprovalTests
 
         var card = TeamsApprovalCardRenderer.CreatePending(request, "correlation_123", "nonce_123");
 
-        Assert.Equal("MCP tool approval required", card.Title);
+        Assert.Equal("🔒 MCP tool approval required", card.Title);
         Assert.Equal(
             [ApprovalOptionKeys.ApproveOnceLabel, ApprovalOptionKeys.ApproveMcpToolLabel, ApprovalOptionKeys.DenyLabel],
             card.Actions.Select(action => action.Title));
@@ -125,12 +134,19 @@ public sealed class TeamsInteractiveApprovalTests
             "rmdir netclaw-approval-card-never-created",
             "Denied.");
 
-        Assert.Equal("Approval denied", card.Title);
+        Assert.Equal("⛔ Approval denied", card.Title);
         Assert.Equal(TeamsApprovalCardTone.Attention, card.Tone);
         Assert.Empty(card.Actions);
         Assert.Contains("Tool: shell_execute", card.Body, StringComparison.Ordinal);
         Assert.Contains("Action: rmdir netclaw-approval-card-never-created", card.Body, StringComparison.Ordinal);
         Assert.EndsWith("Denied.", card.Body, StringComparison.Ordinal);
+        Assert.Equal(
+            [
+                new TeamsApprovalCardField("Tool", "shell_execute"),
+                new TeamsApprovalCardField("Action", "rmdir netclaw-approval-card-never-created")
+            ],
+            card.Fields);
+        Assert.Equal("Denied.", card.Summary);
     }
 
     [Fact]

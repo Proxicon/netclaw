@@ -36,9 +36,10 @@ public static class TeamsApprovalCardRenderer
             throw new ArgumentException("The approval nonce must be bounded and opaque.", nameof(nonce));
 
         ValidateOptions(request.Options);
+        var fields = BuildPendingFields(request);
         var card = new TeamsApprovalCard(
-            request.ToolName.IsMcp ? "MCP tool approval required" : "Tool approval required",
-            BuildPendingBody(request),
+            request.ToolName.IsMcp ? "🔒 MCP tool approval required" : "🔒 Tool approval required",
+            BuildPendingBody(fields, request),
             request.Options
                 .Select(option => new TeamsApprovalCardAction(
                     option.Label,
@@ -47,7 +48,11 @@ public static class TeamsApprovalCardRenderer
                     nonce,
                     GetActionStyle(option.Key.Value)))
                 .ToArray(),
-            TeamsApprovalCardTone.Warning);
+            TeamsApprovalCardTone.Warning)
+        {
+            Fields = fields,
+            Summary = BuildPendingSummary(request)
+        };
         EnsureBounded(card);
         return card;
     }
@@ -70,18 +75,30 @@ public static class TeamsApprovalCardRenderer
     {
         var (title, tone) = message switch
         {
-            "Denied." => ("Approval denied", TeamsApprovalCardTone.Attention),
-            "This approval has expired." => ("Approval expired", TeamsApprovalCardTone.Warning),
-            "This approval was already processed." => ("Approval already resolved", TeamsApprovalCardTone.Warning),
-            "This approval is no longer available." => ("Approval unavailable", TeamsApprovalCardTone.Warning),
-            _ when message.StartsWith("Approved:", StringComparison.Ordinal) => ("Approval granted", TeamsApprovalCardTone.Good),
-            _ => ("Approval resolved", TeamsApprovalCardTone.Default)
+            "Denied." => ("⛔ Approval denied", TeamsApprovalCardTone.Attention),
+            "This approval has expired." => ("⌛ Approval expired", TeamsApprovalCardTone.Warning),
+            "This approval was already processed." => ("ℹ️ Approval already resolved", TeamsApprovalCardTone.Warning),
+            "This approval is no longer available." => ("⚠️ Approval unavailable", TeamsApprovalCardTone.Warning),
+            _ when message.StartsWith("Approved:", StringComparison.Ordinal) => ("✅ Approval granted", TeamsApprovalCardTone.Good),
+            _ => ("ℹ️ Approval resolved", TeamsApprovalCardTone.Default)
         };
         var requestLabel = isMcpTool ? "Invocation" : "Action";
-        var body = string.IsNullOrWhiteSpace(toolName) || string.IsNullOrWhiteSpace(requestDisplayText)
-            ? Truncate(message, MaxSummaryChars)
-            : $"Tool: {Truncate(toolName, MaxToolNameChars)}\n{requestLabel}: {Truncate(requestDisplayText, MaxRequestDisplayChars)}\n\n{Truncate(message, MaxSummaryChars)}";
-        var card = new TeamsApprovalCard(title, body, [], tone);
+        var fields = string.IsNullOrWhiteSpace(toolName) || string.IsNullOrWhiteSpace(requestDisplayText)
+            ? []
+            : new TeamsApprovalCardField[]
+            {
+                new("Tool", Truncate(toolName, MaxToolNameChars)),
+                new(requestLabel, Truncate(requestDisplayText, MaxRequestDisplayChars))
+            };
+        var summary = Truncate(message, MaxSummaryChars);
+        var body = fields.Length is 0
+            ? summary
+            : string.Join("\n", fields.Select(field => $"{field.Label}: {field.Value}")) + "\n\n" + summary;
+        var card = new TeamsApprovalCard(title, body, [], tone)
+        {
+            Fields = fields,
+            Summary = summary
+        };
         EnsureBounded(card);
         return card;
     }
@@ -128,20 +145,37 @@ public static class TeamsApprovalCardRenderer
     private static string Truncate(string value, int maximumLength)
         => value.Length <= maximumLength ? value : value[..maximumLength];
 
-    private static string BuildPendingBody(ToolInteractionRequest request)
+    private static TeamsApprovalCardField[] BuildPendingFields(ToolInteractionRequest request)
     {
         var requestLabel = request.ToolName.IsMcp ? "Invocation" : "Request";
-        var lines = new List<string>
+        var fields = new List<TeamsApprovalCardField>
         {
-            $"Tool: {ApprovalDisplayTextFormatter.Truncate(request.ToolName.Value, MaxToolNameChars)}",
-            $"{requestLabel}: {ApprovalDisplayTextFormatter.Truncate(request.DisplayText, MaxRequestDisplayChars)}"
+            new("Tool", ApprovalDisplayTextFormatter.Truncate(request.ToolName.Value, MaxToolNameChars)),
+            new(requestLabel, ApprovalDisplayTextFormatter.Truncate(request.DisplayText, MaxRequestDisplayChars))
         };
 
         var candidates = request.CandidateVerbs.Count > 0 ? request.CandidateVerbs : request.Patterns;
         if (candidates.Count > 0)
-            lines.Add($"Candidates: {ApprovalDisplayTextFormatter.Truncate(string.Join(", ", candidates), MaxSummaryChars)}");
+        {
+            fields.Add(new TeamsApprovalCardField(
+                "Candidates",
+                ApprovalDisplayTextFormatter.Truncate(string.Join(", ", candidates), MaxSummaryChars)));
+        }
         if (!string.IsNullOrWhiteSpace(request.Cwd))
-            lines.Add($"Working directory: {ApprovalDisplayTextFormatter.Truncate(request.Cwd, MaxSummaryChars)}");
+        {
+            fields.Add(new TeamsApprovalCardField(
+                "Working directory",
+                ApprovalDisplayTextFormatter.Truncate(request.Cwd, MaxSummaryChars)));
+        }
+
+        return [.. fields];
+    }
+
+    private static string BuildPendingBody(
+        IReadOnlyList<TeamsApprovalCardField> fields,
+        ToolInteractionRequest request)
+    {
+        var lines = fields.Select(field => $"{field.Label}: {field.Value}").ToList();
         if (request.IsMessy)
             lines.Add("Reusable approval is unavailable for this request.");
         if (request.HasAdoptedContext)
@@ -155,6 +189,24 @@ public static class TeamsApprovalCardRenderer
         }
 
         return string.Join("\n", lines);
+    }
+
+    private static string? BuildPendingSummary(ToolInteractionRequest request)
+    {
+        var lines = new List<string>();
+        if (request.IsMessy)
+            lines.Add("Reusable approval is unavailable for this request.");
+        if (request.HasAdoptedContext)
+        {
+            lines.Add("Adopted context: present.");
+            if (request.AdoptedSpeakerIds.Count > 0)
+            {
+                lines.Add(
+                    $"Speakers: {ApprovalDisplayTextFormatter.Truncate(string.Join(", ", request.AdoptedSpeakerIds), MaxSummaryChars)}");
+            }
+        }
+
+        return lines.Count is 0 ? null : string.Join("\n", lines);
     }
 
     private static void ValidateOptions(IReadOnlyList<ToolInteractionOption> options)
