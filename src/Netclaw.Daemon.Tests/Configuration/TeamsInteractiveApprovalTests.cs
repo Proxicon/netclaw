@@ -118,6 +118,22 @@ public sealed class TeamsInteractiveApprovalTests
     }
 
     [Fact]
+    public void Terminal_denial_card_keeps_the_tool_context_and_removes_actions()
+    {
+        var card = TeamsApprovalCardRenderer.CreateTerminal(
+            "shell_execute",
+            "rmdir netclaw-approval-card-never-created",
+            "Denied.");
+
+        Assert.Equal("Approval denied", card.Title);
+        Assert.Equal(TeamsApprovalCardTone.Attention, card.Tone);
+        Assert.Empty(card.Actions);
+        Assert.Contains("Tool: shell_execute", card.Body, StringComparison.Ordinal);
+        Assert.Contains("Action: rmdir netclaw-approval-card-never-created", card.Body, StringComparison.Ordinal);
+        Assert.EndsWith("Denied.", card.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Nonce_hash_requires_an_exact_bounded_value()
     {
         const string nonce = "opaque_nonce_123";

@@ -692,7 +692,6 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Command<GetTeamsBindingProactiveDiagnostics>(_ => Sender.Tell(CreateProactiveDiagnostics()));
         CommandAsync<TeamsBindingApprovalAction>(HandleApprovalActionAsync);
         CommandAsync<ForwardTeamsApprovalDecision>(ForwardApprovalDecisionAsync);
-        CommandAsync<DeliverTeamsApprovalTerminal>(DeliverApprovalTerminalAsync);
         CommandAsync<DenyTeamsApprovalRequest>(DenyApprovalRequestAsync);
         CommandAsync<DispatchReservedActivity>(DispatchReservedActivityAsync);
         Command<BeginTeamsReminderDispatch>(BeginReminderDispatch);
@@ -1479,7 +1478,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 RequesterPrincipal = approval.RequesterPrincipal,
                 ExpiresAtUnixMilliseconds = approval.ExpiresAtUnixMilliseconds,
                 OfferedOptionKeys = approval.OfferedOptionKeys,
-                IsMcpTool = approval.IsMcpTool
+                IsMcpTool = approval.IsMcpTool,
+                ToolName = approval.ToolName,
+                RequestDisplayText = approval.RequestDisplayText
             });
             if (approval.PromptId is not null)
             {
@@ -1660,6 +1661,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             ExpiresAtUnixMilliseconds = pending.ExpiresAtUnixMilliseconds,
             OfferedOptionKeys = pending.OfferedOptionKeys,
             IsMcpTool = pending.IsMcpTool,
+            ToolName = pending.ToolName,
+            RequestDisplayText = pending.RequestDisplayText,
             PromptId = pending.PromptId,
             Decision = pending.Decision
         }).ToArray(),
@@ -1946,7 +1949,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             RequesterPrincipal = request.RequesterPrincipal,
             ExpiresAtUnixMilliseconds = expiresAt.ToUnixTimeMilliseconds(),
             OfferedOptionKeys = offeredOptionKeys,
-            IsMcpTool = request.ToolName.IsMcp
+            IsMcpTool = request.ToolName.IsMcp,
+            ToolName = ApprovalDisplayTextFormatter.Truncate(request.ToolName.Value, TeamsApprovalCardRenderer.MaxToolNameChars),
+            RequestDisplayText = ApprovalDisplayTextFormatter.Truncate(request.DisplayText, TeamsApprovalCardRenderer.MaxRequestDisplayChars)
         }, created =>
         {
             ApplyApprovalPendingCreated(created);
@@ -2011,12 +2016,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
     }
 
-    private async Task HandleApprovalActionAsync(TeamsBindingApprovalAction received)
+    private Task HandleApprovalActionAsync(TeamsBindingApprovalAction received)
     {
         if (received.CancellationToken.IsCancellationRequested)
         {
             Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled));
-            return;
+            return Task.CompletedTask;
         }
 
         var action = received.Action;
@@ -2034,7 +2039,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_rejected");
             Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
-            return;
+            return Task.CompletedTask;
         }
 
         _destination = destination;
@@ -2045,34 +2050,37 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_wrong_user");
             Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
-            return;
+            return Task.CompletedTask;
         }
 
         if (pending.Decision is not null)
         {
-            await DeliverTerminalCardAsync(destination, pending, "This approval was already processed.");
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_duplicate");
-            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.AlreadyProcessed));
-            return;
+            Sender.Tell(new TeamsApprovalActionResult(
+                TeamsApprovalActionDisposition.AlreadyProcessed,
+                CreateTerminalCard(pending, "This approval was already processed.")));
+            return Task.CompletedTask;
         }
 
         if (pending.OfferedOptionKeys.Count == 0)
         {
-            await DeliverTerminalCardAsync(destination, pending, "This approval is no longer available.");
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_legacy_unavailable");
-            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
-            return;
+            Sender.Tell(new TeamsApprovalActionResult(
+                TeamsApprovalActionDisposition.Unavailable,
+                CreateTerminalCard(pending, "This approval is no longer available.")));
+            return Task.CompletedTask;
         }
 
         if (!pending.OfferedOptionKeys.Contains(action.Action, StringComparer.Ordinal))
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_option_unavailable");
             Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
-            return;
+            return Task.CompletedTask;
         }
 
         if (_dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds() >= pending.ExpiresAtUnixMilliseconds)
         {
+            var expiredReplyTo = Sender;
             Persist(new TeamsApprovalConsumed
             {
                 CorrelationId = pending.CorrelationId,
@@ -2081,11 +2089,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             }, consumed =>
             {
                 ApplyApprovalConsumed(consumed);
-                Self.Tell(new DeliverTeamsApprovalTerminal(destination, pending.CorrelationId, "This approval has expired."));
+                expiredReplyTo.Tell(new TeamsApprovalActionResult(
+                    TeamsApprovalActionDisposition.Expired,
+                    CreateTerminalCard(pending, "This approval has expired.")));
             });
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_expired");
-            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Expired));
-            return;
+            return Task.CompletedTask;
         }
 
         var replyTo = Sender;
@@ -2098,13 +2107,15 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             ApplyApprovalConsumed(consumed);
             Self.Tell(new ForwardTeamsApprovalDecision(
-                destination,
                 pending.CorrelationId,
                 action.Action,
                 action.Trust.SenderId));
             ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_action_accepted");
-            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Accepted));
+            replyTo.Tell(new TeamsApprovalActionResult(
+                TeamsApprovalActionDisposition.Accepted,
+                CreateTerminalCard(pending, FormatApprovalDecision(pending, action.Action))));
         });
+        return Task.CompletedTask;
     }
 
     private async Task ForwardApprovalDecisionAsync(ForwardTeamsApprovalDecision decision)
@@ -2114,61 +2125,28 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         try
         {
-            var feedback = await _dependencies.Pipeline.SendFeedbackAndWaitAsync(new ToolInteractionResponse
+            await _dependencies.Pipeline.SendFeedbackAndWaitAsync(new ToolInteractionResponse
             {
                 SessionId = _sessionId,
                 CallId = new ToolCallId(pending.CallId),
                 SelectedKey = new ApprovalOptionKey(decision.Action),
                 SenderId = new SenderId(decision.SenderId)
             });
-
-            var text = feedback is CommandAck
-                ? FormatApprovalDecision(pending, decision.Action)
-                : "This approval is no longer available.";
-            await DeliverTerminalCardAsync(decision.Destination, pending, text);
         }
         catch (Exception)
         {
             // The terminal decision already exists in the journal. Never retry
-            // feedback from presentation code because that could repeat a tool decision.
+            // feedback because that could repeat a tool decision.
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_feedback_failed");
-            await DeliverTerminalCardAsync(decision.Destination, pending, "This approval is no longer available.");
         }
     }
 
-    private async Task DeliverTerminalCardAsync(
-        TeamsOutboundDestination destination,
-        TeamsPendingApproval pending,
-        string text)
-    {
-        var card = TeamsApprovalCardRenderer.CreateTerminal(text);
-        if (pending.PromptId is null)
-        {
-            // A proactive send with no returned activity ID cannot be updated in
-            // place, so send the terminal result as a fresh card instead.
-            await DeliverAsync(CreateMessage(destination, text, approvalCard: card));
-            ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_terminal_fallback_sent");
-            return;
-        }
-
-        var update = await DeliverAsync(CreateMessage(destination, text, pending.PromptId, card));
-        if (update.IsSuccess)
-        {
-            ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_terminal_update_succeeded");
-            return;
-        }
-
-        // One fallback provides a safe visible result. The decision remains
-        // terminal when both presentation attempts fail.
-        await DeliverAsync(CreateMessage(destination, text, approvalCard: card));
-        ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_terminal_update_failed");
-    }
-
-    private async Task DeliverApprovalTerminalAsync(DeliverTeamsApprovalTerminal terminal)
-    {
-        if (_pendingApprovals.TryGetValue(terminal.CorrelationId, out var pending))
-            await DeliverTerminalCardAsync(terminal.Destination, pending, terminal.Text);
-    }
+    private static TeamsApprovalCard CreateTerminalCard(TeamsPendingApproval pending, string text) =>
+        TeamsApprovalCardRenderer.CreateTerminal(
+            pending.ToolName,
+            pending.RequestDisplayText,
+            text,
+            pending.IsMcpTool);
 
     private bool TryGetExpectedSessionId(TeamsApprovalAction action, out SessionId sessionId)
     {
@@ -2225,7 +2203,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             || created.NonceHash.Any(static character => !char.IsAsciiHexDigit(character))
             || created.ExpiresAtUnixMilliseconds <= 0
             || string.IsNullOrWhiteSpace(created.CallId)
-            || !HasValidOfferedOptionKeys(created.OfferedOptionKeys))
+            || !HasValidOfferedOptionKeys(created.OfferedOptionKeys)
+            || !HasValidApprovalPresentation(created.ToolName, created.RequestDisplayText))
         {
             throw new InvalidOperationException("The Teams approval state is invalid.");
         }
@@ -2241,7 +2220,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             created.RequesterPrincipal,
             created.ExpiresAtUnixMilliseconds,
             created.OfferedOptionKeys.ToArray(),
-            created.IsMcpTool)))
+            created.IsMcpTool,
+            created.ToolName,
+            created.RequestDisplayText)))
         {
             throw new InvalidOperationException("The Teams approval state contains a duplicate correlation.");
         }
@@ -2277,6 +2258,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         var keys = new HashSet<string>(StringComparer.Ordinal);
         return optionKeys.All(key => TeamsApprovalAction.IsSupportedAction(key) && keys.Add(key));
     }
+
+    private static bool HasValidApprovalPresentation(string toolName, string requestDisplayText) =>
+        string.IsNullOrEmpty(toolName) && string.IsNullOrEmpty(requestDisplayText)
+        || (!string.IsNullOrWhiteSpace(toolName)
+            && !string.IsNullOrWhiteSpace(requestDisplayText)
+            && toolName.Length <= TeamsApprovalCardRenderer.MaxToolNameChars
+            && requestDisplayText.Length <= TeamsApprovalCardRenderer.MaxRequestDisplayChars);
 
     private static bool IsValidPersistedDecision(TeamsPendingApproval pending, string decision) =>
         decision == "expired"
@@ -2331,15 +2319,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private sealed record DenyTeamsApprovalRequest(ToolInteractionRequest Request) : INoSerializationVerificationNeeded;
 
     private sealed record ForwardTeamsApprovalDecision(
-        TeamsOutboundDestination Destination,
         string CorrelationId,
         string Action,
         string SenderId) : INoSerializationVerificationNeeded;
-
-    private sealed record DeliverTeamsApprovalTerminal(
-        TeamsOutboundDestination Destination,
-        string CorrelationId,
-        string Text) : INoSerializationVerificationNeeded;
 
     private sealed record TeamsPendingApproval(
         string CallId,
@@ -2350,6 +2332,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         long ExpiresAtUnixMilliseconds,
         IReadOnlyList<string> OfferedOptionKeys,
         bool IsMcpTool,
+        string ToolName,
+        string RequestDisplayText,
         string? PromptId = null,
         string? Decision = null);
 

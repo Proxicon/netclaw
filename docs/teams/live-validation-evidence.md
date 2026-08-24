@@ -145,10 +145,25 @@ before session or model dispatch.
 Result: **THREADS ESTABLISHED CONTINUATION LIVE PASS** and **RSC NEW-ROOT
 FAIL-CLOSED LIVE PASS**.
 
+## Tool-approval denial live pass and presentation follow-up
+
+A fresh Personal-scope tool approval reached the Teams client. Selecting
+**Deny** returned the decision to the app, produced the terminal denied outcome,
+and did not run the requested operation. This is a live pass for the protected
+approval callback, one-time decision handling, and denial behaviour.
+
+The initial Teams presentation still left the source approval card actionable
+and added a separate minimal terminal card. The required presentation behaviour
+is that the source card is replaced with a terminal card that has no actions and
+shows the tool, action or invocation, and decision using the supported Adaptive
+Card styling. The next implementation PR returns that terminal card directly
+from the `Action.Execute` invoke response; it requires a fresh live click test
+after deployment to confirm that Teams replaces the original card.
+
 ## Remaining work
 
-The next planned Teams capability is PR 10 tool-approval parity and its tenant
-matrix. The established-thread continuation capability is now live validated.
-The optional remaining negative live check is a different approved human
-attempting an unmentioned continuation; the equivalent offline policy coverage
-already passes.
+The next live Teams check is the terminal approval-card replacement described
+above, followed by the tool-approval tenant matrix. The established-thread
+continuation capability is live validated. The optional remaining negative live
+check is a different approved human attempting an unmentioned continuation;
+the equivalent offline policy coverage already passes.

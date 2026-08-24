@@ -92,6 +92,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         if (value.RequesterPrincipal is { } principal) proto.RequesterPrincipal = (int)principal;
         proto.OfferedOptionKeys.AddRange(value.OfferedOptionKeys);
         proto.IsMcpTool = value.IsMcpTool;
+        proto.ToolName = value.ToolName;
+        proto.RequestDisplayText = value.RequestDisplayText;
         return proto;
     }
 
@@ -104,7 +106,9 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         RequesterPrincipal = value.HasRequesterPrincipal ? (PrincipalClassification)value.RequesterPrincipal : null,
         ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds,
         OfferedOptionKeys = value.OfferedOptionKeys.ToArray(),
-        IsMcpTool = value.IsMcpTool
+        IsMcpTool = value.IsMcpTool,
+        ToolName = value.ToolName,
+        RequestDisplayText = value.RequestDisplayText
     };
 
     private static Proto.TeamsApprovalCardDeliveredProto ToProto(TeamsApprovalCardDelivered value) => new()
@@ -211,6 +215,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         if (value.Decision is not null) proto.Decision = value.Decision;
         proto.OfferedOptionKeys.AddRange(value.OfferedOptionKeys);
         proto.IsMcpTool = value.IsMcpTool;
+        proto.ToolName = value.ToolName;
+        proto.RequestDisplayText = value.RequestDisplayText;
         return proto;
     }
 
@@ -222,6 +228,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds,
         OfferedOptionKeys = value.OfferedOptionKeys.ToArray(),
         IsMcpTool = value.IsMcpTool,
+        ToolName = value.ToolName,
+        RequestDisplayText = value.RequestDisplayText,
         PromptId = value.HasPromptId ? value.PromptId : null, Decision = value.HasDecision ? value.Decision : null
     };
 

@@ -16,6 +16,8 @@ message TeamsApprovalPendingCreatedProto {
   int64 expires_at_unix_milliseconds = 6;
   repeated string offered_option_keys = 7;
   bool is_mcp_tool = 8;
+  string tool_name = 9;
+  string request_display_text = 10;
 }
 
 message TeamsApprovalCardDeliveredProto {
@@ -40,6 +42,8 @@ message TeamsApprovalSnapshotEntryProto {
   optional string decision = 8;
   repeated string offered_option_keys = 9;
   bool is_mcp_tool = 10;
+  string tool_name = 11;
+  string request_display_text = 12;
 }
 
 message TeamsProactiveDestinationCapturedProto {

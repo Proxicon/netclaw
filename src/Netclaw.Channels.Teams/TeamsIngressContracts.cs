@@ -265,11 +265,24 @@ public sealed record TeamsApprovalAction(
 public sealed record TeamsApprovalCard(
     string Title,
     string Body,
-    IReadOnlyList<TeamsApprovalCardAction> Actions)
+    IReadOnlyList<TeamsApprovalCardAction> Actions,
+    TeamsApprovalCardTone Tone = TeamsApprovalCardTone.Default)
 {
     public const string Schema = "http://adaptivecards.io/schemas/adaptive-card.json";
     public const string Version = "1.5";
     public const int MaxSerializedBytes = 80 * 1024;
+}
+
+/// <summary>
+/// The Adaptive Card title tone. This is presentation-only and has no bearing
+/// on which approval actions are allowed.
+/// </summary>
+public enum TeamsApprovalCardTone
+{
+    Default,
+    Good,
+    Warning,
+    Attention
 }
 
 /// <summary>
