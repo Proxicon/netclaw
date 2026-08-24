@@ -1971,9 +1971,18 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
 
         var result = await DeliverAsync(CreateMessage(_destination, "Approval required.", approvalCard: card));
-        if (!result.IsSuccess || !IsBoundedActivityId(result.ActivityId))
+        if (!result.IsSuccess)
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_card_delivery_failed");
+            return;
+        }
+
+        if (!IsBoundedActivityId(result.ActivityId))
+        {
+            // Microsoft Teams accepted the card, but did not provide an activity ID
+            // for an in-place terminal update. Approval actions remain protected by
+            // their one-time nonce, sender, tenant, option, and expiry checks.
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_card_delivery_unbound");
             return;
         }
 
@@ -2016,8 +2025,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             || !TryCreateDestination(action, out var destination)
             || !TeamsApprovalAction.IsSupportedAction(action.Action)
             || !_pendingApprovals.TryGetValue(action.CorrelationId, out var pending)
-            || pending.PromptId is null
-            || !string.Equals(pending.PromptId, action.PromptActivityId, StringComparison.Ordinal)
+            // Proactive Teams sends can succeed without returning an activity ID.
+            // The one-time nonce remains the required card binding in that case; when
+            // an ID was retained, continue requiring the action to target that card.
+            || (pending.PromptId is not null
+                && !string.Equals(pending.PromptId, action.PromptActivityId, StringComparison.Ordinal))
             || !TeamsApprovalCardRenderer.NonceMatches(pending.NonceHash, action.Nonce))
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_rejected");
@@ -2129,10 +2141,16 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         TeamsPendingApproval pending,
         string text)
     {
-        if (pending.PromptId is null)
-            return;
-
         var card = TeamsApprovalCardRenderer.CreateTerminal(text);
+        if (pending.PromptId is null)
+        {
+            // A proactive send with no returned activity ID cannot be updated in
+            // place, so send the terminal result as a fresh card instead.
+            await DeliverAsync(CreateMessage(destination, text, approvalCard: card));
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_terminal_fallback_sent");
+            return;
+        }
+
         var update = await DeliverAsync(CreateMessage(destination, text, pending.PromptId, card));
         if (update.IsSuccess)
         {

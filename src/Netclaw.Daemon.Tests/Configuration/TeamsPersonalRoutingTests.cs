@@ -2116,6 +2116,43 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Approval_action_accepts_an_unbound_card_when_its_nonce_and_sender_are_valid()
+    {
+        var replyClient = new RecordingTeamsReplyClient(
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered),
+            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered));
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-unbound");
+        var actor = CreateBindingActor(sessionId, CreateDependencies(pipeline, replyClient: replyClient), "teams-approval-unbound");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-approval-unbound", "tenant-a", "conversation-approval-unbound"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(CreateApprovalRequest(sessionId, "call-unbound", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var card = Assert.IsType<TeamsApprovalCard>(Assert.Single(replyClient.Messages).ApprovalCard);
+        var approve = Assert.Single(card.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        var result = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-unbound",
+                    approve.CorrelationId,
+                    approve.Nonce,
+                    "synthetic-activity",
+                    approve.Action),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Accepted, result.Disposition);
+        await AwaitAssertAsync(() => Assert.Single(pipeline.Feedback), cancellationToken: TestContext.Current.CancellationToken);
+        await AwaitAssertAsync(() => Assert.Equal(2, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("Approved: Once.", replyClient.Messages[1].Text);
+    }
+
+    [Fact]
     public async Task Approval_action_forwards_each_persisted_option_key_unchanged()
     {
         var replyClient = new RecordingTeamsReplyClient();
