@@ -145,25 +145,54 @@ before session or model dispatch.
 Result: **THREADS ESTABLISHED CONTINUATION LIVE PASS** and **RSC NEW-ROOT
 FAIL-CLOSED LIVE PASS**.
 
-## Tool-approval denial live pass and presentation follow-up
+## Personal tool-approval terminal-card live pass
 
 A fresh Personal-scope tool approval reached the Teams client. Selecting
 **Deny** returned the decision to the app, produced the terminal denied outcome,
 and did not run the requested operation. This is a live pass for the protected
 approval callback, one-time decision handling, and denial behaviour.
 
-The initial Teams presentation still left the source approval card actionable
-and added a separate minimal terminal card. The required presentation behaviour
-is that the source card is replaced with a terminal card that has no actions and
-shows the tool, action or invocation, and decision using the supported Adaptive
-Card styling. The next implementation PR returns that terminal card directly
-from the `Action.Execute` invoke response; it requires a fresh live click test
-after deployment to confirm that Teams replaces the original card.
+A subsequent fresh **Deny** test confirmed the source card is replaced in
+place by an attention-styled **Approval denied** card. It includes the safe
+tool and action display, has no actions, and produces one text outcome stating
+that nothing was created.
+
+A fresh **Once** test confirmed the complementary success presentation: the
+source card is replaced in place by a good-styled **Approval granted** card
+with no actions. The intentionally nonexistent `rmdir` target then failed as
+expected, proving the approval decision proceeded to the command boundary
+without creating or deleting anything.
+
+Result: **PERSONAL APPROVAL CARD DENY AND ONCE LIVE PASS**.
+
+## Native typing-indicator follow-up
+
+The earlier persistent `Processing...` post is an application-created message,
+not the Teams native typing signal. The next transport change sends a transient
+Teams `typing` activity when Netclaw begins processing. It must remain
+best-effort: a typing-delivery failure must not suppress the final response or
+any approval card.
+
+After deployment, live validation must confirm that a normal interaction in
+both approved Teams layouts shows the native typing indicator without a
+persisted `Processing...` message.
 
 ## Remaining work
 
-The next live Teams check is the terminal approval-card replacement described
-above, followed by the tool-approval tenant matrix. The established-thread
-continuation capability is live validated. The optional remaining negative live
-check is a different approved human attempting an unmentioned continuation;
-the equivalent offline policy coverage already passes.
+After the native typing deployment, run the tool-approval card matrix in both
+approved Team channels:
+
+- Posts: one fresh **Deny** and one fresh **Once** using an agreed harmless,
+  nonexistent target.
+- Threads: one fresh **Deny** and one fresh **Once** in a genuine mentioned
+  root, checking that the card and terminal result stay in that root.
+
+For every case, verify the pending-card button styles, terminal card
+replacement (no active buttons), one final text outcome, and no creation or
+deletion. Do not relax the Team audience tool policy merely to force the test;
+if it blocks before an approval prompt, record that as the policy result.
+
+The established-thread continuation capability is live validated. The optional
+remaining negative live check is a different approved human attempting an
+unmentioned continuation; the equivalent offline policy coverage already
+passes.

@@ -34,15 +34,7 @@ public sealed record TeamsConversationDependencies(
     ISessionPipeline Pipeline,
     ITeamsReplyClient ReplyClient,
     TeamsOutputRenderer OutputRenderer,
-    TimeProvider TimeProvider)
-{
-    /// <summary>
-    /// Enables replacement of a processing activity with the final reply when
-    /// the configured transport implements activity updates. The default is
-    /// false because the SDK transport currently posts normal replies only.
-    /// </summary>
-    public bool SupportsActivityUpdates { get; init; }
-}
+    TimeProvider TimeProvider);
 
 public sealed record TeamsConversationIngress(
     TeamsInboundActivity Activity,
@@ -647,7 +639,6 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private bool _requiresMigrationSnapshot;
     private bool _migrationSnapshotSaveInFlight;
     private bool _migrationSnapshotFailed;
-    private string? _processingActivityId;
 
     public TeamsSessionBindingActor(SessionId sessionId, TeamsConversationDependencies dependencies)
     {
@@ -1693,14 +1684,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         if (received.Output is ProcessingStateOutput { IsProcessing: true })
         {
-            if (_processingActivityId is null)
-            {
-                var processing = await DeliverAsync(CreateMessage(_destination, "Processing..."));
-                if (_dependencies.SupportsActivityUpdates && processing.IsSuccess)
-                    _processingActivityId = IsBoundedActivityId(processing.ActivityId)
-                        ? processing.ActivityId
-                        : null;
-            }
+            await SendTypingAsync(_destination);
             return;
         }
 
@@ -1744,17 +1728,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         for (var index = 0; index < rendered.Chunks.Count; index++)
         {
-            var processingActivityId = index == 0 ? _processingActivityId : null;
-            var result = await DeliverAsync(
-                CreateMessage(_destination, rendered.Chunks[index], processingActivityId));
-
-            // The update is a presentation optimization. A failed update gets
-            // one normal reply attempt for this final output and no retry loop.
-            if (processingActivityId is not null && !result.IsSuccess)
-            {
-                _processingActivityId = null;
-                result = await DeliverAsync(CreateMessage(_destination, rendered.Chunks[index]));
-            }
+            var result = await DeliverAsync(CreateMessage(_destination, rendered.Chunks[index]));
 
             if (!result.IsSuccess)
             {
@@ -1766,8 +1740,6 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                     CompleteReminderDelivery(reminderDeliveryKey, result);
                 return;
             }
-
-            _processingActivityId = null;
         }
 
         if (reminderDeliveryKey is not null)
@@ -1856,6 +1828,26 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         RecordDeliveryOutcome(result, _dependencies.TimeProvider.GetElapsedTime(startedAt).TotalMilliseconds);
         return result;
+    }
+
+    private async Task SendTypingAsync(TeamsOutboundDestination destination)
+    {
+        try
+        {
+            var result = await _dependencies.ReplyClient.SendTypingAsync(destination, CancellationToken.None);
+            if (!result.IsSuccess)
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("typing_indicator_delivery_failed");
+        }
+        catch (OperationCanceledException)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("typing_indicator_cancelled");
+        }
+        catch (Exception)
+        {
+            // Typing is only a presentation enhancement; never let a transport
+            // failure prevent the actual response from reaching the user.
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("typing_indicator_delivery_failed");
+        }
     }
 
     private static void RecordDeliveryOutcome(TeamsDeliveryResult result, double durationMs)
