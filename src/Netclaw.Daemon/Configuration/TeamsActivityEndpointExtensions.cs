@@ -5,14 +5,10 @@
 // -----------------------------------------------------------------------
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.Teams.Api.AdaptiveCards;
-using Microsoft.Teams.Api.Activities;
-using Microsoft.Teams.Api.Auth;
 using Microsoft.Teams.Apps;
-using Microsoft.Teams.Apps.Activities;
-using Microsoft.Teams.Apps.Activities.Invokes;
-using Microsoft.Teams.Plugins.AspNetCore;
-using Microsoft.Teams.Plugins.AspNetCore.Extensions;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Core;
+using Microsoft.Teams.Core.Schema;
 using Microsoft.Extensions.Logging;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Teams;
@@ -24,6 +20,8 @@ internal static class TeamsActivityEndpointExtensions
 {
     internal const string ActivityPath = "/api/messages";
     internal const string RateLimitPolicy = "teams-activity";
+    internal const string AuthorizationPolicy = "teams-sdk";
+    internal const string AuthenticationScheme = "AzureAd";
     internal const int MaxActivityBodyBytes = 64 * 1024;
 
     public static void AddTeamsIngress(this WebApplicationBuilder builder)
@@ -34,14 +32,17 @@ internal static class TeamsActivityEndpointExtensions
         if (!registration.CanActivateSdk)
             return;
 
-        // AddTeams sets the default authentication scheme. This runs before
-        // Netclaw's auth registration so the daemon retains its PolicyScheme.
-        var appBuilder = App.Builder()
-            .AddCredentials(new ClientCredentials(
-                options.ClientId!,
-                options.ClientSecret!.Value,
-                options.TenantId!));
-        builder.AddTeams(appBuilder, routing: false);
+        // The native 2.1 host resolves the existing Teams configuration by
+        // using its supported legacy Teams-section mapping. The explicit
+        // policy below isolates Teams JWT validation from the daemon default
+        // operator policy.
+        builder.Services.AddTeamsBotApplication();
+        builder.Services.AddAuthorizationBuilder()
+            .AddPolicy(AuthorizationPolicy, policy =>
+            {
+                policy.AuthenticationSchemes.Add(AuthenticationScheme);
+                policy.RequireAuthenticatedUser();
+            });
         builder.Services.AddSingleton<TeamsSdkActivityTranslator>();
         builder.Services.AddSingleton<ITeamsSdkReplyOperations, TeamsSdkReplyOperations>();
         builder.Services.AddSingleton<ITeamsReplyClient, TeamsSdkReplyClient>();
@@ -73,21 +74,46 @@ internal static class TeamsActivityEndpointExtensions
         if (!registration.CanActivateSdk)
             return;
 
-        var teamsApp = app.UseTeams(routing: false);
+        var teamsApp = app.Services.GetRequiredService<TeamsBotApplication>();
         var translator = app.Services.GetRequiredService<TeamsSdkActivityTranslator>();
         var ingress = app.Services.GetRequiredService<TeamsIngressActorHost>();
+        var httpContextAccessor = app.Services.GetRequiredService<IHttpContextAccessor>();
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(TeamsActivityEndpointExtensions));
 
-        // The SDK installs a system route for adaptiveCard/action invokes.
-        // Register the matching user route so approval button actions reach
-        // Netclaw instead of being acknowledged by that default route.
+        // Use native typed handlers. The adapter translates all SDK types at
+        // this HTTP boundary and keeps actors independent of Teams SDK types.
+        // CoreActivity omits ReplyToId when it projects to TeamsActivity in
+        // SDK 2.1. Preserve this authenticated request value in the copied
+        // extension data so the translator can keep reply semantics intact.
+        teamsApp.UseMiddleware(new PreserveReplyToActivityIdMiddleware());
         teamsApp.OnAdaptiveCardAction((context, cancellationToken) =>
-            HandleAdaptiveCardActionAsync(context.Activity, context.TenantId, cancellationToken));
-        teamsApp.OnActivity((context, cancellationToken) =>
-            HandleActivityAsync(context.Activity, context.TenantId, cancellationToken));
+            HandleAdaptiveCardActionAsync(
+                context.Activity,
+                ResolveAuthenticatedTenantId(httpContextAccessor),
+                cancellationToken));
+        teamsApp.OnMessage((context, cancellationToken) =>
+            HandleActivityAsync(
+                context.Activity,
+                ResolveAuthenticatedTenantId(httpContextAccessor),
+                cancellationToken));
+        teamsApp.OnMessageUpdate((context, cancellationToken) =>
+            HandleActivityAsync(
+                context.Activity,
+                ResolveAuthenticatedTenantId(httpContextAccessor),
+                cancellationToken));
+        teamsApp.OnMessageDelete((context, cancellationToken) =>
+            HandleActivityAsync(
+                context.Activity,
+                ResolveAuthenticatedTenantId(httpContextAccessor),
+                cancellationToken));
+        teamsApp.OnConversationUpdate((context, cancellationToken) =>
+            HandleActivityAsync(
+                context.Activity,
+                ResolveAuthenticatedTenantId(httpContextAccessor),
+                cancellationToken));
 
-        async Task<ActionResponse> HandleAdaptiveCardActionAsync(
-            IActivity activity,
+        async Task<InvokeResponse> HandleAdaptiveCardActionAsync(
+            InvokeActivity activity,
             string? authenticatedTenantId,
             CancellationToken cancellationToken)
         {
@@ -108,13 +134,14 @@ internal static class TeamsActivityEndpointExtensions
             ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
                 $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
             logger.LogInformation(
-                "Teams approval action processed: disposition={Disposition}",
-                approvalResult.Disposition);
+                "Teams approval action processed: disposition={Disposition}; terminal_card={HasTerminalCard}",
+                approvalResult.Disposition,
+                approvalResult.TerminalCard is not null);
             return CreateAdaptiveCardActionResponse(approvalResult);
         }
 
         async Task HandleActivityAsync(
-            IActivity activity,
+            TeamsActivity activity,
             string? authenticatedTenantId,
             CancellationToken cancellationToken)
         {
@@ -132,8 +159,9 @@ internal static class TeamsActivityEndpointExtensions
                     ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
                         $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
                     logger.LogInformation(
-                        "Teams approval action processed: disposition={Disposition}",
-                        approvalResult.Disposition);
+                        "Teams approval action processed: disposition={Disposition}; terminal_card={HasTerminalCard}",
+                        approvalResult.Disposition,
+                        approvalResult.TerminalCard is not null);
                 }
                 else
                 {
@@ -151,7 +179,25 @@ internal static class TeamsActivityEndpointExtensions
         }
     }
 
-    private static ActionResponse CreateAdaptiveCardActionResponse(TeamsApprovalActionResult result)
+    private sealed class PreserveReplyToActivityIdMiddleware : ITurnMiddleware
+    {
+        public Task OnTurnAsync(
+            BotApplication botApplication,
+            CoreActivity activity,
+            NextTurn nextTurn,
+            CancellationToken cancellationToken = default)
+        {
+            activity.Properties.Remove(TeamsSdkActivityTranslator.PreservedReplyToActivityIdProperty);
+            if (!string.IsNullOrWhiteSpace(activity.ReplyToId))
+            {
+                activity.Properties[TeamsSdkActivityTranslator.PreservedReplyToActivityIdProperty] = activity.ReplyToId;
+            }
+
+            return nextTurn(cancellationToken);
+        }
+    }
+
+    private static InvokeResponse CreateAdaptiveCardActionResponse(TeamsApprovalActionResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
 
@@ -165,15 +211,9 @@ internal static class TeamsActivityEndpointExtensions
         };
         var approvalCard = result.TerminalCard ?? TeamsApprovalCardRenderer.CreateTerminal(message);
         var payload = TeamsAdaptiveCardPayloadBuilder.Create(approvalCard);
-        // An Action.Execute invoke can replace its source card by returning an
-        // Adaptive Card response. Do not use the SDK's legacy Card model here:
-        // it cannot represent Adaptive Card body/actions and would retain the
-        // actionable prompt. The raw payload is the documented invoke value.
-        return new ActionResponse(Microsoft.Teams.Api.ContentType.AdaptiveCard)
-        {
-            StatusCode = StatusCodes.Status200OK,
-            Value = payload
-        };
+        // An Action.Execute invoke can replace its source card. The native
+        // response shape disables the actionable prompt after resolution.
+        return AdaptiveCardResponse.CreateCardResponse(payload);
     }
 
     internal static void RecordTranslationTelemetry(TeamsTranslationResult result)
@@ -196,7 +236,7 @@ internal static class TeamsActivityEndpointExtensions
     private static void RecordRejectedAttachmentDiagnostic(
         ILogger logger,
         TeamsSdkActivityTranslator translator,
-        IActivity activity,
+        TeamsActivity activity,
         string? authenticatedTenantId,
         TeamsTranslationResult result)
     {
@@ -235,15 +275,15 @@ internal static class TeamsActivityEndpointExtensions
     }
 
     /// <summary>
-    /// Resolves the tenant asserted by the Teams SDK when it supplies one, with
+    /// Resolves the tenant asserted by the Teams JWT when it supplies one, with
     /// the platform conversation tenant as the authenticated-activity fallback.
     /// Bot Framework service JWTs do not carry a tenant claim for all valid
-    /// Teams deliveries. This runs only after <see cref="AspNetCorePlugin"/>
-    /// has authenticated the request; the translator then requires the resolved
+    /// Teams deliveries. This runs only after the native Teams host has
+    /// authenticated the request; the translator then requires the resolved
     /// tenant to match the operator-configured tenant and rejects a conflicting
     /// conversation tenant.
     /// </summary>
-    internal static string? ResolveTenantId(IActivity activity, string? sdkTenantId)
+    internal static string? ResolveTenantId(TeamsActivity activity, string? sdkTenantId)
     {
         ArgumentNullException.ThrowIfNull(activity);
 
@@ -258,27 +298,21 @@ internal static class TeamsActivityEndpointExtensions
         if (!registration.CanActivateSdk)
             return;
 
-        if (((IEndpointRouteBuilder)app).DataSources.SelectMany(source => source.Endpoints)
-            .OfType<RouteEndpoint>()
-            .Any(endpoint => string.Equals(endpoint.RoutePattern.RawText, ActivityPath, StringComparison.Ordinal)))
-        {
-            throw new InvalidOperationException($"The Teams activity route '{ActivityPath}' is already registered.");
-        }
+        // Route-group conventions let the native host own POST parsing and
+        // dispatch while this boundary retains the authenticated route and the
+        // existing per-source rate budget. The body guard runs before routing.
+        app.MapGroup(string.Empty)
+            .RequireAuthorization(AuthorizationPolicy)
+            .RequireRateLimiting(RateLimitPolicy)
+            .UseTeamsBotApplication(ActivityPath.TrimStart('/'));
+    }
 
-        app.MapPost(ActivityPath, async (HttpContext context, AspNetCorePlugin plugin, CancellationToken cancellationToken) =>
-                await plugin.Do(context, cancellationToken))
-            .AddEndpointFilter(async (filterContext, next) =>
-            {
-                var request = filterContext.HttpContext.Request;
-                if (request.ContentLength is > MaxActivityBodyBytes)
-                    return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+    private static string? ResolveAuthenticatedTenantId(IHttpContextAccessor httpContextAccessor)
+    {
+        ArgumentNullException.ThrowIfNull(httpContextAccessor);
 
-                if (request.ContentLength == 0)
-                    return Results.BadRequest();
-
-                return await next(filterContext);
-            })
-            .RequireAuthorization(HostApplicationBuilderExtensions.TeamsTokenAuthConstants.AuthorizationPolicy)
-            .RequireRateLimiting(RateLimitPolicy);
+        var user = httpContextAccessor.HttpContext?.User;
+        return user?.FindFirst("tid")?.Value
+               ?? user?.FindFirst("http://schemas.microsoft.com/identity/claims/tenantid")?.Value;
     }
 }
