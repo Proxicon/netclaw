@@ -44,7 +44,8 @@ public static class TeamsApprovalCardRenderer
                     option.Label,
                     option.Key.Value,
                     correlationId,
-                    nonce))
+                    nonce,
+                    GetActionStyle(option.Key.Value)))
                 .ToArray());
         EnsureBounded(card);
         return card;
@@ -152,6 +153,16 @@ public static class TeamsApprovalCardRenderer
                 throw new ArgumentException("The approval options are invalid.", nameof(options));
             }
         }
+    }
+
+    private static TeamsApprovalActionStyle GetActionStyle(string optionKey)
+    {
+        if (ApprovalOptionKeys.IsDangerStyled(optionKey))
+            return TeamsApprovalActionStyle.Destructive;
+
+        return optionKey == ApprovalOptionKeys.ApproveOnce
+            ? TeamsApprovalActionStyle.Positive
+            : TeamsApprovalActionStyle.Default;
     }
 
     private static string Base64Url(byte[] bytes) => Convert.ToBase64String(bytes)
