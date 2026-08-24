@@ -9,6 +9,7 @@ using Microsoft.Teams.Api.Activities;
 using Microsoft.Teams.Api.Auth;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Activities;
+using Microsoft.Teams.Apps.Activities.Invokes;
 using Microsoft.Teams.Plugins.AspNetCore;
 using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Microsoft.Extensions.Logging;
@@ -75,12 +76,24 @@ internal static class TeamsActivityEndpointExtensions
         var translator = app.Services.GetRequiredService<TeamsSdkActivityTranslator>();
         var ingress = app.Services.GetRequiredService<TeamsIngressActorHost>();
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(TeamsActivityEndpointExtensions));
-        teamsApp.OnActivity(async (context, cancellationToken) =>
+
+        // The SDK installs a system route for adaptiveCard/action invokes.
+        // Register the matching user route so approval button actions reach
+        // Netclaw instead of being acknowledged by that default route.
+        teamsApp.OnAdaptiveCardAction((context, cancellationToken) =>
+            HandleActivityAsync(context.Activity, context.TenantId, cancellationToken));
+        teamsApp.OnActivity((context, cancellationToken) =>
+            HandleActivityAsync(context.Activity, context.TenantId, cancellationToken));
+
+        async Task HandleActivityAsync(
+            IActivity activity,
+            string? authenticatedTenantId,
+            CancellationToken cancellationToken)
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventReceived("activity");
             var result = translator.Translate(
-                context.Activity,
-                ResolveTenantId(context.Activity, context.TenantId));
+                activity,
+                ResolveTenantId(activity, authenticatedTenantId));
 
             if (result.Disposition == TeamsTranslationDisposition.Accepted)
             {
@@ -90,6 +103,9 @@ internal static class TeamsActivityEndpointExtensions
                     var approvalResult = await ingress.SubmitApprovalAsync(approvalAction, cancellationToken);
                     ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
                         $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
+                    logger.LogInformation(
+                        "Teams approval action processed: disposition={Disposition}",
+                        approvalResult.Disposition);
                 }
                 else
                 {
@@ -101,12 +117,10 @@ internal static class TeamsActivityEndpointExtensions
             else
             {
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(result.ReasonCode);
-                RecordRejectedAttachmentDiagnostic(logger, translator, context.Activity, ResolveTenantId(context.Activity, context.TenantId), result);
+                RecordRejectedAttachmentDiagnostic(logger, translator, activity, ResolveTenantId(activity, authenticatedTenantId), result);
                 RecordTranslationTelemetry(result);
             }
-
-            await Task.CompletedTask;
-        });
+        }
     }
 
     internal static void RecordTranslationTelemetry(TeamsTranslationResult result)

@@ -23,6 +23,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Microsoft.Teams.Api.Activities;
+using Microsoft.Teams.Api.AdaptiveCards;
 using Microsoft.Teams.Api.Entities;
 using Microsoft.Teams.Plugins.AspNetCore.Extensions;
 using Netclaw.Actors.Channels;
@@ -46,6 +47,7 @@ using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
 using TeamsConversation = Microsoft.Teams.Api.Conversation;
 using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
 using TeamsTeam = Microsoft.Teams.Api.Team;
+using AdaptiveCardsActivity = Microsoft.Teams.Api.Activities.Invokes.AdaptiveCards;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -181,6 +183,53 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Equal("https://request-service.invalid/", delivery.Destination.ServiceUrl);
         Assert.Equal("reply after request disposal", delivery.Text);
         Assert.True(requestLifetime.AllDisposed);
+    }
+
+    [Fact]
+    public async Task Http_personal_approval_action_routes_through_the_sdk_action_handler()
+    {
+        var requestLifetime = new RequestLifetimeProbe();
+        var replyClient = new RequestIndependentReplyClient(requestLifetime);
+        var sessionManager = CreateTestProbe();
+        await using var app = await BuildRequestIndependenceHostAsync(requestLifetime, replyClient, sessionManager.Ref);
+        var sessionId = CreateSessionId("tenant-a", "request-approval");
+
+        using (var request = CreateTeamsActivityRequest(CreateSdkPersonalMessage("request-approval", "request-approval-input")))
+        using (var response = await app.GetTestClient().SendAsync(request, TestContext.Current.CancellationToken))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        await sessionManager.ExpectMsgAsync<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var subscription = await sessionManager.ExpectMsgAsync<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        await sessionManager.ExpectMsgAsync<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        subscription.Subscriber.Tell(CreateApprovalRequest(sessionId, "request-approval-call", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(
+            () => Assert.Single(replyClient.Messages),
+            cancellationToken: TestContext.Current.CancellationToken);
+        var approvalCard = replyClient.Messages[0].ApprovalCard;
+        Assert.NotNull(approvalCard);
+        var approveOnce = Assert.Single(approvalCard.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        using (var request = CreateTeamsActivityRequest(CreateSdkPersonalApprovalAction(
+                   "request-approval",
+                   "request-independent-activity",
+                   approveOnce.CorrelationId,
+                   approveOnce.Nonce,
+                   approveOnce.Action)))
+        using (var response = await app.GetTestClient().SendAsync(request, TestContext.Current.CancellationToken))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        var feedback = await sessionManager.ExpectMsgAsync<ToolInteractionResponse>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(sessionId, feedback.SessionId);
+        Assert.Equal(ApprovalOptionKeys.ApproveOnceKey, feedback.SelectedKey);
+        sessionManager.LastSender.Tell(new CommandAck(sessionId));
+
+        await AwaitAssertAsync(
+            () => Assert.Equal(2, replyClient.Messages.Count),
+            cancellationToken: TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -2412,6 +2461,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     private async Task<WebApplication> BuildRequestIndependenceHostAsync(
         RequestLifetimeProbe requestLifetime,
         RequestIndependentReplyClient replyClient,
+        IActorRef? sessionManager = null,
         bool includeChannel = false)
     {
         var builder = WebApplication.CreateBuilder();
@@ -2431,7 +2481,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         });
         builder.Services.AddChannelIntegrations(builder.Configuration);
         builder.Services.AddSingleton<ActorSystem>(Sys);
-        builder.Services.AddSingleton<ISessionPipeline>(CreatePipeline(TestActor));
+        builder.Services.AddSingleton<ISessionPipeline>(CreatePipeline(sessionManager ?? TestActor));
         builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
         builder.Services.AddSingleton(requestLifetime);
         builder.Services.AddScoped<RequestScopeSentinel>();
@@ -2458,7 +2508,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         return app;
     }
 
-    private static HttpRequestMessage CreateTeamsActivityRequest(MessageActivity activity)
+    private static HttpRequestMessage CreateTeamsActivityRequest(IActivity activity)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, TeamsActivityEndpointExtensions.ActivityPath)
         {
@@ -2481,6 +2531,38 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             Type = TeamsConversationType.Personal
         },
         ServiceUrl = "https://request-service.invalid/"
+    };
+
+    private static AdaptiveCardsActivity.ActionActivity CreateSdkPersonalApprovalAction(
+        string conversationId,
+        string promptActivityId,
+        string correlationId,
+        string nonce,
+        string action) => new()
+    {
+        Id = "request-approval-action",
+        ReplyToId = promptActivityId,
+        From = new TeamsAccount { Id = "user-a" },
+        Conversation = new TeamsConversation
+        {
+            Id = conversationId,
+            TenantId = "tenant-a",
+            Type = TeamsConversationType.Personal
+        },
+        ServiceUrl = "https://request-service.invalid/",
+        Value = new InvokeValue
+        {
+            Action = new InvokeAction
+            {
+                Type = ActionType.Execute,
+                Data = new Dictionary<string, object>
+                {
+                    ["correlation"] = correlationId,
+                    ["nonce"] = nonce,
+                    ["action"] = action
+                }
+            }
+        }
     };
 
     private static MessageActivity CreateSdkChannelRootMessage(string conversationId, string rootActivityId) => new("<at>bot</at> request input")
