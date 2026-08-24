@@ -1906,17 +1906,15 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
-    public async Task Empty_output_does_not_call_the_reply_client_and_update_failure_gets_one_final_fallback()
+    public async Task Empty_output_skips_delivery_and_typing_failure_does_not_block_the_final_reply()
     {
         var pipeline = CreatePipeline(TestActor);
-        var replyClient = new RecordingTeamsReplyClient(
-            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "processing"),
-            new TeamsDeliveryResult(TeamsDeliveryStatus.Failed),
-            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
+        var replyClient = new RecordingTeamsReplyClient(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
+        replyClient.TypingResults.Enqueue(new TeamsDeliveryResult(TeamsDeliveryStatus.Unavailable));
         var sessionId = CreateSessionId("tenant-a", "conversation-processing");
         var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
             sessionId,
-            CreateDependencies(pipeline, replyClient: replyClient, supportsActivityUpdates: true)));
+            CreateDependencies(pipeline, replyClient: replyClient)));
 
         Assert.Equal(
             TeamsBindingRouteDisposition.Accepted,
@@ -1927,26 +1925,22 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         await AwaitAssertAsync(() => Assert.Empty(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
 
         subscriber.Tell(new ProcessingStateOutput(true) { SessionId = sessionId });
-        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.TypingDestinations), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Empty(replyClient.Messages);
         subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
-        await AwaitAssertAsync(() => Assert.Equal(3, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
 
-        Assert.Null(replyClient.Messages[0].UpdateActivityId);
-        Assert.Equal("processing", replyClient.Messages[1].UpdateActivityId);
-        Assert.Null(replyClient.Messages[2].UpdateActivityId);
-        Assert.Equal("final reply", replyClient.Messages[2].Text);
+        Assert.Equal("final reply", replyClient.Messages[0].Text);
         var telemetryAfter = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
-        Assert.Equal(telemetryBefore.RepliesPosted + 2, telemetryAfter.RepliesPosted);
-        Assert.Equal(telemetryBefore.RepliesFailed + 1, telemetryAfter.RepliesFailed);
+        Assert.Equal(telemetryBefore.RepliesPosted + 1, telemetryAfter.RepliesPosted);
+        Assert.Equal(telemetryBefore.RepliesFailed, telemetryAfter.RepliesFailed);
     }
 
     [Fact]
-    public async Task Default_transport_posts_the_final_reply_without_an_unsupported_update_attempt()
+    public async Task Default_transport_uses_native_typing_then_posts_the_final_reply()
     {
         var pipeline = CreatePipeline(TestActor);
-        var replyClient = new RecordingTeamsReplyClient(
-            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "processing"),
-            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
+        var replyClient = new RecordingTeamsReplyClient(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
         var sessionId = CreateSessionId("tenant-a", "conversation-processing-default-transport");
         var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
             sessionId,
@@ -1959,39 +1953,53 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var telemetryBefore = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
 
         subscriber.Tell(new ProcessingStateOutput(true) { SessionId = sessionId });
-        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.TypingDestinations), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Empty(replyClient.Messages);
         subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
-        await AwaitAssertAsync(() => Assert.Equal(2, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
 
         Assert.All(replyClient.Messages, message => Assert.Null(message.UpdateActivityId));
-        Assert.Equal("final reply", replyClient.Messages[1].Text);
+        Assert.Equal("final reply", replyClient.Messages[0].Text);
         var telemetryAfter = ChannelTelemetry.For(ChannelType.Teams).GetSnapshot();
-        Assert.Equal(telemetryBefore.RepliesPosted + 2, telemetryAfter.RepliesPosted);
+        Assert.Equal(telemetryBefore.RepliesPosted + 1, telemetryAfter.RepliesPosted);
         Assert.Equal(telemetryBefore.RepliesFailed, telemetryAfter.RepliesFailed);
     }
 
     [Fact]
-    public async Task Processing_delivery_never_retains_an_unbounded_activity_id()
+    public async Task Channel_processing_uses_the_canonical_thread_destination()
     {
         var pipeline = CreatePipeline(TestActor);
-        var replyClient = new RecordingTeamsReplyClient(
-            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, new string('p', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1)),
-            new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "final"));
-        var sessionId = CreateSessionId("tenant-a", "conversation-processing-bound");
-        var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(
-            sessionId,
-            CreateDependencies(pipeline, replyClient: replyClient, supportsActivityUpdates: true)));
+        var replyClient = new RecordingTeamsReplyClient();
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            MentionOnly = true,
+            AllowedTeamIds = ["team-a"],
+            AllowedChannelIds = ["channel-a"]
+        };
+        const string conversationId = "conversation-processing-channel;messageid=root-a";
+        var sessionId = CreateChannelSessionId(conversationId);
+        var actor = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId),
+            new TeamsConversationDependencies(
+                options,
+                pipeline,
+                replyClient,
+                new TeamsOutputRenderer(),
+                TimeProvider.System)));
 
         Assert.Equal(
             TeamsBindingRouteDisposition.Accepted,
-            (await RouteAsync(actor, CreateActivity("activity-processing-bound", "tenant-a", "conversation-processing-bound"))).Disposition);
+            (await RouteConversationAsync(actor, CreateChannelActivity("root-a", conversationId))).Disposition);
         var subscriber = ReceiveOutputSubscriber();
         subscriber.Tell(new ProcessingStateOutput(true) { SessionId = sessionId });
-        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
-        subscriber.Tell(new TextOutput("final reply") { SessionId = sessionId });
-        await AwaitAssertAsync(() => Assert.Equal(2, replyClient.Messages.Count), cancellationToken: TestContext.Current.CancellationToken);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.TypingDestinations), cancellationToken: TestContext.Current.CancellationToken);
 
-        Assert.Null(replyClient.Messages[1].UpdateActivityId);
+        var destination = Assert.Single(replyClient.TypingDestinations);
+        Assert.Equal(TeamsConversationScope.Channel, destination.Scope);
+        Assert.Equal("root-a", destination.RootActivityId);
+        Assert.Equal("team-a", destination.TeamId);
+        Assert.Equal("channel-a", destination.ChannelId);
     }
 
     [Fact]
@@ -2649,8 +2657,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         string[]? allowedUserIds = null,
         string tenantId = "tenant-a",
         bool enabled = false,
-        ITeamsReplyClient? replyClient = null,
-        bool supportsActivityUpdates = false) => new(
+        ITeamsReplyClient? replyClient = null) => new(
         new TeamsChannelOptions
         {
             Enabled = enabled,
@@ -2661,15 +2668,15 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         pipeline,
         replyClient ?? new TestTeamsReplyClient(),
         new TeamsOutputRenderer(),
-        TimeProvider.System)
-    {
-        SupportsActivityUpdates = supportsActivityUpdates
-    };
+        TimeProvider.System);
 
     private sealed class TestTeamsReplyClient : ITeamsReplyClient
     {
         public Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken = default) =>
             Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "synthetic-activity"));
+
+        public Task<TeamsDeliveryResult> SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered));
     }
 
     private sealed class RequestLifetimeProbe
@@ -2710,6 +2717,14 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             Messages.Add(message);
             return Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "request-independent-activity"));
         }
+
+        public Task<TeamsDeliveryResult> SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken = default)
+        {
+            if (!requestLifetime.AllDisposed)
+                throw new ObjectDisposedException("request_scope", "The reply client must not run during the inbound request.");
+
+            return Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered));
+        }
     }
 
     private sealed class RecordingTeamsReplyClient(params TeamsDeliveryResult[] results) : ITeamsReplyClient
@@ -2718,12 +2733,24 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
 
         public List<TeamsOutboundMessage> Messages { get; } = [];
 
+        public List<TeamsOutboundDestination> TypingDestinations { get; } = [];
+
+        public Queue<TeamsDeliveryResult> TypingResults { get; } = [];
+
         public Task<TeamsDeliveryResult> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken = default)
         {
             Messages.Add(message);
             return Task.FromResult(_results.Count == 0
                 ? new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered, "synthetic-activity")
                 : _results.Dequeue());
+        }
+
+        public Task<TeamsDeliveryResult> SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken = default)
+        {
+            TypingDestinations.Add(destination);
+            return Task.FromResult(TypingResults.Count == 0
+                ? new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered)
+                : TypingResults.Dequeue());
         }
     }
 

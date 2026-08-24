@@ -23,10 +23,7 @@ internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) :
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
-        if (cancellationToken.IsCancellationRequested)
-            return new TeamsDeliveryResult(TeamsDeliveryStatus.Cancelled, ReasonCode: "cancelled");
-
-        try
+        return await ExecuteAsync(async cancellationToken =>
         {
             var activityId = await operations.DeliverAsync(message, cancellationToken);
             return string.IsNullOrWhiteSpace(activityId)
@@ -36,6 +33,31 @@ internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) :
                         ? TeamsDeliveryStatus.Delivered
                         : TeamsDeliveryStatus.Updated,
                     activityId);
+        }, cancellationToken);
+    }
+
+    public Task<TeamsDeliveryResult> SendTypingAsync(
+        TeamsOutboundDestination destination,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        return ExecuteAsync(async cancellationToken =>
+        {
+            await operations.SendTypingAsync(destination, cancellationToken);
+            return new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered);
+        }, cancellationToken);
+    }
+
+    private static async Task<TeamsDeliveryResult> ExecuteAsync(
+        Func<CancellationToken, Task<TeamsDeliveryResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+            return new TeamsDeliveryResult(TeamsDeliveryStatus.Cancelled, ReasonCode: "cancelled");
+
+        try
+        {
+            return await operation(cancellationToken);
         }
         catch (OperationCanceledException)
         {
@@ -77,6 +99,8 @@ internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) :
 internal interface ITeamsSdkReplyOperations
 {
     Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken);
+
+    Task SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken);
 }
 
 internal sealed class TeamsSdkReplyOperations(
@@ -107,6 +131,22 @@ internal sealed class TeamsSdkReplyOperations(
             serviceUrl: message.Destination.ServiceUrl,
             cancellationToken: cancellationToken);
         return proactiveSent.Id;
+    }
+
+    public async Task SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken)
+    {
+        var activity = new TypingActivity
+        {
+            ReplyToId = destination.Scope == TeamsConversationScope.Channel
+                ? destination.RootActivityId
+                : null
+        };
+
+        await app.Send(
+            destination.ConversationId,
+            activity,
+            serviceUrl: destination.ServiceUrl,
+            cancellationToken: cancellationToken);
     }
 }
 
