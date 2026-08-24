@@ -319,7 +319,7 @@ public class DispatchingToolExecutorTests
     }
 
     [Fact]
-    public async Task Shell_execute_is_denied_outside_personal_context()
+    public async Task Shell_execute_is_denied_for_team_without_explicit_approval_override()
     {
         var toolCall = new FunctionCallContent(
             "call-deny", "shell_execute",
@@ -333,7 +333,7 @@ public class DispatchingToolExecutorTests
         });
 
         var ex = await Assert.ThrowsAsync<ToolAccessDeniedException>(() => _restrictedExecutor.ExecuteAsync(toolCall, context, TestContext.Current.CancellationToken));
-        Assert.Equal("shell_requires_personal_context", ex.DenyReason);
+        Assert.Equal("shell_requires_explicit_team_approval", ex.DenyReason);
     }
 
     [Fact]
@@ -1588,6 +1588,73 @@ public class DispatchingToolExecutorTests
         Assert.False(policy.IsToolExposed(registry.GetByName("set_webhook")!, TrustAudience.Team));
         Assert.False(policy.IsToolExposed(registry.GetByName("list_webhooks")!, TrustAudience.Team));
         Assert.False(policy.IsToolExposed(registry.GetByName("delete_webhook")!, TrustAudience.Team));
+    }
+
+    [Fact]
+    public void Team_profile_exposes_shell_only_with_an_exact_approval_override()
+    {
+        var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        config.AudienceProfiles.Team.AllowedTools.Add(ShellTool.ToolName);
+        config.AudienceProfiles.Team.ApprovalPolicy = new ToolApprovalConfig
+        {
+            ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                [ShellTool.ToolName] = ToolApprovalMode.Auto
+            }
+        };
+
+        var shellCommandPolicy = new ShellCommandPolicy(ShellEnvironment);
+        var toolPathPolicy = new ToolPathPolicy(ShellEnvironment, []);
+        var policy = new ToolAccessPolicy(
+            config,
+            new EffectivePolicyDefaults(
+                DeploymentPosture.Team,
+                TrustAudience.Team,
+                ShellExecutionMode.HostAllowed,
+                UsedStrictFallback: false),
+            shellCommandPolicy,
+            toolPathPolicy);
+        var shell = new ShellTool(config, toolPathPolicy, shellCommandPolicy);
+
+        Assert.False(policy.IsToolExposed(shell, TrustAudience.Team));
+
+        config.AudienceProfiles.Team.ApprovalPolicy.ToolOverrides[ShellTool.ToolName] = ToolApprovalMode.Approval;
+
+        Assert.True(policy.IsToolExposed(shell, TrustAudience.Team));
+
+        var decision = policy.AuthorizeInvocation(
+            shell,
+            TestToolExecutionContext.CreateBound(
+                "teams/team-shell-approval",
+                Path.GetTempPath(),
+                new TestToolExecutionContextOptions
+                {
+                    Audience = TrustAudience.Team,
+                    Boundary = TrustBoundary.TrustedInstance,
+                    ChannelType = "teams",
+                    InteractiveApproval = TestToolExecutionContext.InteractiveApproval(true)
+                }),
+            ToolInput.Create("Command", "rmdir netclaw-approval-card-never-created"));
+
+        Assert.True(decision.NeedsApproval);
+        Assert.Equal(ShellTool.ToolName, decision.ApprovalContext!.ToolName);
+
+        var unattendedDecision = policy.AuthorizeInvocation(
+            shell,
+            TestToolExecutionContext.CreateBound(
+                "teams/team-shell-unattended",
+                Path.GetTempPath(),
+                new TestToolExecutionContextOptions
+                {
+                    Audience = TrustAudience.Team,
+                    Boundary = TrustBoundary.TrustedInstance,
+                    ChannelType = "reminder",
+                    InteractiveApproval = TestToolExecutionContext.InteractiveApproval(false)
+                }),
+            ToolInput.Create("Command", "rmdir netclaw-approval-card-never-created"));
+
+        Assert.False(unattendedDecision.Allowed);
+        Assert.Equal("shell_requires_interactive_team_context", unattendedDecision.DenyReason);
     }
 
     [Fact]
