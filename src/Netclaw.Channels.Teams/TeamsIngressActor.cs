@@ -70,7 +70,9 @@ public enum TeamsApprovalActionDisposition
     Cancelled
 }
 
-public sealed record TeamsApprovalActionResult(TeamsApprovalActionDisposition Disposition);
+public sealed record TeamsApprovalActionResult(
+    TeamsApprovalActionDisposition Disposition,
+    TeamsApprovalCard? TerminalCard = null);
 
 public enum TeamsIngressSinkResult
 {

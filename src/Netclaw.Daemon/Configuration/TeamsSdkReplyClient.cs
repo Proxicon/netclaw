@@ -84,7 +84,7 @@ internal sealed class TeamsSdkReplyOperations(
 {
     public async Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken)
     {
-        var activity = new MessageActivity(message.Text)
+        var activity = new MessageActivity(message.ApprovalCard is null ? message.Text : string.Empty)
         {
             ReplyToId = message.ReplyToActivityId
         };
@@ -116,6 +116,14 @@ internal static class TeamsAdaptiveCardPayloadBuilder
     {
         ArgumentNullException.ThrowIfNull(approvalCard);
 
+        var title = new Dictionary<string, object?>
+        {
+            ["type"] = "TextBlock", ["text"] = approvalCard.Title,
+            ["size"] = "Medium", ["weight"] = "Bolder", ["wrap"] = true
+        };
+        if (approvalCard.Tone != TeamsApprovalCardTone.Default)
+            title["color"] = ToWireColor(approvalCard.Tone);
+
         return new Dictionary<string, object?>
         {
             ["$schema"] = TeamsApprovalCard.Schema,
@@ -123,14 +131,11 @@ internal static class TeamsAdaptiveCardPayloadBuilder
             ["version"] = TeamsApprovalCard.Version,
             ["body"] = new object?[]
             {
+                title,
                 new Dictionary<string, object?>
                 {
-                    ["type"] = "TextBlock", ["text"] = approvalCard.Title,
-                    ["weight"] = "Bolder", ["wrap"] = true
-                },
-                new Dictionary<string, object?>
-                {
-                    ["type"] = "TextBlock", ["text"] = approvalCard.Body, ["wrap"] = true
+                    ["type"] = "TextBlock", ["text"] = approvalCard.Body, ["wrap"] = true,
+                    ["spacing"] = "Medium"
                 }
             },
             ["actions"] = approvalCard.Actions.Select(cardAction => (object?)new Dictionary<string, object?>
@@ -155,5 +160,13 @@ internal static class TeamsAdaptiveCardPayloadBuilder
         TeamsApprovalActionStyle.Positive => "positive",
         TeamsApprovalActionStyle.Destructive => "destructive",
         _ => throw new ArgumentOutOfRangeException(nameof(style), style, "Unsupported Teams approval action style.")
+    };
+
+    private static string ToWireColor(TeamsApprovalCardTone tone) => tone switch
+    {
+        TeamsApprovalCardTone.Good => "good",
+        TeamsApprovalCardTone.Warning => "warning",
+        TeamsApprovalCardTone.Attention => "attention",
+        _ => throw new ArgumentOutOfRangeException(nameof(tone), tone, "Unsupported Teams approval card tone.")
     };
 }

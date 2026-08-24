@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Teams.Api.AdaptiveCards;
 using Microsoft.Teams.Api.Activities;
 using Microsoft.Teams.Api.Auth;
 using Microsoft.Teams.Apps;
@@ -81,9 +82,36 @@ internal static class TeamsActivityEndpointExtensions
         // Register the matching user route so approval button actions reach
         // Netclaw instead of being acknowledged by that default route.
         teamsApp.OnAdaptiveCardAction((context, cancellationToken) =>
-            HandleActivityAsync(context.Activity, context.TenantId, cancellationToken));
+            HandleAdaptiveCardActionAsync(context.Activity, context.TenantId, cancellationToken));
         teamsApp.OnActivity((context, cancellationToken) =>
             HandleActivityAsync(context.Activity, context.TenantId, cancellationToken));
+
+        async Task<ActionResponse> HandleAdaptiveCardActionAsync(
+            IActivity activity,
+            string? authenticatedTenantId,
+            CancellationToken cancellationToken)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventReceived("activity");
+            var resolvedTenantId = ResolveTenantId(activity, authenticatedTenantId);
+            var result = translator.Translate(activity, resolvedTenantId);
+            if (result.Disposition != TeamsTranslationDisposition.Accepted || result.ApprovalAction is not { } approvalAction)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(result.ReasonCode);
+                RecordRejectedAttachmentDiagnostic(logger, translator, activity, resolvedTenantId, result);
+                RecordTranslationTelemetry(result);
+                return CreateAdaptiveCardActionResponse(
+                    new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+            }
+
+            RecordTranslationTelemetry(result);
+            var approvalResult = await ingress.SubmitApprovalAsync(approvalAction, cancellationToken);
+            ChannelTelemetry.For(ChannelType.Teams).RecordExtra(
+                $"approval_action_{approvalResult.Disposition.ToString().ToLowerInvariant()}");
+            logger.LogInformation(
+                "Teams approval action processed: disposition={Disposition}",
+                approvalResult.Disposition);
+            return CreateAdaptiveCardActionResponse(approvalResult);
+        }
 
         async Task HandleActivityAsync(
             IActivity activity,
@@ -121,6 +149,31 @@ internal static class TeamsActivityEndpointExtensions
                 RecordTranslationTelemetry(result);
             }
         }
+    }
+
+    private static ActionResponse CreateAdaptiveCardActionResponse(TeamsApprovalActionResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        var message = result.Disposition switch
+        {
+            TeamsApprovalActionDisposition.Accepted => "Approval resolved.",
+            TeamsApprovalActionDisposition.Expired => "This approval has expired.",
+            TeamsApprovalActionDisposition.AlreadyProcessed => "This approval was already processed.",
+            TeamsApprovalActionDisposition.Unavailable => "This approval is no longer available.",
+            _ => "This approval is unavailable."
+        };
+        var approvalCard = result.TerminalCard ?? TeamsApprovalCardRenderer.CreateTerminal(message);
+        var payload = TeamsAdaptiveCardPayloadBuilder.Create(approvalCard);
+        // An Action.Execute invoke can replace its source card by returning an
+        // Adaptive Card response. Do not use the SDK's legacy Card model here:
+        // it cannot represent Adaptive Card body/actions and would retain the
+        // actionable prompt. The raw payload is the documented invoke value.
+        return new ActionResponse(Microsoft.Teams.Api.ContentType.AdaptiveCard)
+        {
+            StatusCode = StatusCodes.Status200OK,
+            Value = payload
+        };
     }
 
     internal static void RecordTranslationTelemetry(TeamsTranslationResult result)
