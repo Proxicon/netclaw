@@ -192,6 +192,27 @@ approve or upload the package when required.
 Do not use a development tunnel as the production endpoint. Use a stable HTTPS
 host with normal certificate, monitoring, and recovery controls.
 
+## Tool approvals
+
+Teams sends a native Adaptive Card for a tool approval. The card preserves the
+order and labels that the session supplies.
+
+| Decision | Card style | Effect |
+| --- | --- | --- |
+| Once | positive | Allows the current call only. |
+| This chat | default | Allows the scoped action for this session. |
+| Always here | default | Saves a directory-scoped grant. |
+| Always anywhere | destructive | Saves a global grant. |
+| Deny | destructive | Refuses the current call. |
+
+The Teams client can wrap the action row on a narrow display. This does not
+change the action order or semantics. Each button sends an authenticated
+`Action.Execute` callback. Netclaw validates the sender, tenant, conversation,
+nonce, expiry, and persisted offered key before it accepts a decision.
+
+Teams approval cards do not accept letter replies. Use a card button. This
+keeps the signed card callback as the only decision path.
+
 ## Health checks
 
 Run these checks after each deployment or secret rotation:
