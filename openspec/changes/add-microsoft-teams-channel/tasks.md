@@ -4,6 +4,26 @@ Each numbered PR is a hard stop. At its boundary, report exact files changed,
 exact commands and focused/broader test results, deviations, remaining gates,
 and known risks. Do not begin the next PR automatically.
 
+## Phase 1.1 — Teams SDK .NET 2.1 runtime modernization
+
+**Status:** offline implementation complete; live deployment and smoke remain
+operator-controlled. This phase changes no Teams persistence format, Azure Bot
+resource, Entra application, Teams package identity, public endpoint, or
+secret ownership. The rollback point is the preceding known-good `dev` build.
+
+- [x] Replace the Teams SDK .NET 2.0.9 plugin host with the stable 2.1.0 native
+  ASP.NET Core registration and one authenticated `/api/messages` endpoint.
+- [x] Preserve the existing secret-backed `Teams` configuration through the SDK
+  compatibility mapping to its native `AzureAd` client-credential model.
+- [x] Keep typed SDK activities at the transport edge and preserve existing
+  translation, actor/session, ACL, attachment, approval, proactive, typing,
+  and terminal-card contracts through focused regression coverage.
+- [x] Register the official Teams SDK trace and meter sources, plus ASP.NET
+  Core request tracing, with Netclaw's existing OTLP pipeline.
+- [ ] After operator deployment, run the controlled Personal, Posts, Threads,
+  approval, duplicate-action, and typing smoke matrix and record only
+  privacy-safe structural evidence.
+
 ## PR 0 — OpenSpec amendments and compatibility records only
 
 **Objective:** separate proven offline compatibility from tenant evidence and

@@ -152,6 +152,29 @@ genuine bot mention.
 Use `ChannelAudienceOverrides` for canonical IDs that contain configuration
 delimiters. An exact team and channel entry takes precedence over a team entry.
 
+## Phase 1.1 runtime modernization
+
+The Teams transport uses the stable Microsoft Teams SDK for .NET 2.1 native
+ASP.NET Core host. The public contract remains one authenticated
+`POST /api/messages` endpoint with the existing body ceiling and rate limit.
+Netclaw translates native typed SDK activities at that edge before actor and
+session routing; Microsoft SDK types do not enter Netclaw channel contracts.
+
+Existing `Teams` configuration and secret ownership remain unchanged. The SDK
+maps the existing client ID, tenant ID, and secret-backed `Teams.ClientSecret`
+into its native `AzureAd` authentication model. Do not add an `AzureAd`
+configuration block or duplicate the client secret for this migration.
+
+The migration preserves personal, Posts, Threads, ACL, mention, attachment,
+proactive delivery, typing, and Adaptive Card approval semantics. It adds the
+SDK's official tracing and metrics sources to Netclaw's existing OTLP pipeline.
+It does not create a second telemetry pipeline or attach activity bodies,
+identifiers, URLs, tokens, or secrets as Netclaw telemetry attributes.
+
+Before deploying a Phase 1.1 build, run the controlled Personal, Posts,
+Threads, approval, typing, and duplicate-approval smoke matrix in the live
+handover record. Do not treat this documentation update as live validation.
+
 ## Validate a development tunnel
 
 Use a development tunnel only for a bounded test period.
