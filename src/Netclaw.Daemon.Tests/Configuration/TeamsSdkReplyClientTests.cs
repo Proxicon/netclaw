@@ -113,6 +113,24 @@ public sealed class TeamsSdkReplyClientTests
         Assert.All(actions, action => Assert.Equal("Action.Execute", action.GetProperty("type").GetString()));
     }
 
+    [Fact]
+    public void Terminal_denial_card_payload_has_no_actions_and_uses_attention_tone()
+    {
+        var card = TeamsApprovalCardRenderer.CreateTerminal(
+            "shell_execute",
+            "rmdir netclaw-approval-card-never-created",
+            "Denied.");
+        var payload = TeamsAdaptiveCardPayloadBuilder.Create(card);
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+
+        var body = document.RootElement.GetProperty("body");
+        Assert.Equal("Approval denied", body[0].GetProperty("text").GetString());
+        Assert.Equal("attention", body[0].GetProperty("color").GetString());
+        Assert.Contains("Tool: shell_execute", body[1].GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Contains("Action: rmdir netclaw-approval-card-never-created", body[1].GetProperty("text").GetString(), StringComparison.Ordinal);
+        Assert.Empty(document.RootElement.GetProperty("actions").EnumerateArray());
+    }
+
     private static TeamsOutboundMessage CreateMessage(string? updateActivityId = null) => new(
         new TeamsOutboundDestination(
             "tenant",

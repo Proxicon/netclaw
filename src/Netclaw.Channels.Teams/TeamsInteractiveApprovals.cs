@@ -46,7 +46,8 @@ public static class TeamsApprovalCardRenderer
                     correlationId,
                     nonce,
                     GetActionStyle(option.Key.Value)))
-                .ToArray());
+                .ToArray(),
+            TeamsApprovalCardTone.Warning);
         EnsureBounded(card);
         return card;
     }
@@ -59,8 +60,28 @@ public static class TeamsApprovalCardRenderer
     }
 
     public static TeamsApprovalCard CreateTerminal(string message)
+        => CreateTerminal(string.Empty, string.Empty, message);
+
+    public static TeamsApprovalCard CreateTerminal(
+        string toolName,
+        string requestDisplayText,
+        string message,
+        bool isMcpTool = false)
     {
-        var card = new TeamsApprovalCard("Approval", Truncate(message, 512), []);
+        var (title, tone) = message switch
+        {
+            "Denied." => ("Approval denied", TeamsApprovalCardTone.Attention),
+            "This approval has expired." => ("Approval expired", TeamsApprovalCardTone.Warning),
+            "This approval was already processed." => ("Approval already resolved", TeamsApprovalCardTone.Warning),
+            "This approval is no longer available." => ("Approval unavailable", TeamsApprovalCardTone.Warning),
+            _ when message.StartsWith("Approved:", StringComparison.Ordinal) => ("Approval granted", TeamsApprovalCardTone.Good),
+            _ => ("Approval resolved", TeamsApprovalCardTone.Default)
+        };
+        var requestLabel = isMcpTool ? "Invocation" : "Action";
+        var body = string.IsNullOrWhiteSpace(toolName) || string.IsNullOrWhiteSpace(requestDisplayText)
+            ? Truncate(message, MaxSummaryChars)
+            : $"Tool: {Truncate(toolName, MaxToolNameChars)}\n{requestLabel}: {Truncate(requestDisplayText, MaxRequestDisplayChars)}\n\n{Truncate(message, MaxSummaryChars)}";
+        var card = new TeamsApprovalCard(title, body, [], tone);
         EnsureBounded(card);
         return card;
     }

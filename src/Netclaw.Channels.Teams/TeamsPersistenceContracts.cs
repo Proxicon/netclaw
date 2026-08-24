@@ -25,6 +25,8 @@ public sealed record TeamsApprovalPendingCreated : ITeamsPersistenceMessage
     public long ExpiresAtUnixMilliseconds { get; init; }
     public IReadOnlyList<string> OfferedOptionKeys { get; init; } = Array.Empty<string>();
     public bool IsMcpTool { get; init; }
+    public string ToolName { get; init; } = string.Empty;
+    public string RequestDisplayText { get; init; } = string.Empty;
 }
 
 public sealed record TeamsApprovalCardDelivered : ITeamsPersistenceMessage
@@ -50,6 +52,8 @@ public sealed record TeamsApprovalSnapshotEntry
     public long ExpiresAtUnixMilliseconds { get; init; }
     public IReadOnlyList<string> OfferedOptionKeys { get; init; } = Array.Empty<string>();
     public bool IsMcpTool { get; init; }
+    public string ToolName { get; init; } = string.Empty;
+    public string RequestDisplayText { get; init; } = string.Empty;
     public string? PromptId { get; init; }
     public string? Decision { get; init; }
 }
