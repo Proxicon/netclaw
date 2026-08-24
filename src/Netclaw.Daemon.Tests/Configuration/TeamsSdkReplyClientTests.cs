@@ -137,6 +137,15 @@ public sealed class TeamsSdkReplyClientTests
             ["positive", "default", "default", "destructive", "destructive"],
             actions.Select(action => action.GetProperty("style").GetString()));
         Assert.All(actions, action => Assert.Equal("Action.Execute", action.GetProperty("type").GetString()));
+
+        var body = document.RootElement.GetProperty("body");
+        Assert.Equal("🔒 Tool approval required", body[0].GetProperty("text").GetString());
+        var toolColumns = body[1].GetProperty("columns");
+        Assert.Equal("Tool:", toolColumns[0].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("Bolder", toolColumns[0].GetProperty("items")[0].GetProperty("weight").GetString());
+        Assert.Equal("shell_execute", toolColumns[1].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("Monospace", toolColumns[1].GetProperty("items")[0].GetProperty("fontType").GetString());
+        Assert.Equal("Light", toolColumns[1].GetProperty("items")[0].GetProperty("color").GetString());
     }
 
     [Fact]
@@ -150,10 +159,15 @@ public sealed class TeamsSdkReplyClientTests
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload));
 
         var body = document.RootElement.GetProperty("body");
-        Assert.Equal("Approval denied", body[0].GetProperty("text").GetString());
+        Assert.Equal("⛔ Approval denied", body[0].GetProperty("text").GetString());
         Assert.Equal("attention", body[0].GetProperty("color").GetString());
-        Assert.Contains("Tool: shell_execute", body[1].GetProperty("text").GetString(), StringComparison.Ordinal);
-        Assert.Contains("Action: rmdir netclaw-approval-card-never-created", body[1].GetProperty("text").GetString(), StringComparison.Ordinal);
+        var toolColumns = body[1].GetProperty("columns");
+        Assert.Equal("Tool:", toolColumns[0].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("shell_execute", toolColumns[1].GetProperty("items")[0].GetProperty("text").GetString());
+        var actionColumns = body[2].GetProperty("columns");
+        Assert.Equal("Action:", actionColumns[0].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("rmdir netclaw-approval-card-never-created", actionColumns[1].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("Denied.", body[3].GetProperty("text").GetString());
         Assert.Empty(document.RootElement.GetProperty("actions").EnumerateArray());
     }
 

@@ -197,6 +197,16 @@ host with normal certificate, monitoring, and recovery controls.
 Teams sends a native Adaptive Card for a tool approval. The card preserves the
 order and labels that the session supplies.
 
+The pending card has a lock icon. The terminal card has an outcome icon.
+The card shows bold labels and muted monospace values. Teams selects the local
+monospace font. Netclaw does not load an external image for these icons.
+
+| Card state | Icon | Card tone |
+| --- | --- | --- |
+| Pending | 🔒 | warning |
+| Approved | ✅ | good |
+| Denied | ⛔ | attention |
+
 | Decision | Card style | Effect |
 | --- | --- | --- |
 | Once | positive | Allows the current call only. |

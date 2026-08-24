@@ -164,20 +164,24 @@ internal static class TeamsAdaptiveCardPayloadBuilder
         if (approvalCard.Tone != TeamsApprovalCardTone.Default)
             title["color"] = ToWireColor(approvalCard.Tone);
 
+        var body = new List<object?> { title };
+        if (approvalCard.Fields.Count > 0)
+        {
+            body.AddRange(approvalCard.Fields.Select(CreateField));
+            if (!string.IsNullOrWhiteSpace(approvalCard.Summary))
+                body.Add(CreateSummary(approvalCard.Summary));
+        }
+        else if (!string.IsNullOrWhiteSpace(approvalCard.Body))
+        {
+            body.Add(CreateSummary(approvalCard.Body));
+        }
+
         return new Dictionary<string, object?>
         {
             ["$schema"] = TeamsApprovalCard.Schema,
             ["type"] = "AdaptiveCard",
             ["version"] = TeamsApprovalCard.Version,
-            ["body"] = new object?[]
-            {
-                title,
-                new Dictionary<string, object?>
-                {
-                    ["type"] = "TextBlock", ["text"] = approvalCard.Body, ["wrap"] = true,
-                    ["spacing"] = "Medium"
-                }
-            },
+            ["body"] = body,
             ["actions"] = approvalCard.Actions.Select(cardAction => (object?)new Dictionary<string, object?>
             {
                 ["type"] = "Action.Execute",
@@ -193,6 +197,54 @@ internal static class TeamsAdaptiveCardPayloadBuilder
             }).ToArray()
         };
     }
+
+    private static Dictionary<string, object?> CreateField(TeamsApprovalCardField field) => new()
+    {
+        ["type"] = "ColumnSet",
+        ["spacing"] = "Small",
+        ["columns"] = new object?[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "Column",
+                ["width"] = "auto",
+                ["items"] = new object?[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "TextBlock",
+                        ["text"] = field.Label + ":",
+                        ["weight"] = "Bolder",
+                        ["wrap"] = true
+                    }
+                }
+            },
+            new Dictionary<string, object?>
+            {
+                ["type"] = "Column",
+                ["width"] = "stretch",
+                ["items"] = new object?[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "TextBlock",
+                        ["text"] = field.Value,
+                        ["fontType"] = "Monospace",
+                        ["color"] = "Light",
+                        ["wrap"] = true
+                    }
+                }
+            }
+        }
+    };
+
+    private static Dictionary<string, object?> CreateSummary(string summary) => new()
+    {
+        ["type"] = "TextBlock",
+        ["text"] = summary,
+        ["wrap"] = true,
+        ["spacing"] = "Medium"
+    };
 
     private static string ToWireStyle(TeamsApprovalActionStyle style) => style switch
     {
