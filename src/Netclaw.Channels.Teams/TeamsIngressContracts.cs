@@ -271,7 +271,24 @@ public sealed record TeamsApprovalCard(
     public const string Schema = "http://adaptivecards.io/schemas/adaptive-card.json";
     public const string Version = "1.5";
     public const int MaxSerializedBytes = 80 * 1024;
+
+    /// <summary>
+    /// Structured request fields for an Adaptive Card host.
+    /// The transport uses these fields to keep labels distinct from code values.
+    /// </summary>
+    public IReadOnlyList<TeamsApprovalCardField> Fields { get; init; } = [];
+
+    /// <summary>
+    /// A terminal or contextual summary for an Adaptive Card host.
+    /// </summary>
+    public string? Summary { get; init; }
 }
+
+/// <summary>
+/// A safe display field for a Teams approval card.
+/// It has no authorization meaning.
+/// </summary>
+public sealed record TeamsApprovalCardField(string Label, string Value);
 
 /// <summary>
 /// The Adaptive Card title tone. This is presentation-only and has no bearing
