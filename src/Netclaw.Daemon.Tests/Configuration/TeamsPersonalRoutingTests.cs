@@ -2132,6 +2132,70 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Expired_approval_fails_closed_and_releases_the_waiting_session()
+    {
+        const string correlationId = "expired-approval-correlation";
+        const string nonce = "expired-approval-nonce";
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-expired");
+        await SeedJournalAsync(
+            BindingPersistenceId(sessionId),
+            new TeamsApprovalPendingCreated
+            {
+                CallId = "expired-call",
+                CorrelationId = correlationId,
+                NonceHash = TeamsApprovalCardRenderer.HashNonce(nonce),
+                RequesterSenderId = "user-a",
+                ExpiresAtUnixMilliseconds = 1,
+                OfferedOptionKeys = [ApprovalOptionKeys.Deny],
+                ToolName = "safe_tool",
+                RequestDisplayText = "Approve safe tool use."
+            });
+
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var actor = CreateBindingActor(
+            sessionId,
+            CreateDependencies(pipeline),
+            "teams-approval-expired");
+
+        var result = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-expired",
+                    correlationId,
+                    nonce,
+                    "synthetic-activity",
+                    ApprovalOptionKeys.Deny),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Expired, result.Disposition);
+        Assert.Equal("⌛ Approval expired", result.TerminalCard?.Title);
+        Assert.Empty(result.TerminalCard?.Actions ?? []);
+        await AwaitAssertAsync(
+            () => Assert.Single(pipeline.Feedback),
+            cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(
+            ApprovalOptionKeys.Deny,
+            Assert.IsType<ToolInteractionResponse>(pipeline.Feedback[0]).SelectedKey.Value);
+
+        var duplicate = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-expired",
+                    correlationId,
+                    nonce,
+                    "synthetic-activity",
+                    ApprovalOptionKeys.Deny),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.AlreadyProcessed, duplicate.Disposition);
+        Assert.Single(pipeline.Feedback);
+    }
+
+    [Fact]
     public async Task Approval_action_accepts_an_unbound_card_when_its_nonce_and_sender_are_valid()
     {
         var replyClient = new RecordingTeamsReplyClient(
