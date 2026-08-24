@@ -5,7 +5,9 @@
 // -----------------------------------------------------------------------
 using System.Collections.Immutable;
 using System.Net;
+using System.Security.Claims;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Akka.Actor;
 using Akka.Hosting;
@@ -14,6 +16,7 @@ using Akka.Persistence;
 using Akka.Persistence.Hosting;
 using Akka.Serialization;
 using Google.Protobuf;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -21,11 +24,12 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Microsoft.Teams.Api.Activities;
-using Microsoft.Teams.Api.AdaptiveCards;
-using Microsoft.Teams.Api.Entities;
-using Microsoft.Teams.Plugins.AspNetCore.Extensions;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.Schema.Entities;
+using Microsoft.Teams.Core.Schema;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
@@ -41,13 +45,12 @@ using Xunit;
 using static Netclaw.Actors.Reminders.ReminderProtocol;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 using LegacyProto = Netclaw.Actors.Serialization.Proto;
-using TeamsAccount = Microsoft.Teams.Api.Account;
-using TeamsChannel = Microsoft.Teams.Api.Channel;
-using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
-using TeamsConversation = Microsoft.Teams.Api.Conversation;
-using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
-using TeamsTeam = Microsoft.Teams.Api.Team;
-using AdaptiveCardsActivity = Microsoft.Teams.Api.Activities.Invokes.AdaptiveCards;
+using TeamsAccount = Microsoft.Teams.Apps.Schema.TeamsChannelAccount;
+using TeamsChannel = Microsoft.Teams.Apps.Schema.TeamsChannel;
+using TeamsChannelData = Microsoft.Teams.Apps.Schema.TeamsChannelData;
+using TeamsConversation = Microsoft.Teams.Apps.Schema.TeamsConversation;
+using TeamsConversationType = Microsoft.Teams.Apps.Schema.ConversationType;
+using TeamsTeam = Microsoft.Teams.Apps.Schema.Team;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -2611,12 +2614,21 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         builder.Services.AddSingleton(requestLifetime);
         builder.Services.AddScoped<RequestScopeSentinel>();
         builder.AddTeamsIngress();
+        builder.Services
+            .AddAuthentication(TestTeamsAuthenticationHandler.SchemeName)
+            .AddScheme<AuthenticationSchemeOptions, TestTeamsAuthenticationHandler>(
+                TestTeamsAuthenticationHandler.SchemeName,
+                _ => { });
         builder.Services.RemoveAll<ITeamsReplyClient>();
         builder.Services.AddSingleton<ITeamsReplyClient>(replyClient);
         builder.Services.PostConfigure<AuthorizationOptions>(options =>
-            options.AddPolicy(
-                HostApplicationBuilderExtensions.TeamsTokenAuthConstants.AuthorizationPolicy,
-                policy => policy.RequireAssertion(_ => true)));
+        {
+            var testPolicy = new AuthorizationPolicyBuilder(TestTeamsAuthenticationHandler.SchemeName)
+                .RequireAuthenticatedUser()
+                .Build();
+            options.DefaultPolicy = testPolicy;
+            options.AddPolicy(TeamsActivityEndpointExtensions.AuthorizationPolicy, testPolicy);
+        });
 
         var app = builder.Build();
         app.Use(async (context, next) =>
@@ -2633,11 +2645,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         return app;
     }
 
-    private static HttpRequestMessage CreateTeamsActivityRequest(IActivity activity)
+    private static HttpRequestMessage CreateTeamsActivityRequest(TeamsActivity activity)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, TeamsActivityEndpointExtensions.ActivityPath)
         {
-            Content = new StringContent(JsonSerializer.Serialize(activity), Encoding.UTF8, "application/json")
+            Content = new StringContent(activity.ToJson(), Encoding.UTF8, "application/json")
         };
         request.Headers.TryAddWithoutValidation(
             "Authorization",
@@ -2645,75 +2657,95 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         return request;
     }
 
-    private static MessageActivity CreateSdkPersonalMessage(string conversationId, string activityId) => new("request input")
-    {
-        Id = activityId,
-        From = new TeamsAccount { Id = "user-a" },
-        Conversation = new TeamsConversation
+    private static MessageActivity CreateSdkPersonalMessage(string conversationId, string activityId) =>
+        MessageActivity.FromActivity(CoreActivity.FromJsonString(JsonSerializer.Serialize(new
         {
-            Id = conversationId,
-            TenantId = "tenant-a",
-            Type = TeamsConversationType.Personal
-        },
-        ServiceUrl = "https://request-service.invalid/"
-    };
+            type = "message",
+            text = "request input",
+            id = activityId,
+            from = new { id = "user-a" },
+            conversation = new
+            {
+                id = conversationId,
+                tenantId = "tenant-a",
+                conversationType = TeamsConversationType.Personal.Value
+            },
+            serviceUrl = "https://request-service.invalid/"
+        })));
 
-    private static AdaptiveCardsActivity.ActionActivity CreateSdkPersonalApprovalAction(
+    private static InvokeActivity CreateSdkPersonalApprovalAction(
         string conversationId,
         string promptActivityId,
         string correlationId,
         string nonce,
-        string action) => new()
+        string action)
     {
-        Id = "request-approval-action",
-        ReplyToId = promptActivityId,
-        From = new TeamsAccount { Id = "user-a" },
-        Conversation = new TeamsConversation
+        var activity = InvokeActivity.FromActivity(CoreActivity.FromJsonString(JsonSerializer.Serialize(new
         {
-            Id = conversationId,
-            TenantId = "tenant-a",
-            Type = TeamsConversationType.Personal
-        },
-        ServiceUrl = "https://request-service.invalid/",
-        Value = new InvokeValue
-        {
-            Action = new InvokeAction
+            type = "invoke",
+            name = "adaptiveCard/action",
+            id = "request-approval-action",
+            replyToId = promptActivityId,
+            from = new { id = "user-a" },
+            conversation = new
             {
-                Type = ActionType.Execute,
-                Data = new Dictionary<string, object>
+                id = conversationId,
+                tenantId = "tenant-a",
+                conversationType = TeamsConversationType.Personal.Value
+            },
+            serviceUrl = "https://request-service.invalid/",
+            value = new
+            {
+                action = new
                 {
-                    ["correlation"] = correlationId,
-                    ["nonce"] = nonce,
-                    ["action"] = action
+                    type = "Action.Execute",
+                    data = new Dictionary<string, object>
+                    {
+                        ["correlation"] = correlationId,
+                        ["nonce"] = nonce,
+                        ["action"] = action
+                    }
                 }
             }
-        }
-    };
+        })));
 
-    private static MessageActivity CreateSdkChannelRootMessage(string conversationId, string rootActivityId) => new("<at>bot</at> request input")
-    {
-        Id = rootActivityId,
-        From = new TeamsAccount { Id = "user-a" },
-        Recipient = new TeamsAccount { Id = "28:bot" },
-        Conversation = new TeamsConversation
+        // The native SDK's typed projection intentionally does not retain ReplyToId.
+        // Restore the original wire value so this request exercises the host middleware
+        // that preserves it before the projection occurs.
+        ((CoreActivity)activity).ReplyToId = promptActivityId;
+        return activity;
+    }
+
+    private static MessageActivity CreateSdkChannelRootMessage(string conversationId, string rootActivityId) =>
+        MessageActivity.FromActivity(CoreActivity.FromJsonString(JsonSerializer.Serialize(new
         {
-            Id = conversationId,
-            TenantId = "tenant-a",
-            Type = TeamsConversationType.Channel
-        },
-        ChannelData = new TeamsChannelData
-        {
-            Team = new TeamsTeam { Id = "team-a" },
-            Channel = new TeamsChannel { Id = "channel-a" }
-        },
-        Entities = [new MentionEntity
-        {
-            Type = "mention",
-            Mentioned = new TeamsAccount { Id = "28:bot" },
-            Text = "<at>bot</at>"
-        }],
-        ServiceUrl = "https://request-service.invalid/"
-    };
+            type = "message",
+            text = "<at>bot</at> request input",
+            id = rootActivityId,
+            from = new { id = "user-a" },
+            recipient = new { id = "28:bot" },
+            conversation = new
+            {
+                id = conversationId,
+                tenantId = "tenant-a",
+                conversationType = TeamsConversationType.Channel.Value
+            },
+            channelData = new
+            {
+                team = new { id = "team-a" },
+                channel = new { id = "channel-a" }
+            },
+            entities = new[]
+            {
+                new
+                {
+                    type = "mention",
+                    mentioned = new { id = "28:bot" },
+                    text = "<at>bot</at>"
+                }
+            },
+            serviceUrl = "https://request-service.invalid/"
+        })));
 
     private static TeamsConversationDependencies CreateDependencies(
         ISessionPipeline pipeline,
@@ -2977,6 +3009,30 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var subscription = ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
         ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
         return subscription.Subscriber;
+    }
+
+    private sealed class TestTeamsAuthenticationHandler : AuthenticationHandler<AuthenticationSchemeOptions>
+    {
+        public const string SchemeName = "TestTeams";
+
+        public TestTeamsAuthenticationHandler(
+            IOptionsMonitor<AuthenticationSchemeOptions> options,
+            ILoggerFactory logger,
+            UrlEncoder encoder)
+            : base(options, logger, encoder)
+        {
+        }
+
+        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+        {
+            var identity = new ClaimsIdentity(
+            [
+                new Claim(ClaimTypes.Name, "teams-test-user"),
+                new Claim("tid", "tenant-a")
+            ], SchemeName);
+            return Task.FromResult(AuthenticateResult.Success(
+                new AuthenticationTicket(new ClaimsPrincipal(identity), SchemeName)));
+        }
     }
 
     private sealed class DiscardActor : ReceiveActor
