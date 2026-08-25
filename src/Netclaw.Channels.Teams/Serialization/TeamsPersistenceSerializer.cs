@@ -22,6 +22,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
 {
     private const string ApprovalPendingManifest = "teams-approval-pending-v2";
     private const string ApprovalDeliveredManifest = "teams-approval-delivered-v2";
+    private const string ApprovalReissuedManifest = "teams-approval-reissued-v2";
+    private const string ApprovalForwardingManifest = "teams-approval-forwarding-v2";
     private const string ApprovalConsumedManifest = "teams-approval-consumed-v2";
     private const string DestinationCapturedManifest = "teams-destination-captured-v2";
     private const string DeliveryRecordedManifest = "teams-delivery-recorded-v2";
@@ -33,6 +35,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         [typeof(TeamsApprovalPendingCreated)] = ApprovalPendingManifest,
         [typeof(TeamsApprovalCardDelivered)] = ApprovalDeliveredManifest,
+        [typeof(TeamsApprovalCardReissued)] = ApprovalReissuedManifest,
+        [typeof(TeamsApprovalForwardingStarted)] = ApprovalForwardingManifest,
         [typeof(TeamsApprovalConsumed)] = ApprovalConsumedManifest,
         [typeof(TeamsProactiveDestinationCaptured)] = DestinationCapturedManifest,
         [typeof(TeamsProactiveDeliveryRecorded)] = DeliveryRecordedManifest,
@@ -57,6 +61,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         ApprovalPendingManifest => FromProto(Proto.TeamsApprovalPendingCreatedProto.Parser.ParseFrom(bytes)),
         ApprovalDeliveredManifest => FromProto(Proto.TeamsApprovalCardDeliveredProto.Parser.ParseFrom(bytes)),
+        ApprovalReissuedManifest => FromProto(Proto.TeamsApprovalCardReissuedProto.Parser.ParseFrom(bytes)),
+        ApprovalForwardingManifest => FromProto(Proto.TeamsApprovalForwardingStartedProto.Parser.ParseFrom(bytes)),
         ApprovalConsumedManifest => FromProto(Proto.TeamsApprovalConsumedProto.Parser.ParseFrom(bytes)),
         DestinationCapturedManifest => FromProto(Proto.TeamsProactiveDestinationCapturedProto.Parser.ParseFrom(bytes)),
         DeliveryRecordedManifest => FromProto(Proto.TeamsProactiveDeliveryRecordedProto.Parser.ParseFrom(bytes)),
@@ -70,6 +76,8 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         TeamsApprovalPendingCreated item => ToProto(item),
         TeamsApprovalCardDelivered item => ToProto(item),
+        TeamsApprovalCardReissued item => ToProto(item),
+        TeamsApprovalForwardingStarted item => ToProto(item),
         TeamsApprovalConsumed item => ToProto(item),
         TeamsProactiveDestinationCaptured item => ToProto(item),
         TeamsProactiveDeliveryRecorded item => ToProto(item),
@@ -94,6 +102,7 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         proto.IsMcpTool = value.IsMcpTool;
         proto.ToolName = value.ToolName;
         proto.RequestDisplayText = value.RequestDisplayText;
+        proto.PresentationPending = value.PresentationPending;
         return proto;
     }
 
@@ -108,19 +117,51 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         OfferedOptionKeys = value.OfferedOptionKeys.ToArray(),
         IsMcpTool = value.IsMcpTool,
         ToolName = value.ToolName,
-        RequestDisplayText = value.RequestDisplayText
+        RequestDisplayText = value.RequestDisplayText,
+        PresentationPending = value.HasPresentationPending ? value.PresentationPending : true
     };
 
-    private static Proto.TeamsApprovalCardDeliveredProto ToProto(TeamsApprovalCardDelivered value) => new()
+    private static Proto.TeamsApprovalCardDeliveredProto ToProto(TeamsApprovalCardDelivered value)
     {
-        CorrelationId = value.CorrelationId,
-        PromptId = value.PromptId
-    };
+        var proto = new Proto.TeamsApprovalCardDeliveredProto { CorrelationId = value.CorrelationId };
+        if (value.PromptId is not null) proto.PromptId = value.PromptId;
+        return proto;
+    }
 
     private static TeamsApprovalCardDelivered FromProto(Proto.TeamsApprovalCardDeliveredProto value) => new()
     {
         CorrelationId = value.CorrelationId,
-        PromptId = value.PromptId
+        PromptId = value.HasPromptId ? value.PromptId : null
+    };
+
+    private static Proto.TeamsApprovalCardReissuedProto ToProto(TeamsApprovalCardReissued value) => new()
+    {
+        CorrelationId = value.CorrelationId,
+        NonceHash = value.NonceHash,
+        ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds
+    };
+
+    private static TeamsApprovalCardReissued FromProto(Proto.TeamsApprovalCardReissuedProto value) => new()
+    {
+        CorrelationId = value.CorrelationId,
+        NonceHash = value.NonceHash,
+        ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds
+    };
+
+    private static Proto.TeamsApprovalForwardingStartedProto ToProto(TeamsApprovalForwardingStarted value) => new()
+    {
+        CorrelationId = value.CorrelationId,
+        Decision = value.Decision,
+        SenderId = value.SenderId,
+        StartedAtUnixMilliseconds = value.StartedAtUnixMilliseconds
+    };
+
+    private static TeamsApprovalForwardingStarted FromProto(Proto.TeamsApprovalForwardingStartedProto value) => new()
+    {
+        CorrelationId = value.CorrelationId,
+        Decision = value.Decision,
+        SenderId = value.SenderId,
+        StartedAtUnixMilliseconds = value.StartedAtUnixMilliseconds
     };
 
     private static Proto.TeamsApprovalConsumedProto ToProto(TeamsApprovalConsumed value) => new()
@@ -212,7 +253,10 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         if (value.RequesterSenderId is not null) proto.RequesterSenderId = value.RequesterSenderId;
         if (value.RequesterPrincipal is { } principal) proto.RequesterPrincipal = (int)principal;
         if (value.PromptId is not null) proto.PromptId = value.PromptId;
+        if (value.ForwardingDecision is not null) proto.ForwardingDecision = value.ForwardingDecision;
+        if (value.ForwardingSenderId is not null) proto.ForwardingSenderId = value.ForwardingSenderId;
         if (value.Decision is not null) proto.Decision = value.Decision;
+        proto.PresentationPending = value.PresentationPending;
         proto.OfferedOptionKeys.AddRange(value.OfferedOptionKeys);
         proto.IsMcpTool = value.IsMcpTool;
         proto.ToolName = value.ToolName;
@@ -230,7 +274,11 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
         IsMcpTool = value.IsMcpTool,
         ToolName = value.ToolName,
         RequestDisplayText = value.RequestDisplayText,
-        PromptId = value.HasPromptId ? value.PromptId : null, Decision = value.HasDecision ? value.Decision : null
+        PromptId = value.HasPromptId ? value.PromptId : null,
+        ForwardingDecision = value.HasForwardingDecision ? value.ForwardingDecision : null,
+        ForwardingSenderId = value.HasForwardingSenderId ? value.ForwardingSenderId : null,
+        Decision = value.HasDecision ? value.Decision : null,
+        PresentationPending = value.HasPresentationPending ? value.PresentationPending : true
     };
 
     private static Proto.TeamsChannelActivityMappedProto ToProto(TeamsChannelActivityMapped value)

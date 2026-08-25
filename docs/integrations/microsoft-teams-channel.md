@@ -250,6 +250,41 @@ nonce, expiry, and persisted offered key before it accepts a decision.
 Teams approval cards do not accept letter replies. Use a card button. This
 keeps the signed card callback as the only decision path.
 
+### Channel-binding parity
+
+Before a validated Teams activity enters a session, Netclaw applies the shared
+prompt-injection classifier. A high-risk result is blocked and an unavailable
+classifier fails closed. Teams does not fetch Graph message history, so it does
+not perform channel-history hydration or backfill; that capability remains
+unavailable until it has an authenticated, ordered, bounded history source.
+
+Ordinary text and error output use the shared channel output lifecycle and
+normal Teams delivery uses the shared safe transport failure path. Native
+typing, proactive delivery, and Adaptive Cards remain Teams transport concerns.
+
+An expired card does not send an implicit Deny to the session. Netclaw replaces
+the opaque nonce binding with a fresh card while preserving the pending
+session-owned approval. The old card cannot authorize an action; the replacement
+card may be selected once by the original approved requester.
+
+If presentation delivery fails, Teams records only bounded recovery state and
+invalidates that attempted nonce binding. It does not persist the raw nonce,
+deny or consume the session approval, or self-retry in a tight loop. A later
+recovery, including actor restart, creates and delivers a fresh card. A Teams
+delivery that succeeds without an activity ID is still a successful unbound
+presentation; card action validation continues to use the nonce, sender,
+tenant, offered option, and expiry checks.
+
+Teams uses the generic approval system only after the normal session pipeline
+has found an operation eligible. The adapter does not expand core tool
+eligibility: host shell remains subject to Netclaw's existing Personal-only
+security boundary. Neither a Team allow-list, approval override, card action,
+nor persistent approval grant can make `shell_execute` available to Teams.
+
+Persistent approvals remain in `~/.netclaw/config/tool-approvals.json` and are
+managed exclusively by the core approval store. Teams does not write policy or
+grants.
+
 ## Health checks
 
 Run these checks after each deployment or secret rotation:
@@ -311,14 +346,24 @@ either secret during diagnosis.
 
 ## Rollback
 
+Before the first deployment of this change, take and verify a backup or
+snapshot of the Teams persistence store. The current binary can read existing
+Teams records, but it may write `teams-approval-reissued-v2` and
+`teams-approval-forwarding-v2`, which the previous binary cannot read.
+
+Rollback to the previous binary is straightforward only before either
+incompatible manifest has been written. Afterwards, use a forward fix or stop
+the daemon and restore the verified pre-deployment Teams persistence snapshot
+before starting the previous binary. Do not run the previous binary against a
+store containing the new manifests.
+
+To stop Teams ingress without changing the binary:
+
 1. Set `Teams.Enabled` to `false` in `netclaw.json`.
 2. Restart the Netclaw daemon.
 3. Confirm that the Teams connector is absent or disabled in `netclaw status`.
 4. Withdraw or block the app in the Teams admin center.
 5. Revoke the client secret when the rollback is permanent.
-
-This rollback stops new Teams ingress after restart. It does not delete durable
-session, approval, destination, or delivery evidence.
 
 ## Microsoft references
 
