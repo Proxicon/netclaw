@@ -21,10 +21,10 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Time.Testing;
-using Microsoft.Teams.Api.Activities;
-using Microsoft.Teams.Api.AdaptiveCards;
-using Microsoft.Teams.Api.Entities;
-using Microsoft.Teams.Plugins.AspNetCore.Extensions;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.Schema.Entities;
+using Microsoft.Teams.Core.Schema;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
 using Netclaw.Channels;
@@ -34,21 +34,25 @@ using Netclaw.Configuration;
 using Netclaw.Daemon.Configuration;
 using Netclaw.Daemon.Security;
 using Xunit;
-using TeamsAccount = Microsoft.Teams.Api.Account;
-using TeamsAttachment = Microsoft.Teams.Api.Attachment;
-using TeamsContentType = Microsoft.Teams.Api.ContentType;
-using TeamsChannel = Microsoft.Teams.Api.Channel;
-using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
-using TeamsConversation = Microsoft.Teams.Api.Conversation;
-using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
-using TeamsTeam = Microsoft.Teams.Api.Team;
-using AdaptiveCardsActivity = Microsoft.Teams.Api.Activities.Invokes.AdaptiveCards;
+using TeamsAccount = Microsoft.Teams.Apps.Schema.TeamsChannelAccount;
+using TeamsAttachment = Microsoft.Teams.Apps.Schema.TeamsAttachment;
+using TeamsChannel = Microsoft.Teams.Apps.Schema.TeamsChannel;
+using TeamsChannelData = Microsoft.Teams.Apps.Schema.TeamsChannelData;
+using TeamsConversation = Microsoft.Teams.Apps.Schema.TeamsConversation;
+using TeamsConversationType = Microsoft.Teams.Apps.Schema.ConversationType;
+using TeamsTeam = Microsoft.Teams.Apps.Schema.Team;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
 [Collection("TeamsTelemetry")]
 public sealed class TeamsChannelFoundationTests
 {
+    private static class TeamsContentType
+    {
+        public static readonly AttachmentContentType Html = new("text/html");
+        public static readonly AttachmentContentType Text = new("text/plain");
+    }
+
     [Fact]
     public void Options_default_to_disabled_and_fail_closed()
     {
@@ -635,21 +639,11 @@ public sealed class TeamsChannelFoundationTests
         var translator = new TeamsSdkActivityTranslator(
             new TeamsChannelOptions { TenantId = "tenant" },
             new FakeTimeProvider());
-        var activity = new MessageActivity("hello")
-        {
-            Id = "activity",
-            From = new TeamsAccount { Id = "sender" },
-            Conversation = new TeamsConversation
-            {
-                Id = "conversation",
-                TenantId = "tenant",
-                Type = TeamsConversationType.Personal
-            }
-        };
+        var activity = CreateSdkMessage();
 
         var accepted = translator.Translate(activity, "tenant");
         var missingTenant = translator.Translate(activity, null);
-        activity.Conversation.Type = TeamsConversationType.GroupChat;
+        activity.Conversation!.ConversationType = TeamsConversationType.GroupChat;
         var groupChat = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.Accepted, accepted.Disposition);
@@ -684,22 +678,13 @@ public sealed class TeamsChannelFoundationTests
         var translator = new TeamsSdkActivityTranslator(
             new TeamsChannelOptions { TenantId = "configured-tenant" },
             new FakeTimeProvider());
-        var activity = new MessageActivity("hello")
-        {
-            Id = "activity",
-            From = new TeamsAccount { Id = "sender" },
-            Conversation = new TeamsConversation
-            {
-                Id = "conversation",
-                TenantId = "configured-tenant",
-                Type = TeamsConversationType.Personal
-            }
-        };
+        var activity = CreateSdkMessage();
+        activity.Conversation!.TenantId = "configured-tenant";
 
         var configuredMismatch = translator.Translate(activity, "authenticated-other-tenant");
-        activity.Conversation.TenantId = "conversation-other-tenant";
+        activity.Conversation!.TenantId = "conversation-other-tenant";
         var activityMismatch = translator.Translate(activity, "configured-tenant");
-        activity.Conversation.TenantId = "configured-tenant";
+        activity.Conversation!.TenantId = "configured-tenant";
         var missingAuthenticatedTenant = translator.Translate(activity, null);
 
         Assert.Equal("configured_tenant_mismatch", configuredMismatch.ReasonCode);
@@ -795,7 +780,7 @@ public sealed class TeamsChannelFoundationTests
         var schemes = app.Services.GetRequiredService<IAuthenticationSchemeProvider>();
 
         Assert.Equal("AuthSelector", (await schemes.GetDefaultAuthenticateSchemeAsync())!.Name);
-        Assert.NotNull(await schemes.GetSchemeAsync(HostApplicationBuilderExtensions.TeamsTokenAuthConstants.AuthenticationScheme));
+        Assert.NotNull(await schemes.GetSchemeAsync(TeamsActivityEndpointExtensions.AuthenticationScheme));
 
         var client = app.GetTestClient();
         var response = await client.PostAsync(
@@ -1122,7 +1107,7 @@ public sealed class TeamsChannelFoundationTests
             TimeProvider.System);
         var configuredMismatch = translator.Translate(CreateSdkMessage(), authenticatedTenant);
         var activity = CreateSdkMessage();
-        activity.Conversation.TenantId = activityTenant;
+        activity.Conversation!.TenantId = activityTenant;
         var activityMismatch = translator.Translate(activity, configuredTenant);
         var snapshot = await SnapshotAsync(new TeamsChannelOptions
         {
@@ -1166,22 +1151,28 @@ public sealed class TeamsChannelFoundationTests
             clock);
         var activity = CreateSdkMessage();
 
-        Assert.Equal("missing_conversation_id", translator.Translate(new MessageActivity("text")
+        var missingConversation = CreateSdkMessage();
+        missingConversation.Text = "text";
+        ((CoreActivity)missingConversation).Conversation = new TeamsConversation
         {
-            Id = "activity", From = new TeamsAccount { Id = "sender" }, Conversation = new TeamsConversation { Id = "", Type = TeamsConversationType.Personal }
-        }, "tenant").ReasonCode);
-        Assert.Equal("missing_activity_id", translator.Translate(new MessageActivity("text")
-        {
-            From = new TeamsAccount { Id = "sender" }, Conversation = activity.Conversation
-        }, "tenant").ReasonCode);
-        Assert.Equal("missing_message_text", translator.Translate(new MessageActivity("")
-        {
-            Id = "activity", From = new TeamsAccount { Id = "sender" }, Conversation = activity.Conversation
-        }, "tenant").ReasonCode);
-        Assert.Equal("missing_sender_id", translator.Translate(new MessageActivity("text")
-        {
-            Id = "activity", Conversation = activity.Conversation
-        }, "tenant").ReasonCode);
+            Id = "",
+            ConversationType = TeamsConversationType.Personal
+        };
+        Assert.Equal("missing_conversation_id", translator.Translate(missingConversation, "tenant").ReasonCode);
+
+        var missingActivity = CreateSdkMessage();
+        missingActivity.Text = "text";
+        missingActivity.Id = null;
+        Assert.Equal("missing_activity_id", translator.Translate(missingActivity, "tenant").ReasonCode);
+
+        var missingText = CreateSdkMessage();
+        missingText.Text = "";
+        Assert.Equal("missing_message_text", translator.Translate(missingText, "tenant").ReasonCode);
+
+        var missingSender = CreateSdkMessage();
+        missingSender.Text = "text";
+        ((CoreActivity)missingSender).From = null;
+        Assert.Equal("missing_sender_id", translator.Translate(missingSender, "tenant").ReasonCode);
 
         var accepted = translator.Translate(activity, "tenant");
         Assert.Equal(TeamsTranslationDisposition.Accepted, accepted.Disposition);
@@ -1198,16 +1189,16 @@ public sealed class TeamsChannelFoundationTests
         var clock = new FakeTimeProvider(receivedAt);
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, clock);
         var activity = CreateSdkMessage();
-        activity.Timestamp = DateTimeOffset.Parse("2026-06-30T12:00:00+02:00").DateTime;
+        activity.Timestamp = "2026-06-30T12:00:00+02:00";
 
         var accepted = translator.Translate(activity, "tenant");
         Assert.Equal(receivedAt, accepted.Activity!.Trust.ReceivedAtUtc);
-        Assert.Equal(new DateTimeOffset(activity.Timestamp.Value.ToUniversalTime()), accepted.Activity.Trust.PlatformTimestampUtc);
+        Assert.Equal(DateTimeOffset.Parse(activity.Timestamp), accepted.Activity.Trust.PlatformTimestampUtc);
         Assert.Equal("invalid_channel_root_identity", translator.Translate(CreateSdkMessage(TeamsConversationType.Channel), "tenant").ReasonCode);
-        Assert.Equal("missing_conversation_id", translator.Translate(new MessageUpdateActivity(), "tenant").ReasonCode);
-        Assert.Equal("missing_conversation_id", translator.Translate(new MessageDeleteActivity(), "tenant").ReasonCode);
-        Assert.Equal(TeamsTranslationDisposition.Ignored, translator.Translate(new ConversationUpdateActivity(), "tenant").Disposition);
-        Assert.Equal(TeamsIngressActivityKind.Unknown, translator.Translate(new TypingActivity(), "tenant").ActivityKind);
+        Assert.Equal("missing_conversation_id", translator.Translate(CreateSdkActivity<MessageUpdateActivity>("messageUpdate"), "tenant").ReasonCode);
+        Assert.Equal("missing_conversation_id", translator.Translate(CreateSdkActivity<MessageDeleteActivity>("messageDelete"), "tenant").ReasonCode);
+        Assert.Equal(TeamsTranslationDisposition.Ignored, translator.Translate(CreateSdkActivity<ConversationUpdateActivity>("conversationUpdate"), "tenant").Disposition);
+        Assert.Equal(TeamsIngressActivityKind.Unknown, translator.Translate(CreateSdkActivity<TeamsActivity>("typing"), "tenant").ActivityKind);
     }
 
     [Fact]
@@ -1220,29 +1211,23 @@ public sealed class TeamsChannelFoundationTests
             AllowedTeamIds = ["team"],
             AllowedChannelIds = ["channel"]
         }, TimeProvider.System);
-        var activity = new MessageActivity("<at>renamed bot</at> hello <at>renamed bot</at>")
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Text = "<at>renamed bot</at> hello <at>renamed bot</at>";
+        ((CoreActivity)activity).From = new TeamsAccount { Id = "sender" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.ChannelData = new TeamsChannelData
         {
-            Id = "root",
-            From = new TeamsAccount { Id = "sender" },
-            Recipient = new TeamsAccount { Id = "28:bot" },
-            Conversation = new TeamsConversation
-            {
-                Id = "conversation;messageid=root",
-                TenantId = "tenant",
-                Type = TeamsConversationType.Channel
-            },
-            ChannelData = new TeamsChannelData
-            {
-                Team = new TeamsTeam { Id = "team" },
-                Channel = new TeamsChannel { Id = "channel" }
-            },
-            Entities =
-            [
-                new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:bot" }, Text = "<at>renamed bot</at>" },
-                new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:bot" }, Text = "<at>renamed bot</at>" },
-                new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:user" }, Text = "<at>user</at>" }
-            ]
+            Team = new TeamsTeam { Id = "team" },
+            Channel = new TeamsChannel { Id = "channel" }
         };
+        activity.Entities =
+        [
+            new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:bot" }, Text = "<at>renamed bot</at>" },
+            new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:bot" }, Text = "<at>renamed bot</at>" },
+            new MentionEntity { Type = "mention", Mentioned = new TeamsAccount { Id = "28:user" }, Text = "<at>user</at>" }
+        ];
 
         var result = translator.Translate(activity, "tenant");
 
@@ -1274,8 +1259,8 @@ public sealed class TeamsChannelFoundationTests
         var translator = new TeamsSdkActivityTranslator(options, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
         activity.Id = "root";
-        activity.From = new TeamsAccount { Id = "opaque-transport-sender", AadObjectId = "operator-aad-object" };
-        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        ((CoreActivity)activity).From = new TeamsAccount { Id = "opaque-transport-sender", AadObjectId = "operator-aad-object" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
         activity.Conversation!.Id = "conversation;messageid=root";
         activity.ChannelData = new TeamsChannelData
         {
@@ -1301,7 +1286,7 @@ public sealed class TeamsChannelFoundationTests
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
         var activity = CreateSdkMessage();
-        activity.From = new TeamsAccount { Id = "opaque-transport-sender" };
+        ((CoreActivity)activity).From = new TeamsAccount { Id = "opaque-transport-sender" };
 
         var result = translator.Translate(activity, "tenant");
 
@@ -1388,14 +1373,18 @@ public sealed class TeamsChannelFoundationTests
         activity.Id = "root";
         activity.Text = "<at>synthetic bot</at> hello";
         activity.Conversation!.Id = "conversation;messageid=root";
-        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
         activity.Entities = [new MentionEntity
         {
             Type = "mention",
             Mentioned = new TeamsAccount { Id = "28:bot" },
             Text = "<at>synthetic bot</at>"
         }];
-        activity.Attachments = [new TeamsAttachment("text/html; charset=utf-8", JsonDocument.Parse("\"<div>synthetic rendering metadata</div>\"").RootElement.Clone())];
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = new AttachmentContentType("text/html; charset=utf-8"),
+            Content = JsonDocument.Parse("\"<div>synthetic rendering metadata</div>\"").RootElement.Clone()
+        }];
 
         var result = translator.Translate(activity, "tenant");
 
@@ -1413,7 +1402,7 @@ public sealed class TeamsChannelFoundationTests
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
         activity.Conversation!.Id = "conversation;messageid=root";
-        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
         activity.Text = "<at>synthetic user</at> hello";
         activity.Entities = [new MentionEntity
         {
@@ -1511,7 +1500,7 @@ public sealed class TeamsChannelFoundationTests
         activity.Attachments = [new TeamsAttachment
         {
             ContentType = TeamsContentType.Html,
-            ContentUrl = "https://graph.microsoft.com/v1.0/me/drive/items/1"
+            ContentUrl = new Uri("https://graph.microsoft.com/v1.0/me/drive/items/1")
         }];
 
         var result = translator.Translate(activity, "tenant");
@@ -1530,7 +1519,7 @@ public sealed class TeamsChannelFoundationTests
         {
             ContentType = TeamsContentType.Text,
             Content = "dGVzdA==",
-            ContentUrl = "https://example.test/file.txt"
+            ContentUrl = new Uri("https://example.test/file.txt")
         }];
 
         var result = translator.Translate(activity, "tenant");
@@ -1568,7 +1557,7 @@ public sealed class TeamsChannelFoundationTests
         {
             ContentType = TeamsContentType.Html,
             Content = "<pre>normal text</pre>",
-            ThumbnailUrl = "https://rendering.invalid/thumbnail"
+            ThumbnailUrl = new Uri("https://rendering.invalid/thumbnail")
         }];
 
         var result = translator.Translate(activity, "tenant");
@@ -1604,7 +1593,7 @@ public sealed class TeamsChannelFoundationTests
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
         activity.Id = "root";
         activity.Conversation!.Id = "conversation;messageid=root";
-        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
         activity.ChannelData = new TeamsChannelData();
         activity.Attachments = [new TeamsAttachment
         {
@@ -1626,7 +1615,7 @@ public sealed class TeamsChannelFoundationTests
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
         activity.Id = "root";
         activity.Conversation!.Id = "conversation;messageid=root";
-        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
         activity.ChannelData = new TeamsChannelData();
         activity.Attachments = [new TeamsAttachment
         {
@@ -1669,7 +1658,7 @@ public sealed class TeamsChannelFoundationTests
         activity.Attachments = [new TeamsAttachment
         {
             ContentType = TeamsContentType.Text,
-            ContentUrl = "https://example.test/file.txt"
+            ContentUrl = new Uri("https://example.test/file.txt")
         }];
 
         var result = translator.Translate(activity, "tenant");
@@ -1737,7 +1726,7 @@ public sealed class TeamsChannelFoundationTests
         {
             ContentType = TeamsContentType.Html,
             Content = "<pre>normal text</pre>",
-            ContentUrl = $"https://example.test/{new string('a', 2_048)}"
+            ContentUrl = new Uri($"https://example.test/{new string('a', 2_048)}")
         }];
 
         var result = translator.Translate(activity, "tenant");
@@ -1757,7 +1746,7 @@ public sealed class TeamsChannelFoundationTests
         {
             ContentType = TeamsContentType.Html,
             Content = "<pre>normal text</pre>",
-            ContentUrl = string.Empty
+            ContentUrl = new Uri(string.Empty, UriKind.Relative)
         }];
 
         var result = translator.Translate(activity, "tenant");
@@ -1787,8 +1776,8 @@ public sealed class TeamsChannelFoundationTests
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
         activity.Id = "root";
         activity.Conversation!.Id = "conversation;messageid=root";
-        activity.From = new TeamsAccount { Id = "user" };
-        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        ((CoreActivity)activity).From = new TeamsAccount { Id = "user" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
         activity.ChannelData = new TeamsChannelData
         {
             Team = new TeamsTeam { Id = "team" },
@@ -1872,7 +1861,7 @@ public sealed class TeamsChannelFoundationTests
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
         activity.Id = "root";
         activity.Text = "literal bot text";
-        activity.Recipient = new TeamsAccount { Id = "28:bot" };
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
         activity.Conversation!.Id = "conversation;messageid=root";
         activity.Entities = [new MentionEntity
         {
@@ -1951,41 +1940,72 @@ public sealed class TeamsChannelFoundationTests
         return await provider.GetSnapshotAsync(TestContext.Current.CancellationToken);
     }
 
-    private static MessageActivity CreateSdkMessage(TeamsConversationType? type = null)
-        => new("hello")
+    private static MessageActivity CreateSdkMessage(TeamsConversationType? type = null) =>
+        MessageActivity.FromActivity(CoreActivity.FromJsonString(JsonSerializer.Serialize(new
         {
-            Id = "activity",
-            From = new TeamsAccount { Id = "sender" },
-            ServiceUrl = "https://service.invalid/",
-            Conversation = new TeamsConversation { Id = "conversation", TenantId = "tenant", Type = type ?? TeamsConversationType.Personal }
+            type = "message",
+            text = "hello",
+            id = "activity",
+            from = new { id = "sender" },
+            serviceUrl = "https://service.invalid/",
+            conversation = new
+            {
+                id = "conversation",
+                tenantId = "tenant",
+                conversationType = (type ?? TeamsConversationType.Personal).Value
+            }
+        })));
+
+    private static TActivity CreateSdkActivity<TActivity>(string type)
+        where TActivity : TeamsActivity
+    {
+        var activity = new CoreActivity(type);
+        var typedActivity = type switch
+        {
+            "messageUpdate" => MessageUpdateActivity.FromActivity(activity),
+            "messageDelete" => MessageDeleteActivity.FromActivity(activity),
+            "conversationUpdate" => ConversationUpdateActivity.FromActivity(activity),
+            _ => TeamsActivity.FromActivity(activity)
         };
 
-    private static AdaptiveCardsActivity.ActionActivity CreateSdkApprovalAction(string action) => new()
+        return typedActivity as TActivity
+            ?? throw new InvalidOperationException($"The SDK did not create {typeof(TActivity).Name} for '{type}'.");
+    }
+
+    private static InvokeActivity CreateSdkApprovalAction(string action)
     {
-        Id = "approval-action",
-        ReplyToId = "approval-prompt",
-        From = new TeamsAccount { Id = "sender" },
-        ServiceUrl = "https://service.invalid/",
-        Conversation = new TeamsConversation
+        var coreActivity = CoreActivity.FromJsonString(JsonSerializer.Serialize(new
         {
-            Id = "conversation",
-            TenantId = "tenant",
-            Type = TeamsConversationType.Personal
-        },
-        Value = new InvokeValue
-        {
-            Action = new InvokeAction
+            type = "invoke",
+            name = "adaptiveCard/action",
+            id = "approval-action",
+            replyToId = "approval-prompt",
+            from = new { id = "sender" },
+            serviceUrl = "https://service.invalid/",
+            conversation = new
             {
-                Type = ActionType.Execute,
-                Data = new Dictionary<string, object>
+                id = "conversation",
+                tenantId = "tenant",
+                conversationType = TeamsConversationType.Personal.Value
+            },
+            value = new
+            {
+                action = new
                 {
-                    ["correlation"] = "correlation_123",
-                    ["nonce"] = "nonce_123",
-                    ["action"] = action
+                    type = "Action.Execute",
+                    data = new Dictionary<string, object>
+                    {
+                        ["correlation"] = "correlation_123",
+                        ["nonce"] = "nonce_123",
+                        ["action"] = action
+                    }
                 }
             }
-        }
-    };
+        }));
+        var activity = InvokeActivity.FromActivity(coreActivity);
+        ((CoreActivity)activity).Properties[TeamsSdkActivityTranslator.PreservedReplyToActivityIdProperty] = coreActivity.ReplyToId;
+        return activity;
+    }
 
     private static TeamsInboundActivity CreateInboundActivity(string tenantId = "tenant", string conversationId = "conversation", string activityId = "activity")
         => new(

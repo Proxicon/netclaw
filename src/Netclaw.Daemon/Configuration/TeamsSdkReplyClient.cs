@@ -4,10 +4,8 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Net;
-using System.Text.Json;
-using Microsoft.Teams.Api;
-using Microsoft.Teams.Api.Activities;
 using Microsoft.Teams.Apps;
+using Microsoft.Teams.Core.Schema;
 using Netclaw.Channels.Teams;
 
 namespace Netclaw.Daemon.Configuration;
@@ -104,48 +102,63 @@ internal interface ITeamsSdkReplyOperations
 }
 
 internal sealed class TeamsSdkReplyOperations(
-    Microsoft.Teams.Apps.App app) : ITeamsSdkReplyOperations
+    TeamsBotApplication app) : ITeamsSdkReplyOperations
 {
     public async Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken)
     {
-        var activity = new MessageActivity(message.ApprovalCard is null ? message.Text : string.Empty)
-        {
-            ReplyToId = message.ReplyToActivityId
-        };
+        var serviceUrl = new Uri(message.Destination.ServiceUrl, UriKind.Absolute);
+        var activity = new MessageActivityInput()
+            .WithText(message.ApprovalCard is null ? message.Text : string.Empty);
         if (message.ApprovalCard is { } approvalCard)
         {
             var payload = TeamsAdaptiveCardPayloadBuilder.Create(approvalCard);
-            var card = Microsoft.Teams.Cards.AdaptiveCard.Deserialize(JsonSerializer.Serialize(payload))
-                ?? throw new InvalidOperationException("The Teams approval card did not deserialize.");
-            activity.Attachments = [new Attachment(card)];
+            activity.AddAdaptiveCardAttachment(payload);
         }
-        if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
-            throw new HttpRequestException("The Teams update context is unavailable.");
 
-        // The app owns authenticated client credentials. Unlike an inbound SDK
-        // context, it survives the original HTTP request and can send to the
-        // validated destination recovered by the binding actor.
-        var proactiveSent = await app.Send(
-            message.Destination.ConversationId,
-            activity,
-            serviceUrl: message.Destination.ServiceUrl,
-            cancellationToken: cancellationToken);
-        return proactiveSent.Id;
+        // The application owns authenticated client credentials. It survives
+        // the original HTTP request and sends to the validated destination
+        // recovered by the binding actor.
+        if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
+        {
+            var updated = await app.Api
+                .ForServiceUrl(serviceUrl)
+                .Conversations
+                .UpdateActivityAsync(
+                    message.Destination.ConversationId,
+                    message.UpdateActivityId,
+                    activity,
+                    cancellationToken: cancellationToken);
+            return updated.Id;
+        }
+
+        var proactiveSent = string.IsNullOrWhiteSpace(message.ReplyToActivityId)
+            ? await app.SendAsync(
+                message.Destination.ConversationId,
+                activity,
+                serviceUrl,
+                cancellationToken: cancellationToken)
+            : await app.ReplyAsync(
+                message.Destination.ConversationId,
+                message.ReplyToActivityId,
+                activity,
+                serviceUrl,
+                cancellationToken: cancellationToken);
+        return proactiveSent?.Id;
     }
 
     public async Task SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken)
     {
-        var activity = new TypingActivity
+        var activity = new CoreActivityInput("typing")
         {
             ReplyToId = destination.Scope == TeamsConversationScope.Channel
                 ? destination.RootActivityId
                 : null
         };
 
-        await app.Send(
+        await app.SendActivityAsync(
             destination.ConversationId,
             activity,
-            serviceUrl: destination.ServiceUrl,
+            new Uri(destination.ServiceUrl, UriKind.Absolute),
             cancellationToken: cancellationToken);
     }
 }

@@ -5,14 +5,12 @@
 // -----------------------------------------------------------------------
 using System.Collections.Immutable;
 using System.Text.Json;
-using Microsoft.Teams.Api;
-using Microsoft.Teams.Api.Activities;
-using Microsoft.Teams.Api.Activities.Invokes;
-using Microsoft.Teams.Api.Entities;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.Schema.Entities;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
-using MessageActivity = Microsoft.Teams.Api.Activities.MessageActivity;
 
 namespace Netclaw.Daemon.Configuration;
 
@@ -24,8 +22,9 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
 {
     private const int MaxAttachmentContentTypeLength = 255;
     private const int MaxAttachmentContentUrlLength = 2_048;
+    internal const string PreservedReplyToActivityIdProperty = "netclaw.teams.replyToActivityId";
 
-    public TeamsTranslationResult Translate(IActivity activity, string? authenticatedTenantId)
+    public TeamsTranslationResult Translate(TeamsActivity activity, string? authenticatedTenantId)
     {
         ArgumentNullException.ThrowIfNull(activity);
 
@@ -36,7 +35,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             ConversationUpdateActivity => TeamsTranslationResult.Ignored(
                 TeamsIngressActivityKind.ConversationUpdate,
                 "conversation_update_recording_not_implemented"),
-            AdaptiveCards.ActionActivity action => TranslateApprovalAction(action, authenticatedTenantId),
+            InvokeActivity action => TranslateApprovalAction(action, authenticatedTenantId),
             MessageActivity message => TranslateMessage(message, authenticatedTenantId),
             _ => TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Unknown, "unsupported_activity_type")
         };
@@ -48,7 +47,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
     /// investigation. It never returns SDK payload values or platform IDs.
     /// </summary>
     internal TeamsRejectedAttachmentDiagnostic? DescribeRejectedAttachment(
-        IActivity activity,
+        TeamsActivity activity,
         string? authenticatedTenantId,
         TeamsTranslationResult result)
     {
@@ -114,20 +113,20 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 AttachmentHtmlHrefExists: htmlHrefExists,
                 AttachmentHtmlClosingEnvelopeExists: htmlClosingEnvelopeExists,
                 MentionCount: mentions.Length,
-                ReplyToIdExists: !string.IsNullOrWhiteSpace(message.ReplyToId));
+                ReplyToIdExists: !string.IsNullOrWhiteSpace(GetReplyToActivityId(message)));
         }
 
         return null;
     }
 
     private TeamsTranslationResult TranslateApprovalAction(
-        AdaptiveCards.ActionActivity activity,
+        InvokeActivity activity,
         string? authenticatedTenantId)
     {
         if (!TryValidateCommon(activity, authenticatedTenantId, TeamsIngressActivityKind.AdaptiveCardAction, out var scope, out var failure))
             return failure!;
-        var invokeAction = activity.Value?.Action;
-        if (invokeAction is null || !invokeAction.Type.IsExecute)
+        var invokeAction = activity.Value?.Deserialize<AdaptiveCardActionValue>()?.Action;
+        if (invokeAction is null || !string.Equals(invokeAction.Type, "Action.Execute", StringComparison.Ordinal))
         {
             return TeamsTranslationResult.Rejected(
                 TeamsTranslationDisposition.RejectedMalformed,
@@ -160,9 +159,11 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         }
 
         var serviceUrl = activity.ServiceUrl;
-        if (string.IsNullOrWhiteSpace(activity.ReplyToId)
-            || !TeamsSessionIdentifierCodec.IsValidActivityIdentifier(activity.ReplyToId)
-            || !TeamsOutboundDestination.IsValidServiceUrl(serviceUrl))
+        var replyToActivityId = GetReplyToActivityId(activity);
+        if (string.IsNullOrWhiteSpace(replyToActivityId)
+            || !TeamsSessionIdentifierCodec.IsValidActivityIdentifier(replyToActivityId)
+            || serviceUrl is null
+            || !TeamsOutboundDestination.IsValidServiceUrl(serviceUrl.ToString()))
         {
             return TeamsTranslationResult.Rejected(
                 TeamsTranslationDisposition.RejectedMalformed,
@@ -178,8 +179,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             rootActivityId,
             activity.ChannelData?.Team?.Id,
             activity.ChannelData?.Channel?.Id,
-            activity.ReplyToId,
-            serviceUrl!));
+            replyToActivityId,
+            serviceUrl.ToString()));
     }
 
     private TeamsTranslationResult TranslateMessage(MessageActivity activity, string? authenticatedTenantId)
@@ -215,10 +216,10 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "tenant_mismatch");
         }
 
-        var scope = activity.Conversation.Type switch
+        var scope = activity.Conversation.ConversationType switch
         {
-            { IsPersonal: true } => TeamsConversationScope.Personal,
-            { IsChannel: true } => TeamsConversationScope.Channel,
+            var type when type == ConversationType.Personal => TeamsConversationScope.Personal,
+            var type when type == ConversationType.Channel => TeamsConversationScope.Channel,
             _ => (TeamsConversationScope?)null
         };
 
@@ -251,7 +252,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return TeamsTranslationResult.Accepted(new TeamsInboundActivity(
             trust,
             text,
-            new TeamsReplyMetadata(activity.ReplyToId, rootActivityId, activity.ServiceUrl),
+            new TeamsReplyMetadata(GetReplyToActivityId(activity), rootActivityId, activity.ServiceUrl?.ToString()),
             mentioned,
             kind: TeamsIngressActivityKind.Message,
             teamId: activity.ChannelData?.Team?.Id,
@@ -263,7 +264,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
     }
 
     private TeamsTranslationResult TranslateMutation(
-        IActivity activity,
+        TeamsActivity activity,
         string? authenticatedTenantId,
         TeamsIngressActivityKind kind)
     {
@@ -277,30 +278,30 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return TeamsTranslationResult.Accepted(new TeamsInboundActivity(
             CreateTrust(activity, authenticatedTenantId!, scope),
             string.Empty,
-            new TeamsReplyMetadata(activity.ReplyToId, rootActivityId, activity.ServiceUrl),
+            new TeamsReplyMetadata(GetReplyToActivityId(activity), rootActivityId, activity.ServiceUrl?.ToString()),
             kind: kind,
             teamId: activity.ChannelData?.Team?.Id,
             channelId: activity.ChannelData?.Channel?.Id));
     }
 
-    private TeamsIngressTrustContext CreateTrust(IActivity activity, string authenticatedTenantId, TeamsConversationScope scope) => new(
+    private TeamsIngressTrustContext CreateTrust(TeamsActivity activity, string authenticatedTenantId, TeamsConversationScope scope) => new(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
             TrustBoundary.Public,
             new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
-            GetCanonicalSenderId(activity.From),
+            GetCanonicalSenderId(activity.From!),
             authenticatedTenantId,
-            activity.Conversation.Id,
+            activity.Conversation!.Id!,
             scope,
-            activity.Id,
+            activity.Id!,
             timeProvider.GetUtcNow(),
-            activity.Timestamp is { } timestamp ? new DateTimeOffset(timestamp.ToUniversalTime()) : null);
+            ParseActivityTimestamp(activity.Timestamp));
 
-    private static string GetCanonicalSenderId(Account sender) =>
-        string.IsNullOrWhiteSpace(sender.AadObjectId) ? sender.Id : sender.AadObjectId;
+    private static string GetCanonicalSenderId(TeamsChannelAccount sender) =>
+        string.IsNullOrWhiteSpace(sender.AadObjectId) ? sender.Id! : sender.AadObjectId;
 
     private bool TryValidateCommon(
-        IActivity activity,
+        TeamsActivity activity,
         string? authenticatedTenantId,
         TeamsIngressActivityKind kind,
         out TeamsConversationScope scope,
@@ -335,12 +336,12 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             failure = TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, kind, "tenant_mismatch");
             return false;
         }
-        if (activity.Conversation.Type is { IsChannel: true })
+        if (activity.Conversation.ConversationType == ConversationType.Channel)
         {
             scope = TeamsConversationScope.Channel;
             return true;
         }
-        if (activity.Conversation.Type is { IsPersonal: true })
+        if (activity.Conversation.ConversationType == ConversationType.Personal)
         {
             scope = TeamsConversationScope.Personal;
             return true;
@@ -350,7 +351,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return false;
     }
 
-    private static TeamsTranslationResult? RejectUnsupportedAttachments(IList<Attachment>? attachments, bool hasChannelData)
+    private static TeamsTranslationResult? RejectUnsupportedAttachments(IList<TeamsAttachment>? attachments, bool hasChannelData)
     {
         if (attachments is null || attachments.Count == 0)
             return null;
@@ -393,13 +394,13 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
     private static string? GetBoundedAttachmentMetadata(string? value, int maximumLength)
         => value is { Length: > 0 } && value.Length <= maximumLength ? value : null;
 
-    private static TeamsAttachmentEvidence CreateAttachmentEvidence(Attachment attachment, bool hasChannelData)
+    private static TeamsAttachmentEvidence CreateAttachmentEvidence(TeamsAttachment attachment, bool hasChannelData)
     {
         var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup) = GetContentFacts(attachment.Content);
         return new TeamsAttachmentEvidence(
-            GetBoundedAttachmentMetadata(attachment.ContentType?.Value, MaxAttachmentContentTypeLength),
+            GetBoundedAttachmentMetadata(attachment.ContentType?.ToString(), MaxAttachmentContentTypeLength),
             attachment.Name is not null,
-            GetBoundedAttachmentMetadata(attachment.ContentUrl, MaxAttachmentContentUrlLength),
+            GetBoundedAttachmentMetadata(attachment.ContentUrl?.ToString(), MaxAttachmentContentUrlLength),
             attachment.ContentUrl is not null,
             hasEmbeddedContentReference,
             hasEmbeddedGraphBackedContentReference,
@@ -410,10 +411,10 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             hasParagraphRenderingMarkup);
     }
 
-    private TeamsConversationScope? GetScope(IActivity activity) => activity.Conversation?.Type switch
+    private TeamsConversationScope? GetScope(TeamsActivity activity) => activity.Conversation?.ConversationType switch
     {
-        { IsChannel: true } => TeamsConversationScope.Channel,
-        { IsPersonal: true } => TeamsConversationScope.Personal,
+        var type when type == ConversationType.Channel => TeamsConversationScope.Channel,
+        var type when type == ConversationType.Personal => TeamsConversationScope.Personal,
         _ => null
     };
 
@@ -535,7 +536,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                && trimmed.EndsWith("</p>", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static ImmutableArray<TeamsMention> TranslateMentions(IList<IEntity>? entities)
+    private static ImmutableArray<TeamsMention> TranslateMentions(IList<Entity>? entities)
         => entities?.OfType<MentionEntity>()
             .Where(entity => entity.Mentioned is not null && !string.IsNullOrWhiteSpace(entity.Text))
             .Select(entity => new TeamsMention(entity.Type, entity.Mentioned!.Id ?? string.Empty, entity.Text!))
@@ -550,6 +551,18 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
            && !string.IsNullOrWhiteSpace(recipientId)
            && string.Equals(mention.MentionedId, recipientId, StringComparison.Ordinal)
            && string.Equals(mention.MentionedId, $"28:{configuredBotId}", StringComparison.Ordinal);
+
+    private static DateTimeOffset? ParseActivityTimestamp(string? value)
+        => DateTimeOffset.TryParse(value, out var timestamp) ? timestamp : null;
+
+    private static string? GetReplyToActivityId(TeamsActivity activity)
+    {
+        if (!string.IsNullOrWhiteSpace(activity.ReplyToId))
+            return activity.ReplyToId;
+
+        return ((Microsoft.Teams.Core.Schema.CoreActivity)activity).Properties
+            .Get<string>(PreservedReplyToActivityIdProperty);
+    }
 
     private static bool TryGetOpaqueValue(
         IDictionary<string, object>? data,

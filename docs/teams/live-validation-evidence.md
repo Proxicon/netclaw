@@ -1,5 +1,33 @@
 # Microsoft Teams live validation evidence
 
+## Phase 1.1 runtime-modernization handover (2026-08-24)
+
+Status: **OFFLINE IMPLEMENTATION COMPLETE; NOT LIVE VALIDATED**.
+
+The Phase 1.1 branch updates the runtime from Teams SDK .NET 2.0.9's plugin
+host to the stable 2.1.0 native ASP.NET Core host. It keeps the one public
+`/api/messages` endpoint and the existing tenant, ACL, body-limit, rate-limit,
+actor, persistence, approval, and outbound contracts. The SDK's native typed
+handlers now terminate at `TeamsSdkActivityTranslator`; session and approval
+authority remain Netclaw-owned.
+
+The existing `Teams` settings and secret-backed `Teams.ClientSecret` remain the
+deployment configuration. SDK 2.1 maps that compatibility section to its
+native `AzureAd` client-credential authentication model. No Azure Bot, Entra
+application, Teams package, tenant, URL, Traefik route, or customer credential
+change is required by this library migration.
+
+The branch base `93df44f924d0f2321b4a7c9ba29d865478ed61a6` is the immediate
+rollback point. Phase 1.1 makes no Teams persistence-format or schema change;
+an operator can roll back by deploying the prior known-good image/commit.
+
+After operator deployment, run one controlled interaction at a time: Personal
+message, genuine-mentioned Posts root, genuine-mentioned Threads root,
+same-human established-root continuation, native typing, one Deny and one Once
+approval in each permitted scope, and a duplicate approval callback. Record
+only counters and structural outcomes. Stop at the first failed boundary and
+do not test persistent approval grants without explicit approval.
+
 ## 2026-08-23 standard channel roots
 
 The deployed development source was `f5d4f5ef5393656a85ba668c11d43dbc53346523`.

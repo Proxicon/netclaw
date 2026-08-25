@@ -6,12 +6,15 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Teams.Apps.Diagnostics;
+using Microsoft.Teams.Core.Diagnostics;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
 using OpenTelemetry;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 namespace Netclaw.Daemon.Configuration;
 
@@ -59,10 +62,19 @@ public static class TelemetryRegistrationExtensions
 
         builder.Services.AddOpenTelemetry()
             .ConfigureResource(rb => rb.AddAttributes(resource.Attributes))
+            .WithTracing(tracing =>
+            {
+                tracing.AddAspNetCoreInstrumentation();
+                tracing.AddSource(CoreTelemetryNames.ActivitySourceName);
+                tracing.AddSource(TeamsBotApplicationTelemetry.ActivitySourceName);
+                tracing.AddOtlpExporter(otlp => otlp.Endpoint = endpoint);
+            })
             .WithMetrics(metrics =>
             {
                 metrics.AddMeter(ChannelTelemetry.MeterName);
                 metrics.AddMeter(SessionTelemetry.MeterName);
+                metrics.AddMeter(CoreTelemetryNames.MeterName);
+                metrics.AddMeter(TeamsBotApplicationTelemetry.MeterName);
                 metrics.AddOtlpExporter(otlp => otlp.Endpoint = endpoint);
             });
     }
