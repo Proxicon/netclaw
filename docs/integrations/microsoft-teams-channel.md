@@ -250,6 +250,52 @@ nonce, expiry, and persisted offered key before it accepts a decision.
 Teams approval cards do not accept letter replies. Use a card button. This
 keeps the signed card callback as the only decision path.
 
+### Channel-binding parity
+
+Before a validated Teams activity enters a session, Netclaw applies the shared
+prompt-injection classifier. A high-risk result is blocked and an unavailable
+classifier fails closed. Teams does not fetch Graph message history, so it does
+not perform channel-history hydration or backfill; that capability remains
+unavailable until it has an authenticated, ordered, bounded history source.
+
+Ordinary text and error output use the shared channel output lifecycle and
+normal Teams delivery uses the shared safe transport failure path. Native
+typing, proactive delivery, and Adaptive Cards remain Teams transport concerns.
+
+An expired card does not send an implicit Deny to the session. Netclaw replaces
+the opaque nonce binding with a fresh card while preserving the pending
+session-owned approval. The old card cannot authorize an action; the replacement
+card may be selected once by the original approved requester.
+
+Team shell access requires all of these explicit conditions: the host permits
+shell execution, the Team audience profile lists `execute_shell`, and that
+profile requires approval for `execute_shell`. `ToolsMode.All` and a default
+approval policy do not satisfy this Team gate.
+
+The minimum policy addition is independent of the Teams transport settings:
+
+```json
+{
+  "Tools": {
+    "ShellMode": "HostAllowed",
+    "AudienceProfiles": {
+      "Team": {
+        "AllowedTools": ["execute_shell"],
+        "ApprovalPolicy": {
+          "ToolOverrides": {
+            "execute_shell": "Approval"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+This is policy, not a persistent grant. Persistent approvals remain in
+`~/.netclaw/config/tool-approvals.json` and are managed by the core approval
+store. Do not add this policy merely to force a Teams smoke test.
+
 ## Health checks
 
 Run these checks after each deployment or secret rotation:

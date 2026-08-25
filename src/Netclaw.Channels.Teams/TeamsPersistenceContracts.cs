@@ -35,6 +35,17 @@ public sealed record TeamsApprovalCardDelivered : ITeamsPersistenceMessage
     public string PromptId { get; init; } = string.Empty;
 }
 
+/// <summary>
+/// Replaces an expired Adaptive Card binding while leaving the session-owned
+/// approval request pending. The raw nonce never enters durable state.
+/// </summary>
+public sealed record TeamsApprovalCardReissued : ITeamsPersistenceMessage
+{
+    public string CorrelationId { get; init; } = string.Empty;
+    public string NonceHash { get; init; } = string.Empty;
+    public long ExpiresAtUnixMilliseconds { get; init; }
+}
+
 public sealed record TeamsApprovalConsumed : ITeamsPersistenceMessage
 {
     public string CorrelationId { get; init; } = string.Empty;

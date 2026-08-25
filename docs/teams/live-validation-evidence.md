@@ -1,5 +1,27 @@
 # Microsoft Teams live validation evidence
 
+## Channel-binding and approval parity (2026-08-25)
+
+Status: **OFFLINE IMPLEMENTATION COMPLETE; NOT LIVE VALIDATED**.
+
+This change adds shared prompt-injection classification before Teams session
+dispatch and routes ordinary output through the common channel output lifecycle.
+It also uses the shared approval-response algorithm after Teams validates its
+transport-specific callback binding. Teams retains its native Adaptive Card,
+opaque nonce, destination, typing, and proactive-delivery responsibilities.
+
+Expiry now reissues a transport card with a fresh nonce while leaving the core
+approval pending. It does not manufacture a core Deny. Offline tests cover a
+stale old card being rejected, the replacement card resolving once, duplicate
+replacement actions being idempotent, detector failure failing closed, and the
+explicit Team shell-plus-approval policy gate.
+
+No Graph history source was configured or added. There is therefore no Teams
+history backfill claim in this change. No tenant, package, route, deployment,
+or live configuration was changed. Repeat the controlled Personal, Posts, and
+Threads approval smoke matrix after deployment, including one expired-card
+replacement action; record only sanitized structural outcomes.
+
 ## Phase 1.1 runtime-modernization handover (2026-08-24)
 
 Status: **OFFLINE IMPLEMENTATION COMPLETE; NOT LIVE VALIDATED**.

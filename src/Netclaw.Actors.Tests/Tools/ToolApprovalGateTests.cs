@@ -44,10 +44,83 @@ public sealed class ToolApprovalGateTests
         TestToolExecutionContext.CreateBound(sessionId, null, new TestToolExecutionContextOptions
         { Audience = TrustAudience.Personal, InteractiveApproval = TestToolExecutionContext.InteractiveApproval(supportsApproval) });
 
+    private static ToolExecutionContext TeamContext(bool supportsApproval = true) =>
+        TestToolExecutionContext.CreateBound("teams/thread-1", null, new TestToolExecutionContextOptions
+        {
+            Audience = TrustAudience.Team,
+            Boundary = TrustBoundary.Team,
+            ChannelType = "teams",
+            InteractiveApproval = TestToolExecutionContext.InteractiveApproval(supportsApproval)
+        });
+
     private static INetclawTool ShellTool()
     {
         var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
         return new ShellTool(config, new ToolPathPolicy([]), new ShellCommandPolicy());
+    }
+
+    [Fact]
+    public void Team_shell_requires_every_explicit_opt_in_gate()
+    {
+        var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        config.AudienceProfiles.Team.AllowedTools.Add(global::Netclaw.Actors.Tools.ShellTool.ToolName);
+        config.AudienceProfiles.Team.ApprovalPolicy = new ToolApprovalConfig
+        {
+            ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                [global::Netclaw.Actors.Tools.ShellTool.ToolName] = ToolApprovalMode.Approval
+            }
+        };
+        var commandPolicy = new ShellCommandPolicy();
+        var pathPolicy = new ToolPathPolicy([]);
+        var policy = new ToolAccessPolicy(config, Defaults(), commandPolicy, pathPolicy);
+        var tool = new ShellTool(config, pathPolicy, commandPolicy);
+
+        var configured = policy.AuthorizeInvocation(
+            tool,
+            TeamContext(),
+            ToolInput.Create("Command", "git status"));
+
+        Assert.True(configured.NeedsApproval);
+
+        var unavailableInteraction = policy.AuthorizeInvocation(
+            tool,
+            TeamContext(supportsApproval: false),
+            ToolInput.Create("Command", "git status"));
+        Assert.False(unavailableInteraction.Allowed);
+        Assert.Equal("shell_requires_team_approval_configuration", unavailableInteraction.DenyReason);
+
+        config.AudienceProfiles.Team.ApprovalPolicy.ToolOverrides[global::Netclaw.Actors.Tools.ShellTool.ToolName] = ToolApprovalMode.Auto;
+        var auto = policy.AuthorizeInvocation(
+            tool,
+            TeamContext(),
+            ToolInput.Create("Command", "git status"));
+        Assert.False(auto.Allowed);
+        Assert.Equal("shell_requires_team_approval_configuration", auto.DenyReason);
+    }
+
+    [Fact]
+    public void Team_shell_does_not_use_tools_mode_all_or_default_approval_policy()
+    {
+        var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        config.AudienceProfiles.Team.ToolsMode = ToolProfileMode.All;
+        config.AudienceProfiles.Team.ApprovalPolicy = new ToolApprovalConfig
+        {
+            DefaultMode = ToolApprovalMode.Approval
+        };
+        var commandPolicy = new ShellCommandPolicy();
+        var pathPolicy = new ToolPathPolicy([]);
+        var policy = new ToolAccessPolicy(config, Defaults(), commandPolicy, pathPolicy);
+        var tool = new ShellTool(config, pathPolicy, commandPolicy);
+
+        Assert.False(policy.IsToolExposed(tool, TrustAudience.Team));
+
+        var decision = policy.AuthorizeInvocation(
+            tool,
+            TeamContext(),
+            ToolInput.Create("Command", "git status"));
+        Assert.False(decision.Allowed);
+        Assert.Equal("shell_requires_team_approval_configuration", decision.DenyReason);
     }
 
     [Fact]

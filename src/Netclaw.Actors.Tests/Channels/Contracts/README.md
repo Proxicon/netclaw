@@ -15,6 +15,7 @@ Slack and Discord implement identical security logic independently: ACL policies
 | `GatewayRoutingContractTests` | 3 | Yes | Message routing, duplicate event filtering, ACL enforcement at gateway |
 | `RoutingPolicyContractTests` | 11 | No | Inbound routing policy: mention gating, thread continuation/rehydration, DM matrix, empty content |
 | `SessionBindingContractTests` | 16 | Yes | Prompt injection gate, approval flows, output rendering, failure notification, pipeline lifecycle |
+| `TeamsPersonalRoutingTests` | 71 | Yes | Equivalent Teams binding fixture: SDK-free trusted ingress, injection gate, native card replay/expiry, shared approval outcomes, output/turn lifecycle, delivery-failure supervision, and restart recovery. Teams history hydration is N/A because no authenticated ordered history source exists. |
 | `ChannelHealthContractTests` | 3 | Yes | `IChannel.GetHealthAsync`: healthy when connected+ready, disconnected with a reason, degraded when disabled |
 | `SnapshotChannelHealthContractTests` | +2 | Yes | Snapshot transports only (Discord, Mattermost): degraded when connected-but-not-ready, health detail propagated from the transport snapshot. Slack's socket-mode transport is binary and implements only the base health contract |
 | `ChannelShutdownContractTests` | 1 | No | `IChannel.StopAsync` must not propagate a failing transport disconnect — shutdown teardown races (dead actor system on SIGTERM) are expected, and a throw becomes a false `daemon-main` crash. Fixtures wire a timing-out fake transport and assert `StopAsync` completes |

@@ -25,6 +25,12 @@ message TeamsApprovalCardDeliveredProto {
   string prompt_id = 2;
 }
 
+message TeamsApprovalCardReissuedProto {
+  string correlation_id = 1;
+  string nonce_hash = 2;
+  int64 expires_at_unix_milliseconds = 3;
+}
+
 message TeamsApprovalConsumedProto {
   string correlation_id = 1;
   string decision = 2;
