@@ -46,6 +46,19 @@ public sealed record TeamsApprovalCardReissued : ITeamsPersistenceMessage
     public long ExpiresAtUnixMilliseconds { get; init; }
 }
 
+/// <summary>
+/// Records a validated card selection that must be re-driven to the
+/// session-authoritative approval handler. It is not a grant or a terminal
+/// decision: terminal consumption is written only after the session responds.
+/// </summary>
+public sealed record TeamsApprovalForwardingStarted : ITeamsPersistenceMessage
+{
+    public string CorrelationId { get; init; } = string.Empty;
+    public string Decision { get; init; } = string.Empty;
+    public string SenderId { get; init; } = string.Empty;
+    public long StartedAtUnixMilliseconds { get; init; }
+}
+
 public sealed record TeamsApprovalConsumed : ITeamsPersistenceMessage
 {
     public string CorrelationId { get; init; } = string.Empty;
@@ -66,6 +79,8 @@ public sealed record TeamsApprovalSnapshotEntry
     public string ToolName { get; init; } = string.Empty;
     public string RequestDisplayText { get; init; } = string.Empty;
     public string? PromptId { get; init; }
+    public string? ForwardingDecision { get; init; }
+    public string? ForwardingSenderId { get; init; }
     public string? Decision { get; init; }
 }
 

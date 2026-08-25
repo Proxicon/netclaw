@@ -42,6 +42,7 @@ public enum ApprovalResponseDisposition
 {
     Accepted,
     WrongRequester,
+    NoLongerPending,
     Rejected,
     FeedbackFailed,
     UnexpectedResponse
@@ -50,8 +51,8 @@ public enum ApprovalResponseDisposition
 /// <summary>
 /// Shared approval-response handling for the channel binding actors. The flow
 /// owns text-approval parsing, the cold-spawn text path, pending-prompt
-/// resolution, and the requester identity check. Slack, Discord, and Mattermost
-/// supply the transport effects; the algorithm has one implementation here.
+/// resolution, and the requester identity check. Channel binding actors supply
+/// the transport effects; the algorithm has one implementation here.
 /// </summary>
 /// <remarks>
 /// The flow holds no Akka state. It does not persist an event and it does not
@@ -325,9 +326,12 @@ public sealed class ApprovalResponseFlow<TRequest, TPromptId>
                     callId,
                     nack.Reason ?? "<none>");
                 respondSynchronously?.Invoke(nack);
-                return string.Equals(nack.Reason, ApprovalNackReasons.WrongRequester, StringComparison.Ordinal)
-                    ? ApprovalResponseDisposition.WrongRequester
-                    : ApprovalResponseDisposition.Rejected;
+                return nack.Reason switch
+                {
+                    ApprovalNackReasons.WrongRequester => ApprovalResponseDisposition.WrongRequester,
+                    ApprovalNackReasons.NoHistory or ApprovalNackReasons.PromptExpired => ApprovalResponseDisposition.NoLongerPending,
+                    _ => ApprovalResponseDisposition.Rejected
+                };
 
             case CommandAck ok:
                 ack = ok;

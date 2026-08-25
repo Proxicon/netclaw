@@ -14,7 +14,7 @@ Expiry now reissues a transport card with a fresh nonce while leaving the core
 approval pending. It does not manufacture a core Deny. Offline tests cover a
 stale old card being rejected, the replacement card resolving once, duplicate
 replacement actions being idempotent, detector failure failing closed, and the
-explicit Team shell-plus-approval policy gate.
+feedback-failure forwarding/recovery path preserving one session decision.
 
 No Graph history source was configured or added. There is therefore no Teams
 history backfill claim in this change. No tenant, package, route, deployment,

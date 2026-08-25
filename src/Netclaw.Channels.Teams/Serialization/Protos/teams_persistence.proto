@@ -31,6 +31,13 @@ message TeamsApprovalCardReissuedProto {
   int64 expires_at_unix_milliseconds = 3;
 }
 
+message TeamsApprovalForwardingStartedProto {
+  string correlation_id = 1;
+  string decision = 2;
+  string sender_id = 3;
+  int64 started_at_unix_milliseconds = 4;
+}
+
 message TeamsApprovalConsumedProto {
   string correlation_id = 1;
   string decision = 2;
@@ -50,6 +57,8 @@ message TeamsApprovalSnapshotEntryProto {
   bool is_mcp_tool = 10;
   string tool_name = 11;
   string request_display_text = 12;
+  optional string forwarding_decision = 13;
+  optional string forwarding_sender_id = 14;
 }
 
 message TeamsProactiveDestinationCapturedProto {

@@ -728,6 +728,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Recover<TeamsApprovalPendingCreated>(ApplyApprovalPendingCreated);
         Recover<TeamsApprovalCardDelivered>(ApplyApprovalCardDelivered);
         Recover<TeamsApprovalCardReissued>(ApplyApprovalCardReissued);
+        Recover<TeamsApprovalForwardingStarted>(ApplyApprovalForwardingStarted);
         Recover<TeamsApprovalConsumed>(ApplyApprovalConsumed);
         Recover<TeamsProactiveDestinationCaptured>(ApplyDestinationCaptured);
         Recover<TeamsProactiveDeliveryRecorded>(ApplyProactiveDeliveryRecorded);
@@ -735,6 +736,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Recover<RecoveryCompleted>(_ =>
         {
             Self.Tell(new MarkRecoveredProactiveDeliveriesUnknown());
+            Self.Tell(new RecoverPendingApprovalForwardsCommand());
             if (_requiresMigrationSnapshot)
                 Self.Tell(new SaveTeamsMigrationSnapshot());
         });
@@ -755,6 +757,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Command<GetTeamsBindingProactiveDiagnostics>(_ => Sender.Tell(CreateProactiveDiagnostics()));
         CommandAsync<TeamsBindingApprovalAction>(HandleApprovalActionAsync);
         CommandAsync<ForwardTeamsApprovalDecision>(ForwardApprovalDecisionAsync);
+        Command<RecoverPendingApprovalForwardsCommand>(_ => RecoverPendingApprovalForwards());
         CommandAsync<DenyTeamsApprovalRequest>(DenyApprovalRequestAsync);
         CommandAsync<DispatchReservedActivity>(DispatchReservedActivityAsync);
         Command<BeginTeamsReminderDispatch>(BeginReminderDispatch);
@@ -1581,6 +1584,16 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                     PromptId = approval.PromptId
                 });
             }
+            if (approval.ForwardingDecision is not null)
+            {
+                ApplyApprovalForwardingStarted(new TeamsApprovalForwardingStarted
+                {
+                    CorrelationId = approval.CorrelationId,
+                    Decision = approval.ForwardingDecision,
+                    SenderId = approval.ForwardingSenderId ?? approval.RequesterSenderId ?? string.Empty,
+                    StartedAtUnixMilliseconds = 1
+                });
+            }
             if (approval.Decision is not null)
             {
                 ApplyApprovalConsumed(new TeamsApprovalConsumed
@@ -1755,6 +1768,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             ToolName = pending.ToolName,
             RequestDisplayText = pending.RequestDisplayText,
             PromptId = pending.PromptId,
+            ForwardingDecision = pending.ForwardingDecision,
+            ForwardingSenderId = pending.ForwardingSenderId,
             Decision = pending.Decision
         }).ToArray(),
         Destination = _destination is null ? null : ToCapturedDestination(_destination, _destinationGeneration),
@@ -2296,19 +2311,39 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return Task.CompletedTask;
         }
 
+        if (pending.ForwardingDecision is not null)
+        {
+            if (!string.Equals(pending.ForwardingDecision, action.Action, StringComparison.Ordinal))
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_retry_mismatch");
+                Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+                return Task.CompletedTask;
+            }
+
+            Self.Tell(new ForwardTeamsApprovalDecision(
+                pending.CorrelationId,
+                pending.ForwardingDecision,
+                pending.ForwardingSenderId!,
+                action.Nonce,
+                Sender));
+            return Task.CompletedTask;
+        }
+
         var replyTo = Sender;
-        Persist(new TeamsApprovalConsumed
+        Persist(new TeamsApprovalForwardingStarted
         {
             CorrelationId = pending.CorrelationId,
             Decision = action.Action,
-            ConsumedAtUnixMilliseconds = _dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds()
-        }, consumed =>
+            SenderId = action.Trust.SenderId,
+            StartedAtUnixMilliseconds = _dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds()
+        }, forwarding =>
         {
-            ApplyApprovalConsumed(consumed);
+            ApplyApprovalForwardingStarted(forwarding);
             Self.Tell(new ForwardTeamsApprovalDecision(
                 pending.CorrelationId,
                 action.Action,
                 action.Trust.SenderId,
+                action.Nonce,
                 replyTo));
         });
         return Task.CompletedTask;
@@ -2317,7 +2352,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private async Task ForwardApprovalDecisionAsync(ForwardTeamsApprovalDecision decision)
     {
         if (!_pendingApprovals.TryGetValue(decision.CorrelationId, out var pending)
-            || !string.Equals(pending.Decision, decision.Action, StringComparison.Ordinal))
+            || pending.Decision is not null
+            || !string.Equals(pending.ForwardingDecision, decision.Action, StringComparison.Ordinal))
         {
             decision.ReplyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Unavailable));
             return;
@@ -2331,28 +2367,96 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         switch (result)
         {
             case ApprovalResponseDisposition.Accepted:
-                ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_action_accepted");
-                decision.ReplyTo.Tell(new TeamsApprovalActionResult(
-                    TeamsApprovalActionDisposition.Accepted,
-                    CreateTerminalCard(pending, FormatApprovalDecision(pending, decision.Action))));
+                PersistApprovalConsumed(
+                    pending,
+                    decision.Action,
+                    () =>
+                    {
+                        ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_action_accepted");
+                        decision.ReplyTo.Tell(new TeamsApprovalActionResult(
+                            TeamsApprovalActionDisposition.Accepted,
+                            CreateTerminalCard(pending, FormatApprovalDecision(pending, decision.Action))));
+                    });
                 return;
 
             case ApprovalResponseDisposition.WrongRequester:
                 decision.ReplyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
                 return;
 
+            case ApprovalResponseDisposition.NoLongerPending:
+                PersistApprovalConsumed(
+                    pending,
+                    decision.Action,
+                    () => decision.ReplyTo.Tell(new TeamsApprovalActionResult(
+                        TeamsApprovalActionDisposition.Unavailable,
+                        CreateTerminalCard(pending, "This approval is no longer available."))));
+                return;
+
             case ApprovalResponseDisposition.FeedbackFailed:
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_feedback_failed");
-                break;
+                ReplyWithRetryableApproval(pending, decision);
+                return;
 
             default:
                 ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_session_rejected");
-                break;
+                ReplyWithRetryableApproval(pending, decision);
+                return;
+        }
+    }
+
+    private void PersistApprovalConsumed(TeamsPendingApproval pending, string decision, Action onPersisted)
+    {
+        Persist(new TeamsApprovalConsumed
+        {
+            CorrelationId = pending.CorrelationId,
+            Decision = decision,
+            ConsumedAtUnixMilliseconds = _dependencies.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds()
+        }, consumed =>
+        {
+            ApplyApprovalConsumed(consumed);
+            onPersisted();
+        });
+    }
+
+    private void ReplyWithRetryableApproval(
+        TeamsPendingApproval pending,
+        ForwardTeamsApprovalDecision decision)
+    {
+        if (decision.Nonce is { } nonce)
+        {
+            decision.ReplyTo.Tell(new TeamsApprovalActionResult(
+                TeamsApprovalActionDisposition.Unavailable,
+                TeamsApprovalCardRenderer.CreatePending(CreateApprovalRequest(pending), pending.CorrelationId, nonce)));
+            return;
         }
 
-        decision.ReplyTo.Tell(new TeamsApprovalActionResult(
-            TeamsApprovalActionDisposition.Unavailable,
-            CreateTerminalCard(pending, "This approval is no longer available.")));
+        var replacementNonce = TeamsApprovalCardRenderer.CreateNonce();
+        var replacementExpiry = _dependencies.TimeProvider.GetUtcNow().AddMinutes(15);
+        Persist(new TeamsApprovalCardReissued
+        {
+            CorrelationId = pending.CorrelationId,
+            NonceHash = TeamsApprovalCardRenderer.HashNonce(replacementNonce),
+            ExpiresAtUnixMilliseconds = replacementExpiry.ToUnixTimeMilliseconds()
+        }, reissued =>
+        {
+            ApplyApprovalCardReissued(reissued);
+            Self.Tell(new DeliverTeamsApprovalCard(pending.CorrelationId, replacementNonce));
+        });
+    }
+
+    private void RecoverPendingApprovalForwards()
+    {
+        foreach (var pending in _pendingApprovals.Values
+                     .Where(static pending => pending.Decision is null && pending.ForwardingDecision is not null)
+                     .ToArray())
+        {
+            Self.Tell(new ForwardTeamsApprovalDecision(
+                pending.CorrelationId,
+                pending.ForwardingDecision!,
+                pending.ForwardingSenderId!,
+                Nonce: null,
+                ActorRefs.Nobody));
+        }
     }
 
     private static TeamsApprovalCard CreateTerminalCard(TeamsPendingApproval pending, string text) =>
@@ -2369,7 +2473,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         CallId = new ToolCallId(pending.CallId),
         ToolName = new ToolName(pending.ToolName),
         DisplayText = pending.RequestDisplayText,
-        Options = pending.OfferedOptionKeys.Select(key => new ToolInteractionOption(
+        Options = (pending.ForwardingDecision is { } forwardingDecision
+                ? new[] { forwardingDecision }
+                : pending.OfferedOptionKeys)
+            .Select(key => new ToolInteractionOption(
             new ApprovalOptionKey(key),
             ApprovalOptionKeys.LabelFor(key, pending.IsMcpTool))).ToArray(),
         RequesterSenderId = pending.RequesterSenderId is { } senderId ? new SenderId(senderId) : null,
@@ -2507,7 +2614,31 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             throw new InvalidOperationException("The Teams approval terminal state is invalid.");
         }
 
-        _pendingApprovals[consumed.CorrelationId] = pending with { Decision = consumed.Decision };
+        _pendingApprovals[consumed.CorrelationId] = pending with
+        {
+            ForwardingDecision = null,
+            ForwardingSenderId = null,
+            Decision = consumed.Decision
+        };
+    }
+
+    private void ApplyApprovalForwardingStarted(TeamsApprovalForwardingStarted forwarding)
+    {
+        if (!_pendingApprovals.TryGetValue(forwarding.CorrelationId, out var pending)
+            || pending.Decision is not null
+            || pending.ForwardingDecision is not null
+            || !IsValidPersistedDecision(pending, forwarding.Decision)
+            || string.IsNullOrWhiteSpace(forwarding.SenderId)
+            || forwarding.StartedAtUnixMilliseconds <= 0)
+        {
+            throw new InvalidOperationException("The Teams approval forwarding state is invalid.");
+        }
+
+        _pendingApprovals[forwarding.CorrelationId] = pending with
+        {
+            ForwardingDecision = forwarding.Decision,
+            ForwardingSenderId = forwarding.SenderId
+        };
     }
 
     private static bool HasValidOfferedOptionKeys(IReadOnlyList<string> optionKeys)
@@ -2581,7 +2712,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         string CorrelationId,
         string Action,
         string SenderId,
+        string? Nonce,
         IActorRef ReplyTo) : INoSerializationVerificationNeeded;
+
+    private sealed record RecoverPendingApprovalForwardsCommand : INoSerializationVerificationNeeded;
 
     private sealed record TeamsPendingApproval(
         string CallId,
@@ -2595,6 +2729,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         string ToolName,
         string RequestDisplayText,
         string? PromptId = null,
+        string? ForwardingDecision = null,
+        string? ForwardingSenderId = null,
         string? Decision = null);
 
     private sealed class TeamsDeliveryException(TeamsDeliveryResult result) : Exception(

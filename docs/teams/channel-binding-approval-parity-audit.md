@@ -20,33 +20,33 @@ bindings and their shared contract fixtures.
 | Pending approval matching, requester verification, cold-spawn forwarding, and exact selected key | Non-compliant | Teams independently validates card state and forwards a result. Use `PendingApprovalLookup` and `ApprovalResponseFlow` for the shared requester/session response lifecycle while retaining correlation, nonce hash, and card locator as transport state. |
 | Earliest pending text response and text approval fallback | Non-compliant | Teams has interactive cards only. Support shared text parsing/cold spawn behavior where the channel can receive text, without changing the session-owned policy/options. |
 | Approval card rendering and opaque callback payloads | Behaviorally compliant but duplicated | Teams must retain its Adaptive Card renderer, opaque correlation/nonce validation, prompt locator, and native terminal-card response. It must not derive policy, reorder options, or store raw nonce/tool arguments. |
-| Consume-once replay handling | Behaviorally compliant but duplicated | Teams persists `TeamsApprovalConsumed`, but the pre-change forward occurs after terminal persistence and swallows feedback failure. Preserve durable consumption while make session acceptance the terminal authority and keep repeated actions deterministic. |
+| Consume-once replay handling | Non-compliant | Teams persisted `TeamsApprovalConsumed` before the session acknowledgement, so a feedback failure could strand a core pending approval. Use bounded forwarding state and write terminal consumption only after the session response. |
 | Card-token expiry | Non-compliant | The current 15-minute transport expiry persists `expired` and forwards core `Deny`. Replace this with deterministic card reissue while the session approval remains pending. An expired card cannot authorize; it also cannot manufacture a core decision. |
 | Generic approval pause/recovery | Already shared/compliant | The session approval bridge and journal own pending calls and wait indefinitely. Teams must use that authority rather than ending a session wait on card expiry. |
-| Team shell approval capability | Non-compliant | `ToolAccessPolicy` currently permits host shell only for Personal. Add a generic Team-audience opt-in gate: HostAllowed, explicit Team `AllowedTools` entry, exact Team `ApprovalPolicy.ToolOverrides[shell_execute] = Approval`, and available interactive capability. All other combinations remain denied. |
+| Core tool eligibility | Already shared/compliant | `ToolAccessPolicy` intentionally keeps host shell Personal-only. Teams must not add an exception; approval presentation begins only after the core pipeline finds a tool eligible. |
 | Persistent grant versus policy storage | Already shared/compliant | `ToolApprovalConfig` remains policy in `netclaw.json`; `ToolApprovalStore` remains grants in `tool-approvals.json`. Teams must only pass the exact selected session option and never mutate either store. |
 | Cross-channel binding contracts | Non-compliant | Teams has targeted daemon tests but no subclasses of the shared channel contract bases. Add Teams fixtures for the compatible contract surface and update the contract inventory. |
 
 ## Implementation plan
 
-1. Add a generic Team shell opt-in predicate to `ToolAccessPolicy`, including
-   explicit configuration and interactive-capability gates, with core policy tests
-   independent of Teams and an approval-pipeline integration test with a Teams
-   Team-audience turn.
-2. Extend the Teams dependency contract additively with the shared injection
+1. Extend the Teams dependency contract additively with the shared injection
    detector and apply `PromptClassifier` before Teams can enqueue a model turn.
-3. Refactor the Teams approval path to use shared pending-request lookup and
+2. Refactor the Teams approval path to use shared pending-request lookup and
    session-response flow while preserving durable Teams card correlation,
    nonce-hash, locator, delivery, and replay records.
-4. Convert card expiry into a reissue flow. Persist the new card binding before
+3. Convert card expiry into a reissue flow. Persist the new card binding before
    accepting it, reject stale nonce actions, and forward only an explicit option
    accepted by the session.
-5. Add contract coverage and focused Teams replay/expiry/injection tests, then
+4. Preserve failed callback forwarding as bounded transport state, return a
+   retryable same-option presentation, and re-drive uncertain forwarding after
+   restart without executing the selected option twice.
+5. Add contract coverage and focused Teams replay/expiry/injection/feedback
+   recovery tests, then
    update the OpenSpec deltas and minimal Teams configuration documentation.
 
 No live tenant or Graph history test is part of this change. The post-refactor
 retest delta is limited to unit and integration evidence for the changed
-inbound-classification, approval-reissue, and Team-shell paths.
+inbound-classification, approval-reissue, and approval-feedback-recovery paths.
 
 ## Result after implementation
 
@@ -59,8 +59,11 @@ effort.
 Adaptive Card correlation, nonce validation, offered-key validation, and
 durable consume/replay state remain Teams transport state. Once that boundary
 accepts a card action, the shared `ApprovalResponseFlow` owns requester lookup
-and the session acknowledgement. Card expiry now persists a replacement nonce
-hash and reissues a card without emitting a core approval decision.
+and the session acknowledgement. Teams records a selected option only as a
+bounded forwarding state until that acknowledgement arrives; feedback failure
+returns a retryable same-option card and restart re-drives the same option.
+Card expiry persists a replacement nonce hash and reissues a card without
+emitting a core approval decision.
 
 Teams has no authenticated, ordered, bounded history source, so gap hydration
 remains not applicable. `TeamsSessionBindingContractTests` now places the
