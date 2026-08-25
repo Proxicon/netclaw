@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Net;
+using System.Text.Json;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Core.Schema;
 using Netclaw.Channels.Teams;
@@ -169,27 +170,25 @@ internal static class TeamsAdaptiveCardPayloadBuilder
     {
         ArgumentNullException.ThrowIfNull(approvalCard);
 
-        var title = new Dictionary<string, object?>
-        {
-            ["type"] = "TextBlock", ["text"] = approvalCard.Title,
-            ["size"] = "Medium", ["weight"] = "Bolder", ["wrap"] = true
-        };
-        if (approvalCard.Tone != TeamsApprovalCardTone.Default)
-            title["color"] = ToWireColor(approvalCard.Tone);
+        var body = new List<object?> { CreateHeader(approvalCard) };
+        if (!string.IsNullOrWhiteSpace(approvalCard.Banner))
+            body.Add(CreateBanner(approvalCard.Banner, approvalCard.Tone));
 
-        var body = new List<object?> { title };
         if (approvalCard.Fields.Count > 0)
         {
-            body.AddRange(approvalCard.Fields.Select(CreateField));
-            if (!string.IsNullOrWhiteSpace(approvalCard.Summary))
-                body.Add(CreateSummary(approvalCard.Summary));
-        }
-        else if (!string.IsNullOrWhiteSpace(approvalCard.Body))
-        {
-            body.Add(CreateSummary(approvalCard.Body));
+            body.Add(CreateTable(approvalCard.Fields));
         }
 
-        return new Dictionary<string, object?>
+        if (!string.IsNullOrWhiteSpace(approvalCard.Summary)
+            && !string.Equals(approvalCard.Summary, approvalCard.Banner, StringComparison.Ordinal))
+        {
+            body.Add(CreateContextSummary(approvalCard.Summary));
+        }
+
+        if (!string.IsNullOrWhiteSpace(approvalCard.Footer))
+            body.Add(CreateFooter(approvalCard.Footer, approvalCard.Tone));
+
+        var payload = new Dictionary<string, object?>
         {
             ["$schema"] = TeamsApprovalCard.Schema,
             ["type"] = "AdaptiveCard",
@@ -209,26 +208,34 @@ internal static class TeamsAdaptiveCardPayloadBuilder
                 }
             }).ToArray()
         };
+        if (!string.IsNullOrWhiteSpace(approvalCard.Speak))
+            payload["speak"] = approvalCard.Speak;
+
+        if (JsonSerializer.SerializeToUtf8Bytes(payload).Length > TeamsApprovalCard.MaxSerializedBytes)
+            throw new InvalidOperationException("The Teams approval card exceeds the outbound payload limit.");
+
+        return payload;
     }
 
-    private static Dictionary<string, object?> CreateField(TeamsApprovalCardField field) => new()
+    private static Dictionary<string, object?> CreateHeader(TeamsApprovalCard card) => new()
     {
         ["type"] = "ColumnSet",
-        ["spacing"] = "Small",
         ["columns"] = new object?[]
         {
             new Dictionary<string, object?>
             {
                 ["type"] = "Column",
                 ["width"] = "auto",
+                ["verticalContentAlignment"] = "Center",
                 ["items"] = new object?[]
                 {
                     new Dictionary<string, object?>
                     {
-                        ["type"] = "TextBlock",
-                        ["text"] = field.Label + ":",
-                        ["weight"] = "Bolder",
-                        ["wrap"] = true
+                        ["type"] = "Icon",
+                        ["name"] = card.IconName,
+                        ["size"] = "Large",
+                        ["color"] = ToWireTone(card.Tone),
+                        ["style"] = "Regular"
                     }
                 }
             },
@@ -236,14 +243,23 @@ internal static class TeamsAdaptiveCardPayloadBuilder
             {
                 ["type"] = "Column",
                 ["width"] = "stretch",
+                ["verticalContentAlignment"] = "Center",
                 ["items"] = new object?[]
                 {
                     new Dictionary<string, object?>
                     {
                         ["type"] = "TextBlock",
-                        ["text"] = field.Value,
-                        ["fontType"] = "Monospace",
-                        ["color"] = "Light",
+                        ["text"] = card.Title,
+                        ["size"] = "Large",
+                        ["weight"] = "Bolder",
+                        ["wrap"] = true
+                    },
+                    new Dictionary<string, object?>
+                    {
+                        ["type"] = "TextBlock",
+                        ["text"] = "NETCLAW SECURITY CONTROL",
+                        ["isSubtle"] = true,
+                        ["spacing"] = "None",
                         ["wrap"] = true
                     }
                 }
@@ -251,12 +267,100 @@ internal static class TeamsAdaptiveCardPayloadBuilder
         }
     };
 
-    private static Dictionary<string, object?> CreateSummary(string summary) => new()
+    private static Dictionary<string, object?> CreateBanner(string text, TeamsApprovalCardTone tone) => new()
     {
-        ["type"] = "TextBlock",
-        ["text"] = summary,
-        ["wrap"] = true,
-        ["spacing"] = "Medium"
+        ["type"] = "Container",
+        ["style"] = ToWireTone(tone),
+        ["bleed"] = true,
+        ["spacing"] = "Medium",
+        ["items"] = new object?[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "TextBlock",
+                ["text"] = text,
+                ["color"] = ToWireTone(tone),
+                ["weight"] = "Bolder",
+                ["wrap"] = true
+            }
+        }
+    };
+
+    private static Dictionary<string, object?> CreateTable(IReadOnlyList<TeamsApprovalCardField> fields) => new()
+    {
+        ["type"] = "Table",
+        ["firstRowAsHeaders"] = false,
+        ["showGridLines"] = true,
+        ["gridStyle"] = "Default",
+        ["columns"] = new object?[]
+        {
+            new Dictionary<string, object?> { ["width"] = 1 },
+            new Dictionary<string, object?> { ["width"] = 2 }
+        },
+        ["rows"] = fields.Select(CreateRow).ToArray()
+    };
+
+    private static Dictionary<string, object?> CreateRow(TeamsApprovalCardField field) => new()
+    {
+        ["type"] = "TableRow",
+        ["cells"] = new object?[]
+        {
+            CreateCell(field.Label, subtle: true),
+            CreateCell(field.Value, subtle: false)
+        }
+    };
+
+    private static Dictionary<string, object?> CreateCell(string text, bool subtle) => new()
+    {
+        ["type"] = "TableCell",
+        ["items"] = new object?[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "TextBlock",
+                ["text"] = text,
+                ["isSubtle"] = subtle,
+                ["weight"] = subtle ? "Default" : "Bolder",
+                ["wrap"] = true
+            }
+        }
+    };
+
+    private static Dictionary<string, object?> CreateContextSummary(string summary) => new()
+    {
+        ["type"] = "Container",
+        ["style"] = "Warning",
+        ["spacing"] = "Medium",
+        ["items"] = new object?[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "TextBlock",
+                ["text"] = summary,
+                ["color"] = "Warning",
+                ["wrap"] = true
+            }
+        }
+    };
+
+    private static Dictionary<string, object?> CreateFooter(string text, TeamsApprovalCardTone tone) => new()
+    {
+        ["type"] = "Container",
+        ["style"] = ToWireTone(tone),
+        ["bleed"] = true,
+        ["spacing"] = "Medium",
+        ["items"] = new object?[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["type"] = "TextBlock",
+                ["text"] = text,
+                ["horizontalAlignment"] = "Center",
+                ["weight"] = "Bolder",
+                ["color"] = ToWireTone(tone),
+                ["wrap"] = true
+            }
+        }
     };
 
     private static string ToWireStyle(TeamsApprovalActionStyle style) => style switch
@@ -267,11 +371,13 @@ internal static class TeamsAdaptiveCardPayloadBuilder
         _ => throw new ArgumentOutOfRangeException(nameof(style), style, "Unsupported Teams approval action style.")
     };
 
-    private static string ToWireColor(TeamsApprovalCardTone tone) => tone switch
+    private static string ToWireTone(TeamsApprovalCardTone tone) => tone switch
     {
-        TeamsApprovalCardTone.Good => "good",
-        TeamsApprovalCardTone.Warning => "warning",
-        TeamsApprovalCardTone.Attention => "attention",
+        TeamsApprovalCardTone.Default => "Default",
+        TeamsApprovalCardTone.Accent => "Accent",
+        TeamsApprovalCardTone.Good => "Good",
+        TeamsApprovalCardTone.Warning => "Warning",
+        TeamsApprovalCardTone.Attention => "Attention",
         _ => throw new ArgumentOutOfRangeException(nameof(tone), tone, "Unsupported Teams approval card tone.")
     };
 }

@@ -2302,7 +2302,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 Self.Tell(new DeliverTeamsApprovalCard(pending.CorrelationId, nonce));
                 expiredReplyTo.Tell(new TeamsApprovalActionResult(
                     TeamsApprovalActionDisposition.Expired,
-                    CreateTerminalCard(pending, "This approval has expired.")));
+                    TeamsApprovalCardRenderer.CreateExpired(
+                        pending.ToolName,
+                        pending.RequestDisplayText,
+                        DateTimeOffset.FromUnixTimeMilliseconds(pending.ExpiresAtUnixMilliseconds),
+                        pending.IsMcpTool)));
             });
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_expired");
             return Task.CompletedTask;
@@ -2367,12 +2371,15 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 PersistApprovalConsumed(
                     pending,
                     decision.Action,
-                    () =>
+                    consumed =>
                     {
                         ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_action_accepted");
                         decision.ReplyTo.Tell(new TeamsApprovalActionResult(
                             TeamsApprovalActionDisposition.Accepted,
-                            CreateTerminalCard(pending, FormatApprovalDecision(pending, decision.Action))));
+                            CreateResolvedApprovalCard(
+                                pending,
+                                decision.Action,
+                                DateTimeOffset.FromUnixTimeMilliseconds(consumed.ConsumedAtUnixMilliseconds))));
                     });
                 return;
 
@@ -2384,7 +2391,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 PersistApprovalConsumed(
                     pending,
                     decision.Action,
-                    () => decision.ReplyTo.Tell(new TeamsApprovalActionResult(
+                    _ => decision.ReplyTo.Tell(new TeamsApprovalActionResult(
                         TeamsApprovalActionDisposition.Unavailable,
                         CreateTerminalCard(pending, "This approval is no longer available."))));
                 return;
@@ -2401,7 +2408,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
     }
 
-    private void PersistApprovalConsumed(TeamsPendingApproval pending, string decision, Action onPersisted)
+    private void PersistApprovalConsumed(
+        TeamsPendingApproval pending,
+        string decision,
+        Action<TeamsApprovalConsumed> onPersisted)
     {
         Persist(new TeamsApprovalConsumed
         {
@@ -2411,7 +2421,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }, consumed =>
         {
             ApplyApprovalConsumed(consumed);
-            onPersisted();
+            onPersisted(consumed);
         });
     }
 
@@ -2494,6 +2504,23 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             pending.RequestDisplayText,
             text,
             pending.IsMcpTool);
+
+    private static TeamsApprovalCard CreateResolvedApprovalCard(
+        TeamsPendingApproval pending,
+        string selectedKey,
+        DateTimeOffset resolvedAt) =>
+        selectedKey == ApprovalOptionKeys.Deny
+            ? TeamsApprovalCardRenderer.CreateDenied(
+                pending.ToolName,
+                pending.RequestDisplayText,
+                resolvedAt,
+                pending.IsMcpTool)
+            : TeamsApprovalCardRenderer.CreateGranted(
+                pending.ToolName,
+                pending.RequestDisplayText,
+                selectedKey,
+                resolvedAt,
+                pending.IsMcpTool);
 
     private ToolInteractionRequest CreateApprovalRequest(TeamsPendingApproval pending) => new()
     {
@@ -2699,11 +2726,6 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         decision == "expired"
         || pending.OfferedOptionKeys.Contains(decision, StringComparer.Ordinal)
         || (pending.OfferedOptionKeys.Count == 0 && decision is "approve" or "deny");
-
-    private static string FormatApprovalDecision(TeamsPendingApproval pending, string selectedKey) =>
-        selectedKey == ApprovalOptionKeys.Deny
-            ? "Denied."
-            : $"Approved: {ApprovalOptionKeys.LabelFor(selectedKey, pending.IsMcpTool)}.";
 
     private static void EnsureValidFingerprint(string fingerprint)
     {

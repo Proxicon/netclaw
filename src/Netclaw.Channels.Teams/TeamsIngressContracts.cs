@@ -282,6 +282,26 @@ public sealed record TeamsApprovalCard(
     /// A terminal or contextual summary for an Adaptive Card host.
     /// </summary>
     public string? Summary { get; init; }
+
+    /// <summary>
+    /// Fluent icon name for the card header. This is presentation-only.
+    /// </summary>
+    public string IconName { get; init; } = "Info";
+
+    /// <summary>
+    /// Semantic banner text below the card header.
+    /// </summary>
+    public string? Banner { get; init; }
+
+    /// <summary>
+    /// Centered terminal status text. Pending cards leave this value empty.
+    /// </summary>
+    public string? Footer { get; init; }
+
+    /// <summary>
+    /// Screen-reader text that excludes opaque callback material.
+    /// </summary>
+    public string? Speak { get; init; }
 }
 
 /// <summary>
@@ -297,6 +317,7 @@ public sealed record TeamsApprovalCardField(string Label, string Value);
 public enum TeamsApprovalCardTone
 {
     Default,
+    Accent,
     Good,
     Warning,
     Attention

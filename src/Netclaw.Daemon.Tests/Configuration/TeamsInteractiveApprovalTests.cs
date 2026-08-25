@@ -40,7 +40,10 @@ public sealed class TeamsInteractiveApprovalTests
 
         var card = TeamsApprovalCardRenderer.CreatePending(request, "correlation_123", "nonce_123");
 
-        Assert.Equal("🔒 Tool approval required", card.Title);
+        Assert.Equal("Approval Required", card.Title);
+        Assert.Equal(TeamsApprovalCardTone.Accent, card.Tone);
+        Assert.Equal("ShieldLock", card.IconName);
+        Assert.Equal("Netclaw wants to run a command or tool operation.", card.Banner);
         Assert.Equal(request.Options.Select(option => option.Key.Value), card.Actions.Select(action => action.Action));
         Assert.Equal(request.Options.Select(option => option.Label), card.Actions.Select(action => action.Title));
         Assert.Equal(
@@ -48,14 +51,14 @@ public sealed class TeamsInteractiveApprovalTests
                 TeamsApprovalActionStyle.Positive,
                 TeamsApprovalActionStyle.Default,
                 TeamsApprovalActionStyle.Default,
-                TeamsApprovalActionStyle.Destructive,
+                TeamsApprovalActionStyle.Default,
                 TeamsApprovalActionStyle.Destructive
             ],
             card.Actions.Select(action => action.Style));
         Assert.Contains("Tool: execute_shell", card.Body, StringComparison.Ordinal);
         Assert.Contains("Request: git push origin main", card.Body, StringComparison.Ordinal);
         Assert.Contains("Candidates: git push, git status", card.Body, StringComparison.Ordinal);
-        Assert.Contains("Working directory: /work/netclaw", card.Body, StringComparison.Ordinal);
+        Assert.Contains("Working Directory: /work/netclaw", card.Body, StringComparison.Ordinal);
         Assert.Contains("Adopted context: present.", card.Body, StringComparison.Ordinal);
         Assert.Contains("Speakers: user-a, user-b", card.Body, StringComparison.Ordinal);
         Assert.Equal(
@@ -63,10 +66,11 @@ public sealed class TeamsInteractiveApprovalTests
                 new TeamsApprovalCardField("Tool", "execute_shell"),
                 new TeamsApprovalCardField("Request", "git push origin main"),
                 new TeamsApprovalCardField("Candidates", "git push, git status"),
-                new TeamsApprovalCardField("Working directory", "/work/netclaw")
+                new TeamsApprovalCardField("Working Directory", "/work/netclaw")
             ],
             card.Fields);
         Assert.Equal("Adopted context: present.\nSpeakers: user-a, user-b", card.Summary);
+        Assert.DoesNotContain(card.Fields, static field => field.Label == "Risk Level");
         Assert.All(card.Actions, action =>
         {
             Assert.Equal("correlation_123", action.CorrelationId);
@@ -98,7 +102,7 @@ public sealed class TeamsInteractiveApprovalTests
 
         var card = TeamsApprovalCardRenderer.CreatePending(request, "correlation_123", "nonce_123");
 
-        Assert.Equal("🔒 MCP tool approval required", card.Title);
+        Assert.Equal("Approval Required", card.Title);
         Assert.Equal(
             [ApprovalOptionKeys.ApproveOnceLabel, ApprovalOptionKeys.ApproveMcpToolLabel, ApprovalOptionKeys.DenyLabel],
             card.Actions.Select(action => action.Title));
@@ -108,7 +112,7 @@ public sealed class TeamsInteractiveApprovalTests
         Assert.Equal(
             [
                 TeamsApprovalActionStyle.Positive,
-                TeamsApprovalActionStyle.Destructive,
+                TeamsApprovalActionStyle.Default,
                 TeamsApprovalActionStyle.Destructive
             ],
             card.Actions.Select(action => action.Style));
@@ -127,26 +131,104 @@ public sealed class TeamsInteractiveApprovalTests
     }
 
     [Fact]
+    public void Pending_card_accepts_only_the_bounded_maximum_option_count()
+    {
+        var maximum = Enumerable.Range(1, TeamsApprovalCardRenderer.MaxOptionCount)
+            .Select(index => new ToolInteractionOption(new ApprovalOptionKey($"option_{index}"), $"Option {index}"))
+            .ToArray();
+        var tooMany = maximum.Append(new ToolInteractionOption(new ApprovalOptionKey("option_extra"), "Option extra")).ToArray();
+
+        var card = TeamsApprovalCardRenderer.CreatePending(CreateRequest(maximum), "correlation_123", "nonce_123");
+
+        Assert.Equal(maximum.Select(option => option.Key.Value), card.Actions.Select(action => action.Action));
+        Assert.Throws<ArgumentException>(() => TeamsApprovalCardRenderer.CreatePending(CreateRequest(tooMany), "correlation_123", "nonce_123"));
+    }
+
+    [Fact]
     public void Terminal_denial_card_keeps_the_tool_context_and_removes_actions()
     {
-        var card = TeamsApprovalCardRenderer.CreateTerminal(
+        var card = TeamsApprovalCardRenderer.CreateDenied(
             "shell_execute",
             "rmdir netclaw-approval-card-never-created",
-            "Denied.");
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"));
 
-        Assert.Equal("⛔ Approval denied", card.Title);
+        Assert.Equal("Approval Denied", card.Title);
         Assert.Equal(TeamsApprovalCardTone.Attention, card.Tone);
+        Assert.Equal("ShieldDismiss", card.IconName);
+        Assert.Equal("STATUS: EXECUTION BLOCKED", card.Footer);
         Assert.Empty(card.Actions);
-        Assert.Contains("Tool: shell_execute", card.Body, StringComparison.Ordinal);
-        Assert.Contains("Action: rmdir netclaw-approval-card-never-created", card.Body, StringComparison.Ordinal);
-        Assert.EndsWith("Denied.", card.Body, StringComparison.Ordinal);
         Assert.Equal(
             [
                 new TeamsApprovalCardField("Tool", "shell_execute"),
-                new TeamsApprovalCardField("Action", "rmdir netclaw-approval-card-never-created")
+                new TeamsApprovalCardField("Command", "rmdir netclaw-approval-card-never-created"),
+                new TeamsApprovalCardField("Denied By", "Authorized operator"),
+                new TeamsApprovalCardField("Denied At", "2026-08-25 15:25 UTC"),
+                new TeamsApprovalCardField("Reason", "User rejected the request")
             ],
             card.Fields);
-        Assert.Equal("Denied.", card.Summary);
+        Assert.Equal("Approval denied. The request was rejected and was not executed.", card.Speak);
+    }
+
+    [Theory]
+    [InlineData(ApprovalOptionKeys.ApproveOnce, "One-time approval")]
+    [InlineData(ApprovalOptionKeys.ApproveSession, "Session approval")]
+    [InlineData(ApprovalOptionKeys.ApproveAlways, "Always here")]
+    [InlineData(ApprovalOptionKeys.ApproveEverywhere, "Always anywhere")]
+    public void Granted_card_maps_the_accepted_scope_without_extending_it(string selectedKey, string scope)
+    {
+        var card = TeamsApprovalCardRenderer.CreateGranted(
+            "shell_execute",
+            "git status",
+            selectedKey,
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"));
+
+        Assert.Equal("Approval Granted", card.Title);
+        Assert.Equal(TeamsApprovalCardTone.Good, card.Tone);
+        Assert.Equal("ShieldCheckmark", card.IconName);
+        Assert.Equal("STATUS: EXECUTION AUTHORIZED", card.Footer);
+        Assert.Empty(card.Actions);
+        Assert.Contains(new TeamsApprovalCardField("Approval Scope", scope), card.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Execution State", "Pending execution"), card.Fields);
+    }
+
+    [Fact]
+    public void Expired_card_records_no_decision_and_carries_no_actions()
+    {
+        var card = TeamsApprovalCardRenderer.CreateExpired(
+            "shell_execute",
+            "git status",
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"));
+
+        Assert.Equal("Approval Card Expired", card.Title);
+        Assert.Equal(TeamsApprovalCardTone.Warning, card.Tone);
+        Assert.Equal("ClockDismiss", card.IconName);
+        Assert.Equal("STATUS: NO DECISION RECORDED", card.Footer);
+        Assert.Empty(card.Actions);
+        Assert.Contains(new TeamsApprovalCardField("Approval Window", "15 minutes"), card.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Expired At", "2026-08-25 15:25 UTC"), card.Fields);
+    }
+
+    [Fact]
+    public void Elevated_card_is_a_presentation_variant_that_requires_caller_supplied_risk_details()
+    {
+        var card = TeamsApprovalCardRenderer.CreateElevatedPending(
+            CreateRequest(new ToolInteractionOption(ApprovalOptionKeys.DenyKey, ApprovalOptionKeys.DenyLabel)),
+            "correlation_123",
+            "nonce_123",
+            "HIGH",
+            "May permanently delete files.");
+
+        Assert.Equal("Elevated Approval Required", card.Title);
+        Assert.Equal(TeamsApprovalCardTone.Warning, card.Tone);
+        Assert.Equal("Warning", card.IconName);
+        Assert.Contains(new TeamsApprovalCardField("Risk Level", "HIGH"), card.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Impact", "May permanently delete files."), card.Fields);
+        Assert.Throws<ArgumentException>(() => TeamsApprovalCardRenderer.CreateElevatedPending(
+            CreateRequest(new ToolInteractionOption(ApprovalOptionKeys.DenyKey, ApprovalOptionKeys.DenyLabel)),
+            "correlation_123",
+            "nonce_123",
+            string.Empty,
+            "May permanently delete files."));
     }
 
     [Fact]

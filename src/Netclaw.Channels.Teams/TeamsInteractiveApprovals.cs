@@ -3,6 +3,7 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -23,6 +24,7 @@ public static class TeamsApprovalCardRenderer
     internal const int MaxToolNameChars = 128;
     internal const int MaxRequestDisplayChars = 2_048;
     internal const int MaxSummaryChars = 512;
+    internal const string ApprovalWindowDescription = "15 minutes";
 
     public static TeamsApprovalCard CreatePending(
         ToolInteractionRequest request,
@@ -38,7 +40,7 @@ public static class TeamsApprovalCardRenderer
         ValidateOptions(request.Options);
         var fields = BuildPendingFields(request);
         var card = new TeamsApprovalCard(
-            request.ToolName.IsMcp ? "🔒 MCP tool approval required" : "🔒 Tool approval required",
+            "Approval Required",
             BuildPendingBody(fields, request),
             request.Options
                 .Select(option => new TeamsApprovalCardAction(
@@ -48,10 +50,46 @@ public static class TeamsApprovalCardRenderer
                     nonce,
                     GetActionStyle(option.Key.Value)))
                 .ToArray(),
-            TeamsApprovalCardTone.Warning)
+            TeamsApprovalCardTone.Accent)
         {
+            IconName = "ShieldLock",
+            Banner = "Netclaw wants to run a command or tool operation.",
             Fields = fields,
-            Summary = BuildPendingSummary(request)
+            Summary = BuildPendingSummary(request),
+            Speak = "Approval required for a Netclaw tool operation."
+        };
+        EnsureBounded(card);
+        return card;
+    }
+
+    /// <summary>
+    /// Creates the elevated visual variant without choosing when it applies.
+    /// The caller must supply a canonical transport-neutral risk signal.
+    /// </summary>
+    public static TeamsApprovalCard CreateElevatedPending(
+        ToolInteractionRequest request,
+        string correlationId,
+        string nonce,
+        string riskLevel,
+        string impact)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(riskLevel) || string.IsNullOrWhiteSpace(impact))
+            throw new ArgumentException("The elevated card requires canonical risk and impact text.");
+
+        var card = CreatePending(request, correlationId, nonce) with
+        {
+            Title = "Elevated Approval Required",
+            Tone = TeamsApprovalCardTone.Warning,
+            IconName = "Warning",
+            Banner = "Netclaw detected a potentially destructive action.",
+            Speak = "Elevated approval required for a potentially destructive Netclaw operation.",
+            Fields =
+            [
+                .. BuildPrimaryFields(request),
+                new TeamsApprovalCardField("Risk Level", Truncate(riskLevel, MaxSummaryChars)),
+                new TeamsApprovalCardField("Impact", Truncate(impact, MaxSummaryChars))
+            ]
         };
         EnsureBounded(card);
         return card;
@@ -64,6 +102,70 @@ public static class TeamsApprovalCardRenderer
         return request.Options.Select(static option => option.Key.Value).ToArray();
     }
 
+    public static TeamsApprovalCard CreateGranted(
+        string toolName,
+        string requestDisplayText,
+        string selectedKey,
+        DateTimeOffset approvedAt,
+        bool isMcpTool = false)
+    {
+        var fields = BuildPrimaryFields(toolName, requestDisplayText, isMcpTool)
+            .Append(new TeamsApprovalCardField("Approved By", "Authorized operator"))
+            .Append(new TeamsApprovalCardField("Approval Scope", ApprovalScopeDescription(selectedKey, isMcpTool)))
+            .Append(new TeamsApprovalCardField("Approved At", FormatTimestamp(approvedAt)))
+            .Append(new TeamsApprovalCardField("Execution State", "Pending execution"))
+            .ToArray();
+        return CreateTerminalCard(
+            "Approval Granted",
+            "ShieldCheckmark",
+            TeamsApprovalCardTone.Good,
+            "Approval was recorded. The requested operation is authorized.",
+            "STATUS: EXECUTION AUTHORIZED",
+            "Approval granted. The requested operation is authorized but has not been confirmed as executed.",
+            fields);
+    }
+
+    public static TeamsApprovalCard CreateDenied(
+        string toolName,
+        string requestDisplayText,
+        DateTimeOffset deniedAt,
+        bool isMcpTool = false)
+    {
+        var fields = BuildPrimaryFields(toolName, requestDisplayText, isMcpTool)
+            .Append(new TeamsApprovalCardField("Denied By", "Authorized operator"))
+            .Append(new TeamsApprovalCardField("Denied At", FormatTimestamp(deniedAt)))
+            .Append(new TeamsApprovalCardField("Reason", "User rejected the request"))
+            .ToArray();
+        return CreateTerminalCard(
+            "Approval Denied",
+            "ShieldDismiss",
+            TeamsApprovalCardTone.Attention,
+            "The request was rejected. The command or operation was not executed.",
+            "STATUS: EXECUTION BLOCKED",
+            "Approval denied. The request was rejected and was not executed.",
+            fields);
+    }
+
+    public static TeamsApprovalCard CreateExpired(
+        string toolName,
+        string requestDisplayText,
+        DateTimeOffset expiredAt,
+        bool isMcpTool = false)
+    {
+        var fields = BuildPrimaryFields(toolName, requestDisplayText, isMcpTool)
+            .Append(new TeamsApprovalCardField("Approval Window", ApprovalWindowDescription))
+            .Append(new TeamsApprovalCardField("Expired At", FormatTimestamp(expiredAt)))
+            .ToArray();
+        return CreateTerminalCard(
+            "Approval Card Expired",
+            "ClockDismiss",
+            TeamsApprovalCardTone.Warning,
+            "This approval card expired before a decision was received. No approval decision was recorded. A replacement approval card was issued.",
+            "STATUS: NO DECISION RECORDED",
+            "Approval card expired. No approval decision was recorded. A replacement card was issued.",
+            fields);
+    }
+
     public static TeamsApprovalCard CreateTerminal(string message)
         => CreateTerminal(string.Empty, string.Empty, message);
 
@@ -73,34 +175,34 @@ public static class TeamsApprovalCardRenderer
         string message,
         bool isMcpTool = false)
     {
-        var (title, tone) = message switch
+        if (string.Equals(message, "Denied.", StringComparison.Ordinal))
+            return CreateDenied(toolName, requestDisplayText, DateTimeOffset.UnixEpoch, isMcpTool);
+
+        if (string.Equals(message, "This approval has expired.", StringComparison.Ordinal))
+            return CreateExpired(toolName, requestDisplayText, DateTimeOffset.UnixEpoch, isMcpTool);
+
+        if (message.StartsWith("Approved:", StringComparison.Ordinal))
         {
-            "Denied." => ("⛔ Approval denied", TeamsApprovalCardTone.Attention),
-            "This approval has expired." => ("⌛ Approval expired", TeamsApprovalCardTone.Warning),
-            "This approval was already processed." => ("ℹ️ Approval already resolved", TeamsApprovalCardTone.Warning),
-            "This approval is no longer available." => ("⚠️ Approval unavailable", TeamsApprovalCardTone.Warning),
-            _ when message.StartsWith("Approved:", StringComparison.Ordinal) => ("✅ Approval granted", TeamsApprovalCardTone.Good),
-            _ => ("ℹ️ Approval resolved", TeamsApprovalCardTone.Default)
-        };
-        var requestLabel = isMcpTool ? "Invocation" : "Action";
-        var fields = string.IsNullOrWhiteSpace(toolName) || string.IsNullOrWhiteSpace(requestDisplayText)
-            ? []
-            : new TeamsApprovalCardField[]
-            {
-                new("Tool", Truncate(toolName, MaxToolNameChars)),
-                new(requestLabel, Truncate(requestDisplayText, MaxRequestDisplayChars))
-            };
-        var summary = Truncate(message, MaxSummaryChars);
-        var body = fields.Length is 0
-            ? summary
-            : string.Join("\n", fields.Select(field => $"{field.Label}: {field.Value}")) + "\n\n" + summary;
-        var card = new TeamsApprovalCard(title, body, [], tone)
-        {
-            Fields = fields,
-            Summary = summary
-        };
-        EnsureBounded(card);
-        return card;
+            return CreateGranted(
+                toolName,
+                requestDisplayText,
+                ApprovalOptionKeys.ApproveOnce,
+                DateTimeOffset.UnixEpoch,
+                isMcpTool);
+        }
+
+        var unavailable = string.Equals(message, "This approval is no longer available.", StringComparison.Ordinal);
+        var title = unavailable ? "Approval Unavailable" : "Approval Already Resolved";
+        var footer = unavailable ? "STATUS: ACTION UNAVAILABLE" : "STATUS: ACTION ALREADY PROCESSED";
+        var fields = BuildPrimaryFields(toolName, requestDisplayText, isMcpTool);
+        return CreateTerminalCard(
+            title,
+            unavailable ? "Warning" : "Info",
+            TeamsApprovalCardTone.Default,
+            Truncate(message, MaxSummaryChars),
+            footer,
+            Truncate(message, MaxSummaryChars),
+            fields);
     }
 
     public static string CreateNonce()
@@ -136,6 +238,28 @@ public static class TeamsApprovalCardRenderer
         }
     }
 
+    private static TeamsApprovalCard CreateTerminalCard(
+        string title,
+        string iconName,
+        TeamsApprovalCardTone tone,
+        string banner,
+        string footer,
+        string speak,
+        IReadOnlyList<TeamsApprovalCardField> fields)
+    {
+        var card = new TeamsApprovalCard(title, banner, [], tone)
+        {
+            IconName = iconName,
+            Banner = banner,
+            Footer = footer,
+            Fields = fields,
+            Speak = speak,
+            Summary = banner
+        };
+        EnsureBounded(card);
+        return card;
+    }
+
     private static void EnsureBounded(TeamsApprovalCard card)
     {
         if (JsonSerializer.SerializeToUtf8Bytes(card).Length > TeamsApprovalCard.MaxSerializedBytes)
@@ -147,13 +271,7 @@ public static class TeamsApprovalCardRenderer
 
     private static TeamsApprovalCardField[] BuildPendingFields(ToolInteractionRequest request)
     {
-        var requestLabel = request.ToolName.IsMcp ? "Invocation" : "Request";
-        var fields = new List<TeamsApprovalCardField>
-        {
-            new("Tool", ApprovalDisplayTextFormatter.Truncate(request.ToolName.Value, MaxToolNameChars)),
-            new(requestLabel, ApprovalDisplayTextFormatter.Truncate(request.DisplayText, MaxRequestDisplayChars))
-        };
-
+        var fields = BuildPrimaryFields(request).ToList();
         var candidates = request.CandidateVerbs.Count > 0 ? request.CandidateVerbs : request.Patterns;
         if (candidates.Count > 0)
         {
@@ -161,14 +279,33 @@ public static class TeamsApprovalCardRenderer
                 "Candidates",
                 ApprovalDisplayTextFormatter.Truncate(string.Join(", ", candidates), MaxSummaryChars)));
         }
+
         if (!string.IsNullOrWhiteSpace(request.Cwd))
         {
             fields.Add(new TeamsApprovalCardField(
-                "Working directory",
+                "Working Directory",
                 ApprovalDisplayTextFormatter.Truncate(request.Cwd, MaxSummaryChars)));
         }
 
         return [.. fields];
+    }
+
+    private static IReadOnlyList<TeamsApprovalCardField> BuildPrimaryFields(ToolInteractionRequest request)
+        => BuildPrimaryFields(request.ToolName.Value, request.DisplayText, request.ToolName.IsMcp);
+
+    private static TeamsApprovalCardField[] BuildPrimaryFields(
+        string toolName,
+        string requestDisplayText,
+        bool isMcpTool)
+    {
+        if (string.IsNullOrWhiteSpace(toolName) || string.IsNullOrWhiteSpace(requestDisplayText))
+            return [];
+
+        return
+        [
+            new TeamsApprovalCardField("Tool", Truncate(toolName, MaxToolNameChars)),
+            new TeamsApprovalCardField(RequestLabel(toolName, isMcpTool), Truncate(requestDisplayText, MaxRequestDisplayChars))
+        ];
     }
 
     private static string BuildPendingBody(
@@ -209,6 +346,21 @@ public static class TeamsApprovalCardRenderer
         return lines.Count is 0 ? null : string.Join("\n", lines);
     }
 
+    private static string RequestLabel(string toolName, bool isMcpTool) =>
+        isMcpTool ? "Invocation" : string.Equals(toolName, "shell_execute", StringComparison.Ordinal) ? "Command" : "Request";
+
+    private static string ApprovalScopeDescription(string selectedKey, bool isMcpTool) => selectedKey switch
+    {
+        ApprovalOptionKeys.ApproveOnce => "One-time approval",
+        ApprovalOptionKeys.ApproveSession => "Session approval",
+        ApprovalOptionKeys.ApproveAlways => "Always here",
+        ApprovalOptionKeys.ApproveEverywhere => ApprovalOptionKeys.LabelFor(selectedKey, isMcpTool),
+        _ => ApprovalOptionKeys.LabelFor(selectedKey, isMcpTool)
+    };
+
+    private static string FormatTimestamp(DateTimeOffset timestamp) =>
+        timestamp.ToUniversalTime().ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture);
+
     private static void ValidateOptions(IReadOnlyList<ToolInteractionOption> options)
     {
         if (options.Count is 0 or > MaxOptionCount)
@@ -230,7 +382,7 @@ public static class TeamsApprovalCardRenderer
 
     private static TeamsApprovalActionStyle GetActionStyle(string optionKey)
     {
-        if (ApprovalOptionKeys.IsDangerStyled(optionKey))
+        if (optionKey == ApprovalOptionKeys.Deny)
             return TeamsApprovalActionStyle.Destructive;
 
         return optionKey == ApprovalOptionKeys.ApproveOnce
