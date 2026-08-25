@@ -8,6 +8,38 @@ using ShellSyntaxTree;
 
 namespace Netclaw.Security;
 
+internal readonly record struct CanonicalShellPath
+{
+    private CanonicalShellPath(string value, ShellPathStyle pathStyle)
+    {
+        Value = value;
+        PathStyle = pathStyle;
+    }
+
+    internal string Value { get; }
+
+    internal ShellPathStyle PathStyle { get; }
+
+    internal static bool TryCreate(
+        string? value,
+        ShellPathStyle pathStyle,
+        out CanonicalShellPath path)
+    {
+        path = default;
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        if (!ShellPathRules.TryNormalize(value, pathStyle, out var normalized))
+            return false;
+
+        path = new CanonicalShellPath(normalized, pathStyle);
+        return true;
+    }
+}
+
 /// <summary>
 /// Evaluates whether a file path is denied for agent tool access.
 /// </summary>
@@ -157,6 +189,14 @@ public sealed class ToolPathPolicy
     public bool IsReadDenied(string path)
         => IsDeniedAgainst(path, _readDeniedPaths) || IsDeniedAgainst(path, _shellDeniedPaths);
 
+    internal bool IsShellDeniedProjectedPath(
+        CanonicalShellPath path)
+        => path.PathStyle != Environment.PathStyle
+           || IsShellDenied(path.Value);
+
+    private bool IsShellDenied(string path)
+        => IsDeniedAgainst(path, _shellDeniedPaths);
+
     private static bool IsDeniedAgainst(string path, HashSet<string> deniedSet)
     {
         if (string.IsNullOrWhiteSpace(path))
@@ -215,6 +255,12 @@ public sealed class ToolPathPolicy
 
         var command = analysis.Source;
         var workingDirectory = analysis.WorkingDirectory;
+
+        if (!string.IsNullOrWhiteSpace(workingDirectory)
+            && IsDeniedAgainst(workingDirectory, _shellDeniedPaths))
+        {
+            return true;
+        }
 
         var tokens = ShellTokenizer.Tokenize(command).ToList();
         var slashCommand = command.Replace('\\', '/');

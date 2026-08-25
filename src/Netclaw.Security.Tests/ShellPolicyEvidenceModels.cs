@@ -14,6 +14,23 @@ internal sealed record PolicyFixtureCatalog
     public required PolicyFixtureDefaults FixtureDefaults { get; init; }
 
     public required List<PolicyFixtureCase> Cases { get; init; }
+
+    public required List<PolicyLiveRegressionCase> LiveRegressionCases { get; init; }
+
+    public required List<PolicyAdversarialCase> AdversarialCases { get; init; }
+}
+
+internal sealed record PolicyLiveRegressionCase
+{
+    public required string SourceEvidenceFile { get; init; }
+
+    public required string SourceEvidenceId { get; init; }
+
+    public required string Classification { get; init; }
+
+    public required string TargetOutcome { get; init; }
+
+    public required PolicyAdversarialCase PolicyCase { get; init; }
 }
 
 internal sealed record PolicyFixtureDefaults
@@ -67,6 +84,72 @@ internal sealed record PolicyFixtureCase
     public required List<PolicyTraceRow> ExpectedTrace { get; init; }
 
     public required PolicyExpectedFinal ExpectedFinal { get; init; }
+}
+
+internal sealed record PolicyAdversarialCase
+{
+    public required string Id { get; init; }
+
+    public required string Category { get; init; }
+
+    public required string Command { get; init; }
+
+    public required PolicyFixtureEnvironment Environment { get; init; }
+
+    public required string InitialWorkingDirectory { get; init; }
+
+    public required string ProjectDirectory { get; init; }
+
+    public required string SessionDirectory { get; init; }
+
+    public required PolicyFixtureAuthority Available { get; init; }
+
+    public bool UseBundledSafeCatalog { get; init; }
+
+    public bool UsePhysicalHarnessScope { get; init; }
+
+    public List<PolicyFileSystemFact>? FileSystemFacts { get; init; }
+
+    public List<string>? DeniedPaths { get; init; }
+
+    public required PolicyAdversarialExpected Expected { get; init; }
+}
+
+internal sealed record PolicyAdversarialExpected
+{
+    public required string Outcome { get; init; }
+
+    public string? DenyReason { get; init; }
+
+    public string? AgentCorrection { get; init; }
+
+    public List<string>? ApprovalCandidates { get; init; }
+
+    public bool? IsMessy { get; init; }
+
+    public List<string>? OptionKeys { get; init; }
+
+    public required int ActorCheckCount { get; init; }
+
+    public List<PolicyExpectedCandidateCoverage>? CandidateCoverage { get; init; }
+
+    public List<PolicyTraceRow>? Trace { get; init; }
+}
+
+internal sealed record PolicyExpectedCandidateCoverage
+{
+    public required int CandidateId { get; init; }
+
+    public required string Coverage { get; init; }
+}
+
+internal sealed record PolicyFileSystemFact
+{
+    public required string Kind { get; init; }
+
+    public required string Path { get; init; }
+
+    public required string Target { get; init; }
 }
 
 internal sealed record PolicyFixtureEnvironment
@@ -125,6 +208,10 @@ internal sealed record PolicyFixtureCandidate
 
     public string? IntentDirectory { get; init; }
 
+    public string? Role { get; init; }
+
+    public List<int>? PrerequisiteIds { get; init; }
+
     public required string ExpectedCoverage { get; init; }
 }
 
@@ -170,6 +257,17 @@ internal sealed record PolicyAuthoredPathFact
 internal sealed record PolicyShellEffects
 {
     public required List<PolicyRedirect> Redirects { get; init; }
+
+    public List<PolicyWorkingDirectoryEffect>? WorkingDirectoryEffects { get; init; }
+}
+
+internal sealed record PolicyWorkingDirectoryEffect
+{
+    public required int CommandIndex { get; init; }
+
+    public required string Kind { get; init; }
+
+    public required List<string> Targets { get; init; }
 }
 
 internal sealed record PolicyRedirect
