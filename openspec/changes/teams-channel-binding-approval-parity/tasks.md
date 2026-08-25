@@ -1,6 +1,6 @@
 ## 1. Generic policy and ingress safety
 
-- [x] 1.1 Implement the generic Team shell opt-in predicate in `ToolAccessPolicy` and verify a configured Team invocation reaches the normal approval request while every missing gate fails closed.
+- [x] 1.1 Implement the generic Team shell opt-in predicate in `ToolAccessPolicy`; verify every missing gate fails closed and a Teams Team-audience turn reaches the normal `ToolInteractionRequest` pipeline.
 - [x] 1.2 Apply `PromptClassifier` to Teams executable ingress through an additive dependency contract and verify safe, high-risk, and detector-unavailable paths preserve the required boundaries.
 
 ## 2. Teams approval and output lifecycle
@@ -11,7 +11,7 @@
 
 ## 3. Contracts, documentation, and validation
 
-- [x] 3.1 Add Teams cross-channel binding contract fixtures for compatible lifecycle behavior and update the contract inventory with the verified assertion count.
+- [x] 3.1 Add `TeamsSessionBindingContractTests` for compatible lifecycle behavior in the shared contract suite and update the contract inventory with the verified assertion count.
 - [x] 3.2 Update minimal Teams configuration and post-refactor retest-delta documentation, then verify it states no Graph permission or live tenant test was added.
 - [x] 3.3 Run strict OpenSpec validation, focused Teams and actor tests, solution build/test, vulnerability, quality, header, whitespace, formatting, and lint checks; record results in the change artifacts.
 
@@ -19,9 +19,11 @@
 
 - `dotnet restore Netclaw.slnx`: passed.
 - `dotnet build Netclaw.slnx --no-restore --configuration Debug`: passed with 0 warnings and 0 errors.
-- Focused Teams contract fixture: 71 passed.
-- Focused actor approval gates: 78 passed.
-- `dotnet test Netclaw.slnx --no-build --no-restore`: passed; environment-gated integration tests remained skipped.
+- Shared Teams binding contract fixture: 8 passed.
+- Focused Teams transport and persistence fixture: 71 passed.
+- Teams Team-audience shell approval-pipeline integration: passed.
+- Focused actor approval gates and Teams contract evidence: 87 passed.
+- `dotnet test Netclaw.slnx --no-build --no-restore`: passed; 3,575 Actors tests and 1,285 Daemon tests passed, and environment-gated integration tests remained skipped.
 - `dotnet list Netclaw.slnx package --vulnerable --include-transitive`: no vulnerable packages.
 - `dotnet slopwatch analyze`: 0 issues.
 - `./scripts/Add-FileHeaders.ps1 -Verify`, `scripts/check-no-bom.sh`, and `git diff --check`: passed.

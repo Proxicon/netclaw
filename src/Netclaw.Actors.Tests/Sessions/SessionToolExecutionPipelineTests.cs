@@ -19,8 +19,10 @@ using Netclaw.Actors.Sessions.Pipelines;
 using Netclaw.Actors.Tests.Sessions.Pipelines;
 using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
+using Netclaw.Security;
 using Netclaw.Tests.Utilities;
 using Netclaw.Tools;
+using ShellSyntaxTree;
 using Xunit;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
@@ -48,6 +50,80 @@ public sealed class SessionToolExecutionPipelineTests(ITestOutputHelper output) 
         Provenance = new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Trusted),
         SupportsInteractiveApproval = true
     };
+
+    private static TurnContext InteractiveTeamsTeamTurnContext(SessionId sessionId) => new()
+    {
+        SessionId = sessionId,
+        TurnId = new TurnId("teams-team-turn"),
+        Audience = TrustAudience.Team,
+        Boundary = TrustBoundary.Team,
+        ChannelType = ChannelType.Teams,
+        RequesterSenderId = new SenderId("teams-user"),
+        RequesterPrincipal = PrincipalClassification.TrustedInternal,
+        Provenance = new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+        SupportsInteractiveApproval = true
+    };
+
+    [Fact]
+    public async Task Teams_team_shell_opt_in_reaches_the_normal_tool_interaction_request()
+    {
+        var config = new ToolConfig { ShellMode = ShellExecutionMode.HostAllowed };
+        config.AudienceProfiles.Team.AllowedTools.Add(ShellTool.ToolName);
+        config.AudienceProfiles.Team.ApprovalPolicy = new ToolApprovalConfig
+        {
+            ToolOverrides = new Dictionary<string, ToolApprovalMode>(StringComparer.Ordinal)
+            {
+                [ShellTool.ToolName] = ToolApprovalMode.Approval
+            }
+        };
+        var commandPolicy = new ShellCommandPolicy();
+        var pathPolicy = new ToolPathPolicy([]);
+        var accessPolicy = new ToolAccessPolicy(
+            config,
+            new EffectivePolicyDefaults(
+                DeploymentPosture.Personal,
+                TrustAudience.Personal,
+                ShellExecutionMode.HostAllowed,
+                UsedStrictFallback: false),
+            commandPolicy,
+            pathPolicy);
+        var registry = new ToolRegistry();
+        registry.WithFirstPartyTools(
+            config,
+            new NetclawPaths(),
+            pathPolicy,
+            commandPolicy,
+            toolAccessPolicy: accessPolicy);
+        var executor = new DispatchingToolExecutor(registry, accessPolicy);
+        var sessionId = new SessionId("teams/team-shell-approval");
+        var approvalChannel = new ApprovalChannel();
+        var requestTcs = new TaskCompletionSource<ToolInteractionRequest>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var arguments = ToolInput.Create("Command", "git status");
+        arguments["_rationale"] = "Verify the Team shell approval gate.";
+
+        var execution = new SessionToolPipelineTestFixture(
+                executor,
+                [new FunctionCallContent("teams-shell-call", ShellTool.ToolName, arguments)],
+                sessionId,
+                TestActor)
+            .WithTurnContext(InteractiveTeamsTeamTurnContext(sessionId))
+            .WithApprovals(
+                approvalChannel,
+                dispatch => requestTcs.TrySetResult(dispatch.Request),
+                Timeout.InfiniteTimeSpan)
+            .ExecuteAsync(TestContext.Current.CancellationToken);
+
+        var request = await requestTcs.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(ShellTool.ToolName, request.ToolName.Value);
+        Assert.Equal(sessionId, request.SessionId);
+
+        // Release the approval wait without executing a host command.
+        approvalChannel.Complete(request.CallId, ApprovalDecision.Denied);
+        await execution.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
 
     [Fact]
     public void Batch_derives_tool_authority_from_admitted_turn()

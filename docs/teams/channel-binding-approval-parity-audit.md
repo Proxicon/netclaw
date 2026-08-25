@@ -31,7 +31,8 @@ bindings and their shared contract fixtures.
 
 1. Add a generic Team shell opt-in predicate to `ToolAccessPolicy`, including
    explicit configuration and interactive-capability gates, with core policy tests
-   independent of Teams.
+   independent of Teams and an approval-pipeline integration test with a Teams
+   Team-audience turn.
 2. Extend the Teams dependency contract additively with the shared injection
    detector and apply `PromptClassifier` before Teams can enqueue a model turn.
 3. Refactor the Teams approval path to use shared pending-request lookup and
@@ -62,8 +63,10 @@ and the session acknowledgement. Card expiry now persists a replacement nonce
 hash and reissues a card without emitting a core approval decision.
 
 Teams has no authenticated, ordered, bounded history source, so gap hydration
-remains not applicable. Its equivalent binding contract fixture is documented
-in the channel contract inventory and covers safe/blocked/unavailable ingress,
-approval actions, output and turn lifecycle, delivery feedback, feedback-pipe
-supervision, and restart recovery. There is no claim that opaque Adaptive Card
-callbacks support the text-only cold-spawn path used by other transports.
+remains not applicable. `TeamsSessionBindingContractTests` now places the
+applicable SDK-free binding lifecycle in the shared contract suite: safe,
+blocked, and unavailable ingress; approval requester and automation outcomes;
+recovery; pipeline reinitialization; and delivery-failure supervision. The
+focused `TeamsPersonalRoutingTests` retain Adaptive Card correlation, nonce,
+expiry/reissue, and replay coverage. There is no claim that opaque Adaptive
+Card callbacks support the text-only cold-spawn path used by other transports.
