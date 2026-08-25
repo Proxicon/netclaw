@@ -27,17 +27,27 @@ public sealed record TeamsApprovalPendingCreated : ITeamsPersistenceMessage
     public bool IsMcpTool { get; init; }
     public string ToolName { get; init; } = string.Empty;
     public string RequestDisplayText { get; init; } = string.Empty;
+    /// <summary>
+    /// True until Teams confirms that it accepted a card presentation. Recovery
+    /// replaces the nonce binding before it attempts another presentation.
+    /// </summary>
+    public bool PresentationPending { get; init; } = true;
 }
 
 public sealed record TeamsApprovalCardDelivered : ITeamsPersistenceMessage
 {
     public string CorrelationId { get; init; } = string.Empty;
-    public string PromptId { get; init; } = string.Empty;
+    /// <summary>
+    /// Teams may accept a card without returning an activity ID. A null value
+    /// records that supported unbound success without retaining a locator.
+    /// </summary>
+    public string? PromptId { get; init; }
 }
 
 /// <summary>
-/// Replaces an expired Adaptive Card binding while leaving the session-owned
-/// approval request pending. The raw nonce never enters durable state.
+/// Replaces an expired or ambiguously delivered Adaptive Card binding while
+/// leaving the session-owned approval request pending. The raw nonce never
+/// enters durable state.
 /// </summary>
 public sealed record TeamsApprovalCardReissued : ITeamsPersistenceMessage
 {
@@ -79,6 +89,7 @@ public sealed record TeamsApprovalSnapshotEntry
     public string ToolName { get; init; } = string.Empty;
     public string RequestDisplayText { get; init; } = string.Empty;
     public string? PromptId { get; init; }
+    public bool PresentationPending { get; init; } = true;
     public string? ForwardingDecision { get; init; }
     public string? ForwardingSenderId { get; init; }
     public string? Decision { get; init; }

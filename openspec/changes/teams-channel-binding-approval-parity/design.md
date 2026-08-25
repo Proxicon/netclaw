@@ -7,9 +7,9 @@ Slack, Discord, and Mattermost instead share approval response, output, and
 transport-failure lifecycle components.
 
 The session journal owns pending approval state and intentionally waits without
-a timer. Teams currently introduces a 15-minute card lifetime that records an
-`expired` transport decision and forwards `Deny`; that violates the session
-contract. Teams also currently bypasses the shared prompt classifier.
+a timer. The corrective behavior replaces an expired or failed card binding
+without forwarding `Deny`; Teams also applies the shared prompt classifier
+before session dispatch.
 
 ## Goals / Non-Goals
 
@@ -19,8 +19,9 @@ contract. Teams also currently bypasses the shared prompt classifier.
   boundary without changing core tool eligibility.
 - Apply common approval response and delivery contracts to Teams without
   weakening card callback validation or replay protection.
-- Preserve backwards-readable Teams persistence while adding only bounded
-  transport metadata needed for card replacement.
+- Read existing Teams persistence while adding only bounded transport metadata
+  needed for card replacement; do not promise that older binaries can read
+  newer manifests.
 - Add cross-channel and focused replay/expiry/classification test evidence.
 
 **Non-Goals:**
@@ -57,10 +58,17 @@ decision and does not forward a `ToolInteractionResponse`. The old card cannot
 match the replacement hash. A valid action on the new card uses the normal
 consume-once flow.
 
-The existing persistence records are read compatibly. Newly written pending
-state remains bounded; snapshots continue to capture the current transport
-binding. A replacement does not need raw nonce persistence, only the hash and
-new delivery locator after a successful send.
+The current binary reads existing persistence records. Newly written pending
+state remains bounded; snapshots capture the current transport binding and its
+presentation-recovery state. A replacement never persists a raw nonce: it
+persists only the current hash, and a successful unbound send is recorded as
+presented even when Teams returns no activity ID.
+
+If presentation delivery fails, Teams replaces the attempted hash with a fresh
+one and leaves the presentation pending for recovery. Restart or a later safe
+delivery opportunity issues a fresh card once; obsolete queued sends cannot
+present a superseded nonce. This avoids a tight self-retry loop while leaving
+the session approval pending and replay protection intact.
 
 ### Forwarding state is transport-only and recoverable
 
@@ -89,9 +97,10 @@ pipeline. Typing remains a best-effort effect because it is not user content.
 
 - [Legacy Teams journals lack enough presentation metadata] -> continue to
   render deterministic unavailable terminal cards and never map legacy tokens.
-- [Replacement-card delivery fails] -> keep the session approval pending,
-  surface the transport failure, and allow a later valid presentation attempt;
-  never synthesize a denial.
+- [Replacement-card delivery fails] -> invalidate the attempted opaque binding,
+  keep bounded presentation-recovery state, surface the transport failure, and
+  issue a fresh card only on a later recovery opportunity; never synthesize a
+  denial.
 - [Actor restart occurs after transport forwarding begins but before session
   response] -> re-drive the exact durable selection. The session acknowledgement
   remains authoritative and terminal consumption is written once.
@@ -101,10 +110,13 @@ pipeline. Typing remains a best-effort effect because it is not user content.
 
 ## Migration Plan
 
-1. Deploy code that reads existing Teams records and writes the bounded updated
-   state.
+1. Before deployment, take and verify a backup or snapshot of the Teams
+   persistence store. Deploy code that reads existing Teams records and writes
+   the bounded updated state.
 2. Existing active cards with a legacy offered-key record remain unavailable;
    new session requests render a new card under the new binding behavior.
-3. Rollback leaves existing generic session state untouched. The old binary
-   reads the same existing Teams transport records; no external migration or
-   database rewrite is required.
+3. Rollback to the previous binary is straightforward only before
+   `teams-approval-reissued-v2` or `teams-approval-forwarding-v2` has been
+   written. The previous binary cannot read either manifest. Afterward, apply
+   a forward fix or restore the verified pre-deployment persistence snapshot
+   before starting the previous binary.
