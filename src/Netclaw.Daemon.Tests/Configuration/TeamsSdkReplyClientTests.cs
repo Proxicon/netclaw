@@ -157,6 +157,8 @@ public sealed class TeamsSdkReplyClientTests
         Assert.Equal("Container", body[1].GetProperty("type").GetString());
         Assert.Equal("Accent", body[1].GetProperty("style").GetString());
         Assert.Equal("Table", body[2].GetProperty("type").GetString());
+        Assert.False(body[2].GetProperty("firstRowAsHeader").GetBoolean());
+        Assert.False(body[2].TryGetProperty("firstRowAsHeaders", out _));
         var rows = body[2].GetProperty("rows");
         Assert.Equal("Tool", rows[0].GetProperty("cells")[0].GetProperty("items")[0].GetProperty("text").GetString());
         Assert.Equal("shell_execute", rows[0].GetProperty("cells")[1].GetProperty("items")[0].GetProperty("text").GetString());

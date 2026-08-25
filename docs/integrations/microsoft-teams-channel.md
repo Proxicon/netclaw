@@ -258,9 +258,16 @@ approval scope and `Pending execution`. It does not claim that the operation
 finished. A denied card appears only after the user selects the explicit Deny
 option. It shows `User rejected the request`.
 
-An expired card is a Teams presentation event. It states that no decision was
-recorded and has no action buttons. Netclaw sends a new pending card with a
-fresh nonce while the session approval remains pending.
+When an approval reaches a terminal presentation state, Teams returns the
+terminal Adaptive Card in the `Action.Execute` response. The Teams client
+replaces the source pending card in place. Netclaw does not post a second
+Granted, Denied, Already Processed, or Unavailable card.
+
+An expired card is a Teams presentation event. When the requester submits an
+expired pending card, its `Action.Execute` response replaces that source card
+in place with the actionless Expired presentation. No decision was recorded.
+The session approval remains pending, so Netclaw separately posts one new
+pending card with a fresh nonce. Expiry creates no core decision.
 
 The elevated visual exists for a future canonical risk signal. Teams does not
 parse commands or infer risk. Normal cards never show a fabricated `SAFE` or

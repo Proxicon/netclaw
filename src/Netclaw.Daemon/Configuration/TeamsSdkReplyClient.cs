@@ -289,7 +289,7 @@ internal static class TeamsAdaptiveCardPayloadBuilder
     private static Dictionary<string, object?> CreateTable(IReadOnlyList<TeamsApprovalCardField> fields) => new()
     {
         ["type"] = "Table",
-        ["firstRowAsHeaders"] = false,
+        ["firstRowAsHeader"] = false,
         ["showGridLines"] = true,
         ["gridStyle"] = "Default",
         ["columns"] = new object?[]
