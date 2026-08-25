@@ -29,47 +29,47 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <InternalsVisibleTo Include="Netclaw.Daemon.Tests" />
-        <InternalsVisibleTo Include="Netclaw.Cli.Tests" />
+        <InternalsVisibleTo Include="Netclaw.Daemon.Tests"/>
+        <InternalsVisibleTo Include="Netclaw.Cli.Tests"/>
     </ItemGroup>
 
     <ItemGroup>
-        <PackageReference Include="Akka.Hosting" />
-        <PackageReference Include="Akka.Persistence.Hosting" />
-        <PackageReference Include="Akka.Persistence.Sql.Hosting" />
-        <PackageReference Include="Microsoft.Extensions.AI" />
-        <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
-        <PackageReference Include="Microsoft.Data.Sqlite" />
-        <PackageReference Include="Microsoft.Teams.Apps" />
-        <PackageReference Include="ModelContextProtocol.Core" />
-        <PackageReference Include="Netclaw.SkillClient" />
-        <PackageReference Include="OpenTelemetry" />
-        <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
-        <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
-        <PackageReference Include="SlackNet.Extensions.DependencyInjection" />
+        <PackageReference Include="Akka.Hosting"/>
+        <PackageReference Include="Akka.Persistence.Hosting"/>
+        <PackageReference Include="Akka.Persistence.Sql.Hosting"/>
+        <PackageReference Include="Microsoft.Extensions.AI"/>
+        <PackageReference Include="Microsoft.AspNetCore.OpenApi"/>
+        <PackageReference Include="Microsoft.Data.Sqlite"/>
+        <PackageReference Include="Microsoft.Teams.Apps"/>
+        <PackageReference Include="ModelContextProtocol.Core"/>
+        <PackageReference Include="Netclaw.SkillClient"/>
+        <PackageReference Include="OpenTelemetry"/>
+        <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol"/>
+        <PackageReference Include="OpenTelemetry.Extensions.Hosting"/>
+        <PackageReference Include="SlackNet.Extensions.DependencyInjection"/>
     </ItemGroup>
 
     <ItemGroup>
         <None Update="migrations\sqlite\**\*.sql">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </None>
-        <EmbeddedResource Include="migrations\sqlite\**\*.sql" />
+        <EmbeddedResource Include="migrations\sqlite\**\*.sql"/>
         <Content Include="..\..\feeds\skills\.system\files\**\*" Exclude="..\..\feeds\skills\.system\files\**\*.*.*\**" Link="BuiltInSkills\%(RecursiveDir)%(Filename)%(Extension)">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </Content>
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\Netclaw.Actors\Netclaw.Actors.csproj" />
-        <ProjectReference Include="..\Netclaw.Configuration\Netclaw.Configuration.csproj" />
-        <ProjectReference Include="..\Netclaw.Channels\Netclaw.Channels.csproj" />
-        <ProjectReference Include="..\Netclaw.Channels.Discord\Netclaw.Channels.Discord.csproj" />
-        <ProjectReference Include="..\Netclaw.Channels.Mattermost\Netclaw.Channels.Mattermost.csproj" />
-        <ProjectReference Include="..\Netclaw.Channels.Slack\Netclaw.Channels.Slack.csproj" />
-        <ProjectReference Include="..\Netclaw.Channels.Teams\Netclaw.Channels.Teams.csproj" />
-        <ProjectReference Include="..\Netclaw.Providers\Netclaw.Providers.csproj" />
-        <ProjectReference Include="..\Netclaw.Search\Netclaw.Search.csproj" />
-        <ProjectReference Include="..\Netclaw.Tools.Abstractions\Netclaw.Tools.Abstractions.csproj" />
+        <ProjectReference Include="..\Netclaw.Actors\Netclaw.Actors.csproj"/>
+        <ProjectReference Include="..\Netclaw.Configuration\Netclaw.Configuration.csproj"/>
+        <ProjectReference Include="..\Netclaw.Channels\Netclaw.Channels.csproj"/>
+        <ProjectReference Include="..\Netclaw.Channels.Discord\Netclaw.Channels.Discord.csproj"/>
+        <ProjectReference Include="..\Netclaw.Channels.Mattermost\Netclaw.Channels.Mattermost.csproj"/>
+        <ProjectReference Include="..\Netclaw.Channels.Slack\Netclaw.Channels.Slack.csproj"/>
+        <ProjectReference Include="..\Netclaw.Channels.Teams\Netclaw.Channels.Teams.csproj"/>
+        <ProjectReference Include="..\Netclaw.Providers\Netclaw.Providers.csproj"/>
+        <ProjectReference Include="..\Netclaw.Search\Netclaw.Search.csproj"/>
+        <ProjectReference Include="..\Netclaw.Tools.Abstractions\Netclaw.Tools.Abstractions.csproj"/>
     </ItemGroup>
 
 </Project>
