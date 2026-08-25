@@ -167,10 +167,9 @@ static async Task RunDaemonAsync(
     builder.AddTeamsIngress();
 
     // Authentication — a PolicyScheme selector is the default scheme.
-    // It routes the Teams activity endpoint to the SDK's AzureAd scheme, a bearer
-    // token to DeviceBearer, and other requests to Loopback (local operator).
-    // This keeps Teams validation separate while existing [Authorize] endpoints
-    // remain reachable by loopback clients and paired remote devices.
+    // It routes to DeviceBearer when an Authorization: Bearer header is present,
+    // otherwise to Loopback (local operator).  This ensures [Authorize] endpoints
+    // are reachable by both loopback clients and paired remote devices.
     builder.Services.AddSingleton<DeviceRegistry>();
     builder.Services.AddSingleton<BootstrapStateStore>();
     builder.Services.AddSingleton<BootstrapDeviceSeeder>();
@@ -178,14 +177,7 @@ static async Task RunDaemonAsync(
     builder.Services.AddSingleton<PairingExchangeGuard>();
     builder.Services.AddSingleton<IRemoteAuthSchemeRegistration, DevicePairingSchemeRegistration>();
     builder.Services.AddNetclawAuthSchemes(daemonConfig);
-    builder.Services.AddAuthorization(options =>
-    {
-        // The Teams SDK adds its own named policy. Keep the daemon default
-        // policy on the selector so existing operator endpoints are unchanged.
-        options.DefaultPolicy = new AuthorizationPolicyBuilder("AuthSelector")
-            .RequireAuthenticatedUser()
-            .Build();
-    });
+    builder.Services.AddAuthorization();
 
     // Add OpenAPI
     builder.Services.AddOpenApi();

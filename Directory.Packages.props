@@ -10,6 +10,7 @@
     <SlackNetVersion>0.17.11</SlackNetVersion>
     <DiscordNetVersion>3.20.1</DiscordNetVersion>
     <MattermostNetVersion>5.0.7</MattermostNetVersion>
+    <MicrosoftTeamsSdkVersion>2.1.0</MicrosoftTeamsSdkVersion>
     <MicrosoftExtensionsAIVersion>10.8.3</MicrosoftExtensionsAIVersion>
     <!-- Microsoft.Extensions.TimeProvider.Testing ships on the dotnet/extensions minor
          cadence and has no 10.8.x patch, so it cannot share MicrosoftExtensionsAIVersion
@@ -49,7 +50,7 @@
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="$(MicrosoftExtensionsAIVersion)" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="$(MicrosoftAspNetCoreVersion)" />
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="$(MicrosoftExtensionsTimeProviderTestingVersion)" />
-    <PackageVersion Include="Microsoft.Teams.Apps" Version="2.1.0" />
+    <PackageVersion Include="Microsoft.Teams.Apps" Version="$(MicrosoftTeamsSdkVersion)" />
     <PackageVersion Include="ModelContextProtocol.Core" Version="$(ModelContextProtocolVersion)" />
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="$(ModelContextProtocolVersion)" />
     <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="$(MicrosoftAspNetCoreVersion)" />
@@ -68,7 +69,6 @@
     <PackageVersion Include="OpenTelemetry.Api" Version="$(OpenTelemetryVersion)" />
     <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="$(OpenTelemetryVersion)" />
     <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="$(OpenTelemetryVersion)" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="$(OpenTelemetryVersion)" />
     <PackageVersion Include="OllamaSharp" Version="5.4.30" />
     <PackageVersion Include="SauceControl.Blake2Fast" Version="2.0.0" />
     <PackageVersion Include="Discord.Net" Version="$(DiscordNetVersion)" />

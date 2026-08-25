@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Schema;
@@ -32,12 +33,16 @@ internal static class TeamsActivityEndpointExtensions
         if (!registration.CanActivateSdk)
             return;
 
-        // The native 2.1 host resolves the existing Teams configuration by
-        // using its supported legacy Teams-section mapping. The explicit
-        // policy below isolates Teams JWT validation from the daemon default
-        // operator policy.
+        RejectConflictingAzureAdConfiguration(builder.Configuration);
+
+        // The native 2.1 host maps the existing Teams configuration.
         builder.Services.AddTeamsBotApplication();
         builder.Services.AddAuthorizationBuilder()
+            // The SDK sets AzureAd as the default policy. Restore the upstream
+            // scheme-free default so only the Teams endpoint uses AzureAd.
+            .SetDefaultPolicy(new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .Build())
             .AddPolicy(AuthorizationPolicy, policy =>
             {
                 policy.AuthenticationSchemes.Add(AuthenticationScheme);
@@ -314,5 +319,17 @@ internal static class TeamsActivityEndpointExtensions
         var user = httpContextAccessor.HttpContext?.User;
         return user?.FindFirst("tid")?.Value
                ?? user?.FindFirst("http://schemas.microsoft.com/identity/claims/tenantid")?.Value;
+    }
+
+    private static void RejectConflictingAzureAdConfiguration(IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        if (!string.IsNullOrWhiteSpace(configuration["AzureAd:ClientId"]))
+        {
+            throw new InvalidOperationException(
+                "Teams configuration cannot activate when AzureAd:ClientId is set. " +
+                "Remove the conflicting AzureAd configuration before enabling Teams.");
+        }
     }
 }
