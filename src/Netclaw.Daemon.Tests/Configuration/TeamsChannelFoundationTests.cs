@@ -5,13 +5,16 @@
 // -----------------------------------------------------------------------
 using System.Reflection;
 using System.Net;
+using System.Security.Claims;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading.RateLimiting;
 using Akka.Actor;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.TestHost;
@@ -20,7 +23,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
+using Microsoft.Identity.Abstractions;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Schema;
 using Microsoft.Teams.Apps.Schema.Entities;
@@ -750,7 +756,7 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
-    public void Complete_configuration_maps_exactly_one_authenticated_activity_route()
+    public async Task Complete_configuration_maps_exactly_one_authenticated_activity_route()
     {
         var builder = WebApplication.CreateBuilder();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
@@ -769,26 +775,145 @@ public sealed class TeamsChannelFoundationTests
         var route = Assert.Single(
             ((IEndpointRouteBuilder)app).DataSources.SelectMany(source => source.Endpoints).OfType<RouteEndpoint>(),
             endpoint => string.Equals(endpoint.RoutePattern.RawText, TeamsActivityEndpointExtensions.ActivityPath, StringComparison.Ordinal));
-        Assert.Contains(route.Metadata, metadata => metadata is AuthorizeAttribute);
+        Assert.Contains(
+            route.Metadata.OfType<AuthorizeAttribute>(),
+            attribute => attribute.Policy == TeamsActivityEndpointExtensions.AuthorizationPolicy);
         Assert.Contains(route.Metadata, metadata => metadata is EnableRateLimitingAttribute);
+
+        var policy = await app.Services.GetRequiredService<IAuthorizationPolicyProvider>()
+            .GetPolicyAsync(TeamsActivityEndpointExtensions.AuthorizationPolicy);
+        Assert.NotNull(policy);
+        Assert.Equal([TeamsActivityEndpointExtensions.AuthenticationScheme], policy.AuthenticationSchemes);
     }
 
     [Fact]
-    public async Task Complete_host_preserves_netclaw_default_auth_and_rejects_anonymous_teams_activity()
+    public void Complete_legacy_configuration_populates_sdk_inbound_and_outbound_authentication()
     {
-        await using var app = await BuildTeamsTestHostAsync();
+        const string tenantId = "synthetic-tenant";
+        const string clientId = "synthetic-client";
+        const string clientSecret = "synthetic-secret";
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = tenantId,
+            ["Teams:ClientId"] = clientId,
+            ["Teams:ClientSecret"] = clientSecret
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+
+        Assert.False(builder.Configuration.GetSection("AzureAd").Exists());
+
+        builder.AddTeamsIngress();
+        using var app = builder.Build();
+
+        var bot = app.Services.GetRequiredService<TeamsBotApplication>();
+        var inbound = app.Services.GetRequiredService<IOptionsMonitor<JwtBearerOptions>>()
+            .Get(TeamsActivityEndpointExtensions.AuthenticationScheme);
+        var outbound = app.Services.GetRequiredService<IOptionsMonitor<MicrosoftIdentityApplicationOptions>>()
+            .Get(TeamsActivityEndpointExtensions.AuthenticationScheme);
+        var credential = Assert.Single(outbound.ClientCredentials!);
+
+        Assert.Equal(clientId, bot.AppId);
+        Assert.Contains(clientId, inbound.TokenValidationParameters.ValidAudiences!);
+        Assert.Equal(tenantId, outbound.TenantId);
+        Assert.Equal(clientId, outbound.ClientId);
+        Assert.Equal(CredentialSource.ClientSecret, credential.SourceType);
+        Assert.Equal(clientSecret, credential.ClientSecret);
+        Assert.NotNull(app.Services.GetRequiredService<Microsoft.Teams.Core.ConversationClient>());
+        Assert.NotNull(app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("BotConversationClient"));
+    }
+
+    [Fact]
+    public void Complete_teams_configuration_rejects_a_conflicting_azuread_client_id()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "tenant",
+            ["Teams:ClientId"] = "teams-client",
+            ["Teams:ClientSecret"] = "synthetic-secret",
+            ["AzureAd:ClientId"] = "different-client"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+
+        var error = Assert.Throws<InvalidOperationException>(builder.AddTeamsIngress);
+
+        Assert.Contains("AzureAd:ClientId", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic-secret", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Disabled_teams_does_not_change_generic_authentication_or_authorization()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.AddTeamsIngress();
+        builder.Services.AddNetclawAuthSchemes(new DaemonConfig());
+        builder.Services.AddAuthorization();
+        using var app = builder.Build();
+
         var schemes = app.Services.GetRequiredService<IAuthenticationSchemeProvider>();
+        var policy = await app.Services.GetRequiredService<IAuthorizationPolicyProvider>()
+            .GetDefaultPolicyAsync();
 
         Assert.Equal("AuthSelector", (await schemes.GetDefaultAuthenticateSchemeAsync())!.Name);
-        Assert.NotNull(await schemes.GetSchemeAsync(TeamsActivityEndpointExtensions.AuthenticationScheme));
+        Assert.Null(await schemes.GetSchemeAsync(TeamsActivityEndpointExtensions.AuthenticationScheme));
+        Assert.Empty(policy.AuthenticationSchemes);
+    }
 
+    [Fact]
+    public async Task Teams_policy_uses_azuread_after_a_default_device_bearer_failure()
+    {
+        await using var app = await BuildTeamsAuthorizationTestHostAsync();
+        var authorization = app.Services.GetRequiredService<IAuthorizationPolicyProvider>();
+        var defaultPolicy = await authorization.GetDefaultPolicyAsync();
+        var teamsPolicy = await authorization.GetPolicyAsync(TeamsActivityEndpointExtensions.AuthorizationPolicy);
         var client = app.GetTestClient();
-        var response = await client.PostAsync(
+
+        Assert.Empty(defaultPolicy.AuthenticationSchemes);
+        Assert.NotNull(teamsPolicy);
+        Assert.Equal([TeamsActivityEndpointExtensions.AuthenticationScheme], teamsPolicy.AuthenticationSchemes);
+
+        var loopbackRequest = new HttpRequestMessage(HttpMethod.Get, "/teams-auth-test/operator");
+        loopbackRequest.Headers.Add("X-Test-Loopback", "true");
+        var loopbackResponse = await client.SendAsync(loopbackRequest, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, loopbackResponse.StatusCode);
+        Assert.Equal(
+            LoopbackAuthenticationHandler.SchemeName,
+            await loopbackResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+
+        var rejectedDeviceRequest = new HttpRequestMessage(HttpMethod.Get, "/teams-auth-test/operator");
+        rejectedDeviceRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "invalid-device-token");
+        var rejectedDeviceResponse = await client.SendAsync(rejectedDeviceRequest, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, rejectedDeviceResponse.StatusCode);
+
+        var teamsRequest = new HttpRequestMessage(HttpMethod.Post, TeamsActivityEndpointExtensions.ActivityPath)
+        {
+            Content = new StringContent("{}")
+        };
+        teamsRequest.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "invalid-device-token");
+        teamsRequest.Headers.Add(TeamsPolicyAuthenticationHandler.HeaderName, TeamsPolicyAuthenticationHandler.HeaderValue);
+        var teamsResponse = await client.SendAsync(teamsRequest, TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, teamsResponse.StatusCode);
+        Assert.Equal(
+            TeamsActivityEndpointExtensions.AuthenticationScheme,
+            await teamsResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Complete_host_rejects_anonymous_teams_activity()
+    {
+        await using var app = await BuildTeamsTestHostAsync();
+
+        var response = await app.GetTestClient().PostAsync(
             TeamsActivityEndpointExtensions.ActivityPath,
             new StringContent("{}"),
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(System.Net.HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
@@ -2054,6 +2179,48 @@ public sealed class TeamsChannelFoundationTests
         return app;
     }
 
+    private static async Task<WebApplication> BuildTeamsAuthorizationTestHostAsync()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "synthetic-tenant",
+            ["Teams:ClientId"] = "synthetic-client",
+            ["Teams:ClientSecret"] = "synthetic-secret"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.AddTeamsIngress();
+        builder.Services.AddNetclawAuthSchemes(new DaemonConfig());
+        builder.Services.AddAuthorization();
+        builder.Services.PostConfigure<AuthenticationOptions>(options =>
+        {
+            options.SchemeMap[TeamsActivityEndpointExtensions.AuthenticationScheme].HandlerType = typeof(TeamsPolicyAuthenticationHandler);
+            options.SchemeMap[DeviceTokenAuthenticationHandler.SchemeName].HandlerType = typeof(FailingDeviceAuthenticationHandler);
+        });
+        builder.Services.RemoveAll<IHostedService>();
+
+        var app = builder.Build();
+        app.Use((context, next) =>
+        {
+            if (context.Request.Headers.ContainsKey("X-Test-Loopback"))
+                context.Connection.RemoteIpAddress = IPAddress.Loopback;
+
+            return next(context);
+        });
+        app.UseAuthentication();
+        app.UseAuthorization();
+        app.MapGet("/teams-auth-test/operator", (HttpContext context) =>
+            Results.Text(context.User.Identity?.AuthenticationType ?? "none"))
+            .RequireAuthorization();
+        app.MapPost(TeamsActivityEndpointExtensions.ActivityPath, (HttpContext context) =>
+            Results.Text(context.User.Identity?.AuthenticationType ?? "none"))
+            .RequireAuthorization(TeamsActivityEndpointExtensions.AuthorizationPolicy);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        return app;
+    }
+
     private static async Task<WebApplication> BuildTeamsRateLimitHostAsync(RateLimitedEndpoint? endpoint = null)
     {
         var builder = WebApplication.CreateBuilder();
@@ -2104,6 +2271,46 @@ public sealed class TeamsChannelFoundationTests
         };
         request.Headers.Add("X-Test-Remote", source);
         return client.SendAsync(request, TestContext.Current.CancellationToken);
+    }
+
+    private sealed class TeamsPolicyAuthenticationHandler : AuthenticationHandler<AuthenticationSchemeOptions>
+    {
+        public const string HeaderName = "X-Test-Teams-Auth";
+        public const string HeaderValue = "valid";
+
+        public TeamsPolicyAuthenticationHandler(
+            IOptionsMonitor<AuthenticationSchemeOptions> options,
+            ILoggerFactory logger,
+            UrlEncoder encoder)
+            : base(options, logger, encoder)
+        {
+        }
+
+        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+        {
+            if (Request.Headers[HeaderName] != HeaderValue)
+                return Task.FromResult(AuthenticateResult.NoResult());
+
+            var identity = new ClaimsIdentity(
+                [new Claim(ClaimTypes.NameIdentifier, "teams-test-user")],
+                Scheme.Name);
+            return Task.FromResult(AuthenticateResult.Success(
+                new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name)));
+        }
+    }
+
+    private sealed class FailingDeviceAuthenticationHandler : AuthenticationHandler<AuthenticationSchemeOptions>
+    {
+        public FailingDeviceAuthenticationHandler(
+            IOptionsMonitor<AuthenticationSchemeOptions> options,
+            ILoggerFactory logger,
+            UrlEncoder encoder)
+            : base(options, logger, encoder)
+        {
+        }
+
+        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+            => Task.FromResult(AuthenticateResult.Fail("test device authentication failure"));
     }
 
     private sealed class RecordingIngressSink : ITeamsConversationIngressSink

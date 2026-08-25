@@ -160,16 +160,20 @@ ASP.NET Core host. The public contract remains one authenticated
 Netclaw translates native typed SDK activities at that edge before actor and
 session routing; Microsoft SDK types do not enter Netclaw channel contracts.
 
-Existing `Teams` configuration and secret ownership remain unchanged. The SDK
-maps the existing client ID, tenant ID, and secret-backed `Teams.ClientSecret`
-into its native `AzureAd` authentication model. Do not add an `AzureAd`
-configuration block or duplicate the client secret for this migration.
+Existing `Teams` configuration and secret ownership remain unchanged. SDK 2.1
+uses its native compatibility mapping when `AzureAd:ClientId` is absent: it
+maps `Teams.ClientId`, `Teams.TenantId`, and secret-backed
+`Teams.ClientSecret` into its in-memory `AzureAd` client-credential model.
+Netclaw rejects enabled Teams configuration that also sets `AzureAd:ClientId`.
+Do not add an `AzureAd` configuration block or duplicate the client secret.
 
 The migration preserves personal, Posts, Threads, ACL, mention, attachment,
-proactive delivery, typing, and Adaptive Card approval semantics. It adds the
-SDK's official tracing and metrics sources to Netclaw's existing OTLP pipeline.
-It does not create a second telemetry pipeline or attach activity bodies,
-identifiers, URLs, tokens, or secrets as Netclaw telemetry attributes.
+proactive delivery, typing, and Adaptive Card approval semantics. The named
+`teams-sdk` policy selects `AzureAd` only for `/api/messages`; generic daemon
+endpoints retain the upstream `AuthSelector` behavior. Native SDK telemetry
+source subscription is deferred. Existing `ChannelTelemetry` remains in use,
+and Phase 1.1 adds no global ASP.NET Core instrumentation or a second telemetry
+pipeline.
 
 Before deploying a Phase 1.1 build, run the controlled Personal, Posts,
 Threads, approval, typing, and duplicate-approval smoke matrix in the live
