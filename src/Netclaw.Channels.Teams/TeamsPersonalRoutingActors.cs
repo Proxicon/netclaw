@@ -287,7 +287,10 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         _serviceProvider.GetRequiredService<ISessionPipeline>(),
         _serviceProvider.GetRequiredService<ITeamsReplyClient>(),
         _serviceProvider.GetRequiredService<TeamsOutputRenderer>(),
-        _serviceProvider.GetRequiredService<TimeProvider>());
+        _serviceProvider.GetRequiredService<TimeProvider>())
+    {
+        PromptInjectionDetector = _serviceProvider.GetService<IPromptInjectionDetector>()
+    };
 
     private static async ValueTask<TeamsApprovalActionResult> AskApprovalAsync(
         IActorRef conversation,
@@ -349,15 +352,7 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         SessionId sessionId,
         CancellationToken cancellationToken)
     {
-        var conversation = GetOrCreatePersonalConversation(sessionId, new TeamsConversationDependencies(
-            _options,
-            _serviceProvider.GetRequiredService<ISessionPipeline>(),
-            _serviceProvider.GetRequiredService<ITeamsReplyClient>(),
-            _serviceProvider.GetRequiredService<TeamsOutputRenderer>(),
-            _serviceProvider.GetRequiredService<TimeProvider>())
-        {
-            PromptInjectionDetector = _serviceProvider.GetService<IPromptInjectionDetector>()
-        });
+        var conversation = GetOrCreatePersonalConversation(sessionId, CreateDependencies());
         try
         {
             var result = await conversation.Ask<TeamsBindingRouteResult>(
@@ -394,15 +389,7 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         SessionId conversationId,
         CancellationToken cancellationToken)
     {
-        var conversation = GetOrCreateChannelConversation(conversationId, new TeamsConversationDependencies(
-            _options,
-            _serviceProvider.GetRequiredService<ISessionPipeline>(),
-            _serviceProvider.GetRequiredService<ITeamsReplyClient>(),
-            _serviceProvider.GetRequiredService<TeamsOutputRenderer>(),
-            _serviceProvider.GetRequiredService<TimeProvider>())
-        {
-            PromptInjectionDetector = _serviceProvider.GetService<IPromptInjectionDetector>()
-        });
+        var conversation = GetOrCreateChannelConversation(conversationId, CreateDependencies());
         try
         {
             var result = await conversation.Ask<TeamsBindingRouteResult>(
@@ -737,6 +724,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             Self.Tell(new MarkRecoveredProactiveDeliveriesUnknown());
             Self.Tell(new RecoverPendingApprovalForwardsCommand());
+            Self.Tell(new RecoverPendingApprovalPresentationsCommand());
             if (_requiresMigrationSnapshot)
                 Self.Tell(new SaveTeamsMigrationSnapshot());
         });
@@ -758,6 +746,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         CommandAsync<TeamsBindingApprovalAction>(HandleApprovalActionAsync);
         CommandAsync<ForwardTeamsApprovalDecision>(ForwardApprovalDecisionAsync);
         Command<RecoverPendingApprovalForwardsCommand>(_ => RecoverPendingApprovalForwards());
+        Command<RecoverPendingApprovalPresentationsCommand>(_ => RecoverPendingApprovalPresentations());
         CommandAsync<DenyTeamsApprovalRequest>(DenyApprovalRequestAsync);
         CommandAsync<DispatchReservedActivity>(DispatchReservedActivityAsync);
         Command<BeginTeamsReminderDispatch>(BeginReminderDispatch);
@@ -910,6 +899,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             {
                 ApplyDestinationCaptured(captured);
                 RecordDestinationTelemetry("proactive_destination_captured");
+                RecoverPendingApprovalPresentations();
                 ReserveIngress(ingress, activityFingerprint, replyTo);
             });
             return;
@@ -1563,6 +1553,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         foreach (var approval in snapshot.Approvals)
         {
+            var presentationPending = approval.PresentationPending && approval.PromptId is null;
             ApplyApprovalPendingCreated(new TeamsApprovalPendingCreated
             {
                 CallId = approval.CallId,
@@ -1574,9 +1565,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 OfferedOptionKeys = approval.OfferedOptionKeys,
                 IsMcpTool = approval.IsMcpTool,
                 ToolName = approval.ToolName,
-                RequestDisplayText = approval.RequestDisplayText
+                RequestDisplayText = approval.RequestDisplayText,
+                PresentationPending = presentationPending
             });
-            if (approval.PromptId is not null)
+            if (!presentationPending)
             {
                 ApplyApprovalCardDelivered(new TeamsApprovalCardDelivered
                 {
@@ -1768,6 +1760,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             ToolName = pending.ToolName,
             RequestDisplayText = pending.RequestDisplayText,
             PromptId = pending.PromptId,
+            PresentationPending = pending.PresentationPending,
             ForwardingDecision = pending.ForwardingDecision,
             ForwardingSenderId = pending.ForwardingSenderId,
             Decision = pending.Decision
@@ -2166,7 +2159,11 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private async Task DeliverApprovalCardAsync(DeliverTeamsApprovalCard delivery)
     {
-        if (_destination is null || !_pendingApprovals.TryGetValue(delivery.CorrelationId, out var pending))
+        if (_destination is null
+            || !_pendingApprovals.TryGetValue(delivery.CorrelationId, out var pending)
+            // A recovery reissue may supersede an already-queued local send.
+            // Only the current opaque nonce binding may be presented.
+            || !TeamsApprovalCardRenderer.NonceMatches(pending.NonceHash, delivery.Nonce))
             return;
 
         TeamsApprovalCard card;
@@ -2187,6 +2184,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         if (!result.IsSuccess)
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("approval_card_delivery_failed");
+            MarkApprovalPresentationForRecovery(pending);
             return;
         }
 
@@ -2196,13 +2194,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             // for an in-place terminal update. Approval actions remain protected by
             // their one-time nonce, sender, tenant, option, and expiry checks.
             ChannelTelemetry.For(ChannelType.Teams).RecordExtra("approval_card_delivery_unbound");
-            return;
         }
 
         Persist(new TeamsApprovalCardDelivered
         {
             CorrelationId = pending.CorrelationId,
-            PromptId = result.ActivityId!
+            PromptId = IsBoundedActivityId(result.ActivityId) ? result.ActivityId : null
         }, ApplyApprovalCardDelivered);
     }
 
@@ -2459,6 +2456,38 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
     }
 
+    private void RecoverPendingApprovalPresentations()
+    {
+        foreach (var pending in _pendingApprovals.Values
+                     .Where(static pending => pending.Decision is null
+                                             && pending.ForwardingDecision is null
+                                             && pending.PresentationPending)
+                     .ToArray())
+        {
+            ReissueApprovalCardForPresentation(pending, deliver: true);
+        }
+    }
+
+    private void MarkApprovalPresentationForRecovery(TeamsPendingApproval pending) =>
+        ReissueApprovalCardForPresentation(pending, deliver: false);
+
+    private void ReissueApprovalCardForPresentation(TeamsPendingApproval pending, bool deliver)
+    {
+        var nonce = TeamsApprovalCardRenderer.CreateNonce();
+        var expiry = _dependencies.TimeProvider.GetUtcNow().AddMinutes(15);
+        Persist(new TeamsApprovalCardReissued
+        {
+            CorrelationId = pending.CorrelationId,
+            NonceHash = TeamsApprovalCardRenderer.HashNonce(nonce),
+            ExpiresAtUnixMilliseconds = expiry.ToUnixTimeMilliseconds()
+        }, reissued =>
+        {
+            ApplyApprovalCardReissued(reissued);
+            if (deliver)
+                Self.Tell(new DeliverTeamsApprovalCard(pending.CorrelationId, nonce));
+        });
+    }
+
     private static TeamsApprovalCard CreateTerminalCard(TeamsPendingApproval pending, string text) =>
         TeamsApprovalCardRenderer.CreateTerminal(
             pending.ToolName,
@@ -2557,7 +2586,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             created.OfferedOptionKeys.ToArray(),
             created.IsMcpTool,
             created.ToolName,
-            created.RequestDisplayText);
+            created.RequestDisplayText,
+            PresentationPending: created.PresentationPending);
         if (!_pendingApprovals.TryAdd(created.CorrelationId, pending))
         {
             throw new InvalidOperationException("The Teams approval state contains a duplicate correlation.");
@@ -2576,14 +2606,18 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private void ApplyApprovalCardDelivered(TeamsApprovalCardDelivered delivered)
     {
         if (!_pendingApprovals.TryGetValue(delivered.CorrelationId, out var pending)
-            || !IsBoundedActivityId(delivered.PromptId))
+            || (delivered.PromptId is not null && !IsBoundedActivityId(delivered.PromptId)))
         {
             throw new InvalidOperationException("The Teams approval card locator is invalid.");
         }
 
-        _pendingApprovals[delivered.CorrelationId] = pending with { PromptId = delivered.PromptId };
+        _pendingApprovals[delivered.CorrelationId] = pending with
+        {
+            PromptId = delivered.PromptId,
+            PresentationPending = false
+        };
         var shared = _pendingApprovalRequests.FirstOrDefault(item => item.CallId.Value == pending.CallId);
-        if (shared is not null)
+        if (shared is not null && delivered.PromptId is not null)
             shared.PromptId = new TeamsApprovalPromptId(delivered.PromptId);
     }
 
@@ -2602,8 +2636,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             NonceHash = reissued.NonceHash,
             ExpiresAtUnixMilliseconds = reissued.ExpiresAtUnixMilliseconds,
-            PromptId = null
+            PromptId = null,
+            PresentationPending = true
         };
+        var shared = _pendingApprovalRequests.FirstOrDefault(item => item.CallId.Value == pending.CallId);
+        if (shared is not null)
+            shared.PromptId = null;
     }
 
     private void ApplyApprovalConsumed(TeamsApprovalConsumed consumed)
@@ -2717,6 +2755,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private sealed record RecoverPendingApprovalForwardsCommand : INoSerializationVerificationNeeded;
 
+    private sealed record RecoverPendingApprovalPresentationsCommand : INoSerializationVerificationNeeded;
+
     private sealed record TeamsPendingApproval(
         string CallId,
         string CorrelationId,
@@ -2728,6 +2768,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         bool IsMcpTool,
         string ToolName,
         string RequestDisplayText,
+        bool PresentationPending = true,
         string? PromptId = null,
         string? ForwardingDecision = null,
         string? ForwardingSenderId = null,

@@ -7,12 +7,12 @@ an Adaptive Card lifetime or callback into a separate authorization policy.
 
 ### Requirement: Teams card state is opaque transport state
 
-Teams SHALL persist only the bounded correlation, nonce hash, prompt locator,
-offered option keys, forwarding state, and terminal presentation data needed to
-bind and replay protect a card action. It SHALL not persist a raw nonce, card
-JSON, raw tool arguments, token, SDK object, or policy/grant decision. The
-session journal remains authoritative for whether an approval call is pending
-and for its selected option semantics.
+Teams SHALL persist only the bounded correlation, nonce hash, optional prompt
+locator, offered option keys, forwarding state, and presentation-recovery data
+needed to bind and replay protect a card action. It SHALL not persist a raw
+nonce, card JSON, raw tool arguments, token, SDK object, or policy/grant
+decision. The session journal remains authoritative for whether an approval
+call is pending and for its selected option semantics.
 
 #### Scenario: Valid card action forwards an exact session option
 
@@ -49,7 +49,10 @@ SHALL never authorize after reissue.
 
 Teams SHALL report card delivery failure through normal delivery observability.
 It SHALL leave the session-owned approval pending and SHALL not manufacture a
-deny merely because a particular card presentation fails.
+deny merely because a particular card presentation fails. It SHALL invalidate
+the attempted opaque nonce binding, retain only bounded presentation-recovery
+state, and create a fresh binding on a later recovery opportunity. It SHALL
+not persist a raw nonce or tight-loop local delivery retries.
 
 #### Scenario: Approval card delivery fails
 
@@ -57,6 +60,22 @@ deny merely because a particular card presentation fails.
 - **WHEN** Teams records the transport result
 - **THEN** the failure is observable through channel delivery telemetry or feedback
 - **AND** the session approval remains pending until an explicit session decision
+
+#### Scenario: Restart reissues a failed presentation safely
+
+- **GIVEN** a card delivery failed after its nonce hash was persisted
+- **WHEN** the Teams binding recovers
+- **THEN** it invalidates the failed binding and presents a fresh bounded card
+- **AND** the failed nonce cannot authorize an action
+- **AND** the session has no synthetic denial or terminal consume record
+
+#### Scenario: Successful unbound card remains valid
+
+- **GIVEN** Teams accepts a card but returns no activity ID
+- **WHEN** the binding records the successful delivery and later recovers
+- **THEN** it treats the card as presented rather than as a delivery failure
+- **AND** a valid callback still requires the nonce, sender, tenant, offered
+  option, and expiry checks
 
 ### Requirement: Uncertain callback forwarding remains recoverable
 

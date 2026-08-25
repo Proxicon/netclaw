@@ -267,6 +267,14 @@ the opaque nonce binding with a fresh card while preserving the pending
 session-owned approval. The old card cannot authorize an action; the replacement
 card may be selected once by the original approved requester.
 
+If presentation delivery fails, Teams records only bounded recovery state and
+invalidates that attempted nonce binding. It does not persist the raw nonce,
+deny or consume the session approval, or self-retry in a tight loop. A later
+recovery, including actor restart, creates and delivers a fresh card. A Teams
+delivery that succeeds without an activity ID is still a successful unbound
+presentation; card action validation continues to use the nonce, sender,
+tenant, offered option, and expiry checks.
+
 Teams uses the generic approval system only after the normal session pipeline
 has found an operation eligible. The adapter does not expand core tool
 eligibility: host shell remains subject to Netclaw's existing Personal-only
@@ -338,14 +346,24 @@ either secret during diagnosis.
 
 ## Rollback
 
+Before the first deployment of this change, take and verify a backup or
+snapshot of the Teams persistence store. The current binary can read existing
+Teams records, but it may write `teams-approval-reissued-v2` and
+`teams-approval-forwarding-v2`, which the previous binary cannot read.
+
+Rollback to the previous binary is straightforward only before either
+incompatible manifest has been written. Afterwards, use a forward fix or stop
+the daemon and restore the verified pre-deployment Teams persistence snapshot
+before starting the previous binary. Do not run the previous binary against a
+store containing the new manifests.
+
+To stop Teams ingress without changing the binary:
+
 1. Set `Teams.Enabled` to `false` in `netclaw.json`.
 2. Restart the Netclaw daemon.
 3. Confirm that the Teams connector is absent or disabled in `netclaw status`.
 4. Withdraw or block the app in the Teams admin center.
 5. Revoke the client secret when the rollback is permanent.
-
-This rollback stops new Teams ingress after restart. It does not delete durable
-session, approval, destination, or delivery evidence.
 
 ## Microsoft references
 

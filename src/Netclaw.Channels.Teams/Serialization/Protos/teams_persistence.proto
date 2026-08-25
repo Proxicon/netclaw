@@ -18,11 +18,12 @@ message TeamsApprovalPendingCreatedProto {
   bool is_mcp_tool = 8;
   string tool_name = 9;
   string request_display_text = 10;
+  optional bool presentation_pending = 11;
 }
 
 message TeamsApprovalCardDeliveredProto {
   string correlation_id = 1;
-  string prompt_id = 2;
+  optional string prompt_id = 2;
 }
 
 message TeamsApprovalCardReissuedProto {
@@ -59,6 +60,7 @@ message TeamsApprovalSnapshotEntryProto {
   string request_display_text = 12;
   optional string forwarding_decision = 13;
   optional string forwarding_sender_id = 14;
+  optional bool presentation_pending = 15;
 }
 
 message TeamsProactiveDestinationCapturedProto {
