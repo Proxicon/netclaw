@@ -22,6 +22,7 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
 {
     private const string ApprovalPendingManifest = "teams-approval-pending-v2";
     private const string ApprovalDeliveredManifest = "teams-approval-delivered-v2";
+    private const string ApprovalReissuedManifest = "teams-approval-reissued-v2";
     private const string ApprovalConsumedManifest = "teams-approval-consumed-v2";
     private const string DestinationCapturedManifest = "teams-destination-captured-v2";
     private const string DeliveryRecordedManifest = "teams-delivery-recorded-v2";
@@ -33,6 +34,7 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         [typeof(TeamsApprovalPendingCreated)] = ApprovalPendingManifest,
         [typeof(TeamsApprovalCardDelivered)] = ApprovalDeliveredManifest,
+        [typeof(TeamsApprovalCardReissued)] = ApprovalReissuedManifest,
         [typeof(TeamsApprovalConsumed)] = ApprovalConsumedManifest,
         [typeof(TeamsProactiveDestinationCaptured)] = DestinationCapturedManifest,
         [typeof(TeamsProactiveDeliveryRecorded)] = DeliveryRecordedManifest,
@@ -57,6 +59,7 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         ApprovalPendingManifest => FromProto(Proto.TeamsApprovalPendingCreatedProto.Parser.ParseFrom(bytes)),
         ApprovalDeliveredManifest => FromProto(Proto.TeamsApprovalCardDeliveredProto.Parser.ParseFrom(bytes)),
+        ApprovalReissuedManifest => FromProto(Proto.TeamsApprovalCardReissuedProto.Parser.ParseFrom(bytes)),
         ApprovalConsumedManifest => FromProto(Proto.TeamsApprovalConsumedProto.Parser.ParseFrom(bytes)),
         DestinationCapturedManifest => FromProto(Proto.TeamsProactiveDestinationCapturedProto.Parser.ParseFrom(bytes)),
         DeliveryRecordedManifest => FromProto(Proto.TeamsProactiveDeliveryRecordedProto.Parser.ParseFrom(bytes)),
@@ -70,6 +73,7 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         TeamsApprovalPendingCreated item => ToProto(item),
         TeamsApprovalCardDelivered item => ToProto(item),
+        TeamsApprovalCardReissued item => ToProto(item),
         TeamsApprovalConsumed item => ToProto(item),
         TeamsProactiveDestinationCaptured item => ToProto(item),
         TeamsProactiveDeliveryRecorded item => ToProto(item),
@@ -121,6 +125,20 @@ public sealed class TeamsPersistenceSerializer : SerializerWithStringManifest
     {
         CorrelationId = value.CorrelationId,
         PromptId = value.PromptId
+    };
+
+    private static Proto.TeamsApprovalCardReissuedProto ToProto(TeamsApprovalCardReissued value) => new()
+    {
+        CorrelationId = value.CorrelationId,
+        NonceHash = value.NonceHash,
+        ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds
+    };
+
+    private static TeamsApprovalCardReissued FromProto(Proto.TeamsApprovalCardReissuedProto value) => new()
+    {
+        CorrelationId = value.CorrelationId,
+        NonceHash = value.NonceHash,
+        ExpiresAtUnixMilliseconds = value.ExpiresAtUnixMilliseconds
     };
 
     private static Proto.TeamsApprovalConsumedProto ToProto(TeamsApprovalConsumed value) => new()

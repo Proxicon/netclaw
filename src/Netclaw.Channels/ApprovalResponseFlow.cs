@@ -34,6 +34,20 @@ public delegate Task ResolvedApprovalPromptRenderer<TPromptId>(
     where TPromptId : struct;
 
 /// <summary>
+/// The session-authoritative outcome of forwarding an interactive approval
+/// response. Transport adapters can use this to render a deterministic native
+/// response without inferring policy from their callback payload.
+/// </summary>
+public enum ApprovalResponseDisposition
+{
+    Accepted,
+    WrongRequester,
+    Rejected,
+    FeedbackFailed,
+    UnexpectedResponse
+}
+
+/// <summary>
 /// Shared approval-response handling for the channel binding actors. The flow
 /// owns text-approval parsing, the cold-spawn text path, pending-prompt
 /// resolution, and the requester identity check. Slack, Discord, and Mattermost
@@ -233,6 +247,24 @@ public sealed class ApprovalResponseFlow<TRequest, TPromptId>
         string selectedKey,
         string senderId,
         TPromptId? payloadPromptId,
+        Action<ISessionResponse>? respondSynchronously = null) =>
+        _ = await HandleApprovalResponseWithResultAsync(
+            callId,
+            selectedKey,
+            senderId,
+            payloadPromptId,
+            respondSynchronously);
+
+    /// <summary>
+    /// Handles an interactive approval response and returns the session's
+    /// authoritative outcome. The existing task-only method remains available
+    /// for channel bindings that do not need a synchronous transport result.
+    /// </summary>
+    public async Task<ApprovalResponseDisposition> HandleApprovalResponseWithResultAsync(
+        ToolCallId callId,
+        string selectedKey,
+        string senderId,
+        TPromptId? payloadPromptId,
         Action<ISessionResponse>? respondSynchronously = null)
     {
         var (result, pending) = PendingApprovalLookup.Resolve<TRequest, TPromptId>(
@@ -248,7 +280,7 @@ public sealed class ApprovalResponseFlow<TRequest, TPromptId>
         {
             await _postWrongRequesterWarningAsync();
             respondSynchronously?.Invoke(CommandNack.For(_sessionId, ApprovalNackReasons.WrongRequester));
-            return;
+            return ApprovalResponseDisposition.WrongRequester;
         }
 
         // Wait for the session before redrawing. This is the security gate that
@@ -274,7 +306,7 @@ public sealed class ApprovalResponseFlow<TRequest, TPromptId>
         {
             _log.Error(ex, "Failed to route {Channel} approval response for call {CallId}", _channelName, callId);
             respondSynchronously?.Invoke(CommandNack.For(_sessionId, ApprovalNackReasons.PersistFailed));
-            return;
+            return ApprovalResponseDisposition.FeedbackFailed;
         }
 
         CommandAck ack;
@@ -293,7 +325,9 @@ public sealed class ApprovalResponseFlow<TRequest, TPromptId>
                     callId,
                     nack.Reason ?? "<none>");
                 respondSynchronously?.Invoke(nack);
-                return;
+                return string.Equals(nack.Reason, ApprovalNackReasons.WrongRequester, StringComparison.Ordinal)
+                    ? ApprovalResponseDisposition.WrongRequester
+                    : ApprovalResponseDisposition.Rejected;
 
             case CommandAck ok:
                 ack = ok;
@@ -310,7 +344,7 @@ public sealed class ApprovalResponseFlow<TRequest, TPromptId>
                     callId,
                     feedbackResult.GetType().Name);
                 respondSynchronously?.Invoke(CommandNack.For(_sessionId, ApprovalNackReasons.PersistFailed));
-                return;
+                return ApprovalResponseDisposition.UnexpectedResponse;
         }
 
         if (pending is not null)
@@ -374,6 +408,7 @@ public sealed class ApprovalResponseFlow<TRequest, TPromptId>
         }
 
         respondSynchronously?.Invoke(ack);
+        return ApprovalResponseDisposition.Accepted;
     }
 
     /// <summary>
