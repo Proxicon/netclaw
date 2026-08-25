@@ -68,6 +68,13 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     /// </summary>
     internal static readonly TimeSpan CatalogRefreshTimeout = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// The <c>server/discover</c> probe budget for a stdio server. See the remarks on
+    /// <see cref="BuildClientOptions"/> for why this must stay finite and why 5 seconds
+    /// (the SDK default) is too short for a freshly spawned child process.
+    /// </summary>
+    internal static readonly TimeSpan StdioDiscoverProbeTimeout = TimeSpan.FromSeconds(30);
+
     public McpClientManager(
         Dictionary<string, McpServerEntry> serverEntries,
         ToolRegistry toolRegistry,
@@ -357,11 +364,11 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
             lifecycle.RollbackCatalogRefreshClaim(previousRefreshMs);
             if (IsAuthFailure(ex))
             {
-                MarkAwaitingAuthorization(lifecycle, current, ex);
+                MarkAwaitingAuthorization(lifecycle, current, ex, entry.Url);
                 return McpCatalogRefreshResult.Failed;
             }
 
-            _logger.LogWarning(ex,
+            _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex),
                 "MCP server '{Name}' catalog refresh failed; keeping generation {Generation} unchanged",
                 current.Name.Value,
                 current.Generation);
@@ -843,9 +850,11 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                     hasOAuthRuntimeHints,
                     now);
             lifecycle.Publish(WithFailureStatus(current, failureStatus));
+            if (IsAuthFailure(ex))
+                LogOAuthRefreshFailureDiagnostics(current.Name.Value, entry.Url);
             if (current.IsConnected)
             {
-                _logger.LogWarning(ex,
+                _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex),
                     "MCP server '{Name}' replacement failed; generation {Generation} remains connected",
                     current.Name.Value,
                     current.Generation);
@@ -863,7 +872,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                     _credentialStore.ForgetClientIdentity(current.Name, entry.Url!, CancellationToken.None);
 
                 var error = CreateSafeOAuthError(ex, "connection initialization");
-                _logger.LogError(ex,
+                _logger.LogError(SecretOutputRedactor.RedactForLogging(ex),
                     "Explicit MCP OAuth candidate failed for server '{Name}' during {Operation} (provider status {ProviderStatus})",
                     current.Name.Value,
                     error.Operation,
@@ -937,13 +946,13 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
             var error = new McpErrorResponse(
                 "Authorization was cancelled or expired. Start a new MCP authorization attempt.",
                 "authorization exchange");
-            _logger.LogWarning(ex, "Explicit MCP OAuth flow was cancelled for '{Name}'", flow.ServerName.Value);
+            _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex), "Explicit MCP OAuth flow was cancelled for '{Name}'", flow.ServerName.Value);
             _flowBroker.Fail(flow, error);
         }
         catch (Exception ex)
         {
             var error = CreateSafeOAuthError(ex, "connection initialization");
-            _logger.LogError(ex, "Explicit MCP OAuth flow failed for '{Name}'", flow.ServerName.Value);
+            _logger.LogError(SecretOutputRedactor.RedactForLogging(ex), "Explicit MCP OAuth flow failed for '{Name}'", flow.ServerName.Value);
             _flowBroker.Fail(flow, error);
         }
     }
@@ -1001,7 +1010,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
         {
             // The replacement is already published and serving; a failed disposal of the
             // old client leaks a connection but must not fail the reconnect.
-            _logger.LogError(ex, "Error disposing replaced MCP client '{Name}'", replaced.Name.Value);
+            _logger.LogError(SecretOutputRedactor.RedactForLogging(ex), "Error disposing replaced MCP client '{Name}'", replaced.Name.Value);
         }
     }
 
@@ -1171,7 +1180,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
             var transport = CreateTransport(name, entry, oauthCache, authorizationFlow);
             var client = await _clientRuntime.CreateAsync(
                 transport,
-                BuildClientOptions(authorizationFlow, notificationLease),
+                BuildClientOptions(authorizationFlow, notificationLease, entry.Transport is "stdio"),
                 ct);
             return new McpClientCandidate(client, oauthCache);
         }
@@ -1185,7 +1194,8 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
 
     /// <summary>
     /// Builds the client options, stretching both connect timeouts when an operator is
-    /// waiting at a browser.
+    /// waiting at a browser, and raising the separate discover-probe timeout for a
+    /// stdio server.
     /// <para>
     /// The SDK defaults are machine-scale: a 5 second <c>server/discover</c> probe and a
     /// 60 second initialization budget. A server that answers the probe with 401 sends the
@@ -1197,10 +1207,38 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     /// flow exists. A background reconnect keeps the defaults, because its handler returns
     /// immediately and nothing waits.
     /// </para>
+    /// <para>
+    /// A stdio server is a child process this call just spawned, not a warm peer. The
+    /// default 5 second probe budget races a cold process start on a loaded machine
+    /// (measured locally: a child that takes as little as 6 seconds to start answering
+    /// fails every time). When the probe gives up first, the SDK abandons it and sends a
+    /// separate <c>initialize</c> request on the same connection. A server pinned to a
+    /// protocol revision that only the <c>server/discover</c> handshake carries (the SDK's
+    /// 2026-07-28 revision) rejects every plain <c>initialize</c> request, so the fallback
+    /// fails on such a server -- a server-side rejection, not a client-side comparison. An
+    /// unpinned server recovers from the fallback; the race only strands pinned ones. The SDK
+    /// surfaces this as <c>UnsupportedProtocolVersionException</c>, which is neither
+    /// <see cref="TimeoutException"/> nor <see cref="TaskCanceledException"/>, so the
+    /// operator sees a bare "Failed to reach MCP server" with no timeout wording.
+    /// </para>
+    /// <para>
+    /// Raising <see cref="StdioDiscoverProbeTimeout"/> to 30 seconds gives every observed
+    /// cold start room to answer the probe before the fallback fires, which removes the
+    /// race. The timeout must stay finite, not <see cref="Timeout.InfiniteTimeSpan"/>: the
+    /// probe's own remarks name a real stdio server class that silently drops an unknown
+    /// <c>server/discover</c> method instead of answering it -- a hand-rolled script that
+    /// dispatches the methods it knows and ignores the rest. Netclaw's stdio config accepts
+    /// an arbitrary user command, so that class is reachable here. For it, the probe
+    /// timeout is the only signal that triggers the <c>initialize</c> fallback; an infinite
+    /// probe would wait forever and the server could never connect. A finite 30 second
+    /// probe keeps that server connectable -- slower than the SDK's 5 second default, but
+    /// never locked out -- while still giving a cold child enough room to answer directly.
+    /// </para>
     /// </summary>
     private static McpClientOptions BuildClientOptions(
         McpOAuthFlow? authorizationFlow,
-        McpCatalogNotificationLease notificationLease)
+        McpCatalogNotificationLease notificationLease,
+        bool isStdioTransport)
     {
         var options = new McpClientOptions
         {
@@ -1222,6 +1260,10 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
         {
             options.InitializationTimeout = McpOAuthFlowBroker.FlowLifetime;
             options.DiscoverProbeTimeout = McpOAuthFlowBroker.FlowLifetime;
+        }
+        else if (isStdioTransport)
+        {
+            options.DiscoverProbeTimeout = StdioDiscoverProbeTimeout;
         }
 
         return options;
@@ -1327,9 +1369,16 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
         bool hasOAuthRuntimeHints,
         DateTimeOffset errorAt)
     {
+        // A stdio server is a local child process: no HTTP request is ever made for it, so
+        // no HTTP status can genuinely appear in its failure. The spawn-failure message
+        // routinely embeds caller-supplied data -- the command name, a working directory --
+        // that can coincidentally look like a status code (e.g. a GUID substring landing on
+        // "401"), so status sniffing is skipped outright for this transport.
+        var isStdioTransport = entry.Transport is "stdio";
+
         if (IsAuthFailure(ex))
         {
-            if (!hasCachedTokens && entry.Transport is not "stdio" && hasOAuthRuntimeHints)
+            if (!hasCachedTokens && !isStdioTransport && hasOAuthRuntimeHints)
             {
                 // "Awaiting auth" -- which sends the operator to `netclaw mcp auth` -- is only
                 // correct for a genuine OAuth challenge: a Bearer WWW-Authenticate response (or
@@ -1341,7 +1390,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                 // carrying the HTTP status instead.
                 return IsOAuthChallenge(ex)
                     ? CreateAwaitingAuthStatus(serverName, errorAt)
-                    : CreateUnreachableStatus(serverName, ex, errorAt);
+                    : CreateUnreachableStatus(serverName, ex, errorAt, isStdioTransport);
             }
 
             return CreateAuthFailedStatus(
@@ -1351,7 +1400,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                 errorAt);
         }
 
-        return CreateUnreachableStatus(serverName, ex, errorAt);
+        return CreateUnreachableStatus(serverName, ex, errorAt, isStdioTransport);
     }
 
     internal static McpServerStatus CreateAwaitingAuthStatus(
@@ -1388,19 +1437,32 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     internal static McpServerStatus CreateUnreachableStatus(
         McpServerName serverName,
         Exception ex,
-        DateTimeOffset errorAt)
+        DateTimeOffset errorAt,
+        bool isStdioTransport)
         => new(
             serverName,
             McpConnectionState.Unreachable,
             0,
-            GetSafeConnectionFailure(ex),
+            GetSafeConnectionFailure(ex, isStdioTransport),
             errorAt);
 
-    private static string GetSafeConnectionFailure(Exception ex)
+    private static string GetSafeConnectionFailure(Exception ex, bool isStdioTransport)
     {
-        var status = FindHttpStatus(ex);
+        var status = isStdioTransport ? null : FindHttpStatus(ex);
         if (status is not null)
             return $"MCP server request failed (HTTP {(int)status.Value} {status.Value}).";
+        // The client and the server disagreed on the negotiated protocol version -- most
+        // often a probe/initialize race on a slow-to-answer server (see BuildClientOptions).
+        // Requested/Supported are protocol version identifiers only, safe to surface.
+        if (ex is UnsupportedProtocolVersionException versionMismatch)
+        {
+            var supported = versionMismatch.Supported.Count > 0
+                ? string.Join(", ", versionMismatch.Supported)
+                : "none listed";
+            return "MCP server protocol version negotiation failed "
+                + $"(requested {versionMismatch.Requested}; server supports {supported}).";
+        }
+
         if (ex is TimeoutException or TaskCanceledException)
             return "MCP server connection timed out.";
         return "Failed to reach MCP server. Check daemon logs for details.";
@@ -1415,7 +1477,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     {
         if (failureStatus.State is McpConnectionState.AwaitingAuth)
         {
-            _logger.LogWarning(ex, "MCP server '{Name}' requires OAuth authorization", name.Value);
+            _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex), "MCP server '{Name}' requires OAuth authorization", name.Value);
             EmitAuthAlert(name,
                 $"MCP server '{name.Value}' requires OAuth authorization. Run: netclaw mcp auth {name.Value}",
                 "authorization_required");
@@ -1424,7 +1486,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
 
         if (failureStatus.State is McpConnectionState.AuthFailed)
         {
-            _logger.LogWarning(ex, "MCP server '{Name}' authentication failed", name.Value);
+            _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex), "MCP server '{Name}' authentication failed", name.Value);
             if (hasOAuthRuntimeHints || hasCachedTokens)
             {
                 EmitAuthAlert(name,
@@ -1440,7 +1502,7 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
             return;
         }
 
-        _logger.LogWarning(ex, "Failed to connect to MCP server '{Name}'", name.Value);
+        _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex), "Failed to connect to MCP server '{Name}'", name.Value);
         EmitDisconnectedAlert(name,
             $"MCP server '{name.Value}' connection failed: {failureStatus.ErrorMessage}");
     }
@@ -1491,17 +1553,85 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
     private void MarkAwaitingAuthorization(
         McpServerLifecycle lifecycle,
         McpServerSnapshot current,
-        Exception ex)
+        Exception ex,
+        string? resourceUrl)
     {
         var status = CreateAwaitingAuthStatus(current.Name, _timeProvider.GetUtcNow())
             with { ToolCount = current.ToolFunctions.Count };
         lifecycle.Publish(current with { Status = status });
-        _logger.LogWarning(ex,
+        _logger.LogWarning(SecretOutputRedactor.RedactForLogging(ex),
             "MCP server '{Name}' lost OAuth authorization during catalog refresh; marked AwaitingAuth",
             current.Name.Value);
+        LogOAuthRefreshFailureDiagnostics(current.Name.Value, resourceUrl);
         EmitAuthAlert(current.Name,
             $"MCP server '{current.Name.Value}' lost OAuth authorization. Run: netclaw mcp auth {current.Name.Value}",
             "authorization_expired");
+    }
+
+    /// <summary>
+    /// When a stored OAuth record can no longer produce a working access token, the SDK
+    /// 2.0 refresh path fails silently: a refresh is only attempted when the cached token
+    /// container matches the live provider on all four binding fields — AuthorizationServer,
+    /// ClientId, ClientSecret, and TokenEndpointAuthMethod — and even then the actual
+    /// refresh HTTP response is swallowed (returned as a null access token, surfaced as a
+    /// generic "null authorization result" failure). This method makes the failure
+    /// diagnosable by reporting exactly which binding field is missing or mismatched and
+    /// whether a refresh token existed to redeem at all.
+    /// </summary>
+    private void LogOAuthRefreshFailureDiagnostics(string serverName, string? resourceUrl)
+    {
+        try
+        {
+            if (resourceUrl is null)
+                return;
+
+            var record = _credentialStore.GetBoundActive(new McpServerName(serverName), resourceUrl);
+            if (record is null)
+            {
+                _logger.LogWarning(
+                    "OAuth failure diagnostics for MCP server '{Name}': no bound credential record found for resource '{Url}'. " +
+                    "The SDK had no refresh token to redeem, so the only remedy is a fresh authorization.",
+                    serverName,
+                    resourceUrl);
+                return;
+            }
+
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(record.AuthorizationServer))
+                missing.Add("AuthorizationServer");
+            if (string.IsNullOrWhiteSpace(record.ClientId))
+                missing.Add("ClientId");
+            if (record.ClientSecret is null)
+                missing.Add("ClientSecret");
+            if (string.IsNullOrWhiteSpace(record.TokenEndpointAuthMethod))
+                missing.Add("TokenEndpointAuthMethod");
+
+            var hasRefreshToken = record.RefreshToken is not null;
+            var hasAccessToken = record.AccessToken is not null;
+            var expiresAt = record.ExpiresAt;
+
+            _logger.LogWarning(
+                "OAuth refresh failure diagnostics for MCP server '{Name}': stored record has refreshToken={HasRefresh}, " +
+                "accessToken={HasAccess}, expiresAt={ExpiresAt:o}, dynamicClientRegistration={Dcr}, " +
+                "bindingFieldsMissing=[{Missing}], authorizationServer={AuthServer}. " +
+                "The SDK 2.0 refresh gate requires AuthorizationServer, ClientId, ClientSecret, and " +
+                "TokenEndpointAuthMethod to all match the live provider; missing fields mean refresh is " +
+                "never attempted and every expiration falls through to interactive auth (the 'null " +
+                "authorization result' symptom).",
+                serverName,
+                hasRefreshToken,
+                hasAccessToken,
+                expiresAt,
+                record.DynamicClientRegistration,
+                string.Join(", ", missing),
+                record.AuthorizationServer ?? "<null>");
+        }
+        catch (Exception diagEx)
+        {
+            _logger.LogDebug(diagEx,
+                "Failed to produce OAuth refresh diagnostics for MCP server '{Name}'",
+                serverName);
+        }
     }
 
     private static bool IsAuthFailure(Exception ex)
@@ -1626,6 +1756,17 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
         }
     }
 
+    /// <summary>
+    /// Reads an HTTP status from an exception chain. Only two anchored shapes are trusted: a
+    /// typed <see cref="HttpRequestException.StatusCode"/>, and the literal "status {Name}" /
+    /// "HTTP {code}" text the MCP SDK and .NET's own <c>HttpClient</c> use when they report one
+    /// (see the SDK's <c>HttpResponseMessageExtensions.CreateHttpRequestException</c> and
+    /// <see cref="McpOAuthClientRegistrar"/>, both of which set the typed status too). A bare
+    /// digit or word match (e.g. <c>Contains("401")</c>) is deliberately not used: exception
+    /// messages routinely embed caller-supplied data -- command names, file paths, GUIDs -- and
+    /// a coincidental "401"/"403" substring there would misreport an unrelated failure as an
+    /// HTTP auth rejection.
+    /// </summary>
     private static HttpStatusCode? FindHttpStatus(Exception ex)
     {
         if (ex is HttpRequestException { StatusCode: { } status })
@@ -1636,12 +1777,6 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
                 || ex.Message.Contains($"HTTP {(int)candidate}", StringComparison.OrdinalIgnoreCase))
                 return candidate;
         }
-        if (ex.Message.Contains("403", StringComparison.Ordinal)
-            || ex.Message.Contains("Forbidden", StringComparison.OrdinalIgnoreCase))
-            return HttpStatusCode.Forbidden;
-        if (ex.Message.Contains("401", StringComparison.Ordinal)
-            || ex.Message.Contains("Unauthorized", StringComparison.OrdinalIgnoreCase))
-            return HttpStatusCode.Unauthorized;
         return ex.InnerException is null ? null : FindHttpStatus(ex.InnerException);
     }
 
@@ -1878,7 +2013,8 @@ internal sealed class McpClientManager : IHostedService, IDisposable, IMcpToolIn
 
         foreach (var profile in profiles.GetAllProfiles())
         {
-            if (profile.McpServerToolGrants is not { } grants
+            if (profile.McpServersMode == ToolProfileMode.All
+                || profile.McpServerToolGrants is not { } grants
                 || !grants.TryGetValue(serverName.Value, out var tools))
                 continue;
 

@@ -324,6 +324,7 @@ static async Task RunDaemonAsync(
         .WithTags("Stats")
         .RequireAuthorization();
     app.MapWebhookEndpoints();
+    app.MapWebhookRouteEndpoints();
     app.MapMattermostActionEndpoint();
     app.MapTeamsActivityEndpoint();
 
@@ -613,65 +614,9 @@ static void ConfigureDaemonServices(
         .Get<SearchConfig>() ?? new SearchConfig();
     var searchBackend = searchConfig.Enabled ? CreateSearchBackend(searchConfig) : null;
 
-    // ConfigDirectory is hard-denied for agent writes and shell access to
-    // close the prompt-injection vector where an injected payload would
-    // instruct the agent to rewrite tool-approvals.json, hard-deny-overrides.json,
-    // or netclaw.json and grant itself global trust. Operators retain agency
-    // by editing config files outside the agent (their own editor) or via
-    // dedicated CLI commands that bypass the agent's tool-call path.
-    // Individual high-sensitivity paths (Secrets, Keys, etc.) are also listed
-    // explicitly for self-documenting intent — ConfigDirectory subsumes them
-    // but the explicit entries make the security purpose obvious to readers.
-    var writeDenyList = new[]
-    {
-        paths.ConfigDirectory,
-        paths.SecretsPath,
-        paths.KeysDirectory,
-        paths.SqliteDbPath,
-        // SQLite sidecars mirror the shell indicator list — they hold the same
-        // raw page data as the DB and must not be writable through tools either.
-        paths.SqliteDbPath + "-wal",
-        paths.SqliteDbPath + "-shm",
-        paths.SqliteDbPath + "-journal",
-        paths.PidFilePath,
-        paths.LockFilePath,
-        paths.RestartManifestPath,
-        // Skill directories managed by the sync service — writes from agent tools
-        // are lost on the next sync cycle and corrupt the sync service's view of
-        // on-disk state. The sync service writes directly via filesystem, not tools.
-        paths.SystemSkillsDirectory,
-        paths.ServerFeedsDirectory,
-    };
-    var readDenyList = new[]
-    {
-        paths.SecretsPath,
-        paths.KeysDirectory,
-        paths.WebhooksDirectory,
-    };
-    var shellIndicatorList = new[]
-    {
-        paths.ConfigDirectory,
-        paths.SecretsPath,
-        paths.WebhooksDirectory,
-        paths.KeysDirectory,
-        paths.SqliteDbPath,
-        // SQLite sidecars hold raw page data (webhook secrets, OAuth tokens)
-        // and are reachable via the read-deny union, so they must be denied
-        // exactly like the DB itself. Shell's substring scan already catches
-        // them (command text contains "netclaw.db"); the path-boundary matcher
-        // in ToolPathPolicy does not, hence the explicit entries (#1724).
-        paths.SqliteDbPath + "-wal",
-        paths.SqliteDbPath + "-shm",
-        paths.SqliteDbPath + "-journal",
-        paths.PidFilePath,
-        paths.LockFilePath,
-        paths.RestartManifestPath,
-    };
-    var toolPathPolicy = new ToolPathPolicy(
-        shellEnvironment,
-        writeDenyList,
-        readDenyList,
-        shellIndicatorList);
+    // Agent tools cannot read or change the control plane. This also protects the
+    // complete operator-only tool catalogs from model-visible name disclosure.
+    var toolPathPolicy = DaemonToolPathPolicyFactory.Create(paths, shellEnvironment);
     services.AddSingleton(toolPathPolicy);
 
     // Load operator-authored hard-deny overrides (additive only — see
@@ -1120,6 +1065,7 @@ static void ConfigureDaemonServices(
         akkaBuilder.WithNetclawSerialization();
         akkaBuilder.WithTeamsPersistenceSerialization();
         akkaBuilder.WithNetclawActors(shellEnvironment, reminderStorage);
+        akkaBuilder.WithWebhookRouteActor();
         akkaBuilder.WithSessionLogDispatcher(paths.SessionLogsDirectory, sp.GetRequiredService<TimeProvider>());
         akkaBuilder.WithSignalRGateway();
         akkaBuilder.WithDailyStatsActor();
@@ -1136,6 +1082,12 @@ static void ConfigureDaemonServices(
 
             var bgJobManager = registry.Get<Netclaw.Actors.Hosting.BackgroundJobManagerActorKey>();
             toolRegistry.WithBackgroundJobTools(bgJobManager);
+
+            // Route mutation tools ask the webhook route actor, so they register
+            // here rather than with the other first-party tools. The webhooks
+            // config gate matches the one on `list_webhooks` above.
+            if (webhooksConfig.Enabled)
+                toolRegistry.WithWebhookRouteTools(registry.Get<Netclaw.Actors.Hosting.WebhookRouteActorKey>());
 
             // Drain all active LLM sessions during any actor system termination (SIGTERM, daemon stop).
             // Runs in an early CoordinatedShutdown phase while actors are still alive.

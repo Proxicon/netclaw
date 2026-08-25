@@ -25,7 +25,7 @@
          that trips NU1902 under our TreatWarningsAsErrors policy. -->
     <AspireHostingVersion>13.4.6</AspireHostingVersion>
     <CommunityToolkitAspireVersion>13.4.0</CommunityToolkitAspireVersion>
-    <ModelContextProtocolVersion>2.1.0</ModelContextProtocolVersion>
+    <ModelContextProtocolVersion>2.2.0</ModelContextProtocolVersion>
   </PropertyGroup>
   <!-- App dependencies -->
   <ItemGroup>
@@ -77,8 +77,8 @@
     <PackageVersion Include="SlackNet.Extensions.DependencyInjection" Version="$(SlackNetVersion)" />
     <PackageVersion Include="Cronos" Version="0.13.0" />
     <PackageVersion Include="Netclaw.SkillClient" Version="0.4.1" />
-    <PackageVersion Include="ShellSyntaxTree" Version="0.3.3" />
-    <PackageVersion Include="Termina" Version="0.16.1" />
+    <PackageVersion Include="ShellSyntaxTree" Version="0.3.5" />
+    <PackageVersion Include="Termina" Version="0.16.2" />
   </ItemGroup>
   <!-- Serialization -->
   <ItemGroup>
@@ -91,10 +91,10 @@
     <PackageVersion Include="Akka.Hosting.TestKit" Version="$(AkkaHostingVersion)" />
     <PackageVersion Include="xunit.v3" Version="3.2.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
     <PackageVersion Include="CsCheck" Version="4.8.0" />
     <PackageVersion Include="Verify.XunitV3" Version="31.28.0" />
-    <PackageVersion Include="Testcontainers" Version="4.13.0" />
+    <PackageVersion Include="Testcontainers" Version="4.14.0" />
     <!-- Transitive security pin: Testcontainers 4.13.0 pulls SSH.NET 2025.1.0,
          which trips NU1903 (CVE-2026-48798 / GHSA-q939-rpr3-3284, path traversal
          in ScpClient.Download recursive downloads, affected <= 2025.1.0).

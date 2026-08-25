@@ -16,12 +16,7 @@ public sealed class ConfigSchemaDoctorCheckTests
     [Fact]
     public async Task ReturnsWarning_WhenConfigFileMissing()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+        var result = await RunCheckAsync();
 
         Assert.Equal(DoctorSeverity.Warning, result.Severity);
         Assert.Equal(CliConfigPreflight.MissingConfigMessage, result.Message);
@@ -30,18 +25,13 @@ public sealed class ConfigSchemaDoctorCheckTests
     [Fact]
     public async Task ReturnsPass_WhenConfigFileMissingButEnvConfigPresent()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
         // An env-only instance: no netclaw.json, configuration bound from
         // NETCLAW_ env vars. Schema validation applies to the file only —
         // warning "run netclaw init" here would misdiagnose a healthy daemon.
         Environment.SetEnvironmentVariable("NETCLAW_Models__Main__ModelId", "test-model");
         try
         {
-            var check = new ConfigSchemaDoctorCheck(paths);
-            var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            var result = await RunCheckAsync();
 
             Assert.Equal(DoctorSeverity.Pass, result.Severity);
             Assert.Contains("environment configuration detected", result.Message);
@@ -72,210 +62,227 @@ public sealed class ConfigSchemaDoctorCheckTests
             }));
     }
 
-    [Fact]
-    public async Task ReturnsPass_WhenConfigMatchesSchemaV1()
+    // ── Pass-only cases: config validates against schema v1 ────────────────
+    // Every case here previously duplicated the same 5-line arrange plus a
+    // single Assert.Equal(Pass, ...). The JSON literals are unchanged.
+
+    public sealed record PassOnlyCase(string Name, string Json)
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Slack": {
-                "Enabled": true,
-                "MentionOnly": true,
-                "AllowDirectMessages": false,
-                "AllowedChannelIds": ["C123"]
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+        public override string ToString() => Name;
     }
 
-    [Fact]
-    public async Task ReturnsPass_WhenTeamsConfigMatchesSchemaWithoutClientSecret()
+    public static TheoryData<PassOnlyCase> PassOnlyConfigCases()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Teams": {
-                "Enabled": false,
-                "TenantId": "tenant-id",
-                "ClientId": "client-id",
-                "AuthenticationMode": "ClientSecret",
-                "AllowDirectMessages": false,
-                "MentionOnly": true,
-                "AllowedTeamIds": [],
-                "AllowedChannelIds": [],
-                "AllowedUserIds": [],
-                "ChannelAudiences": {}
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenTeamsConfigUsesStructuredChannelAudienceOverrides()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Teams": {
-                "Enabled": true,
-                "AllowedTeamIds": ["team-id"],
-                "AllowedChannelIds": ["channel-id"],
-                "AllowedUserIds": ["user-id"],
-                "ChannelAudienceOverrides": [
-                  {
-                    "TeamId": "19:team-id@thread.tacv2",
-                    "ChannelId": "19:channel-id@thread.tacv2",
-                    "Audience": "team"
+        return new TheoryData<PassOnlyCase>
+        {
+            new PassOnlyCase(
+                "ConfigMatchesSchemaV1",
+                """
+                {
+                  "configVersion": 1,
+                  "Slack": {
+                    "Enabled": true,
+                    "MentionOnly": true,
+                    "AllowDirectMessages": false,
+                    "AllowedChannelIds": ["C123"]
                   }
-                ]
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenModelsUseNamedDefinitionsAndRoles()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Models": {
-                "Definitions": {
-                  "primary": {
-                    "Provider": "provider",
-                    "ModelId": "model",
-                    "Provenance": "Manual",
-                    "ContextWindow": 32768,
-                    "InputModalities": "Text, Image"
-                  }
-                },
-                "Roles": {
-                  "Main": "primary"
                 }
-              }
-            }
-            """, TestContext.Current.CancellationToken);
+                """),
+            new PassOnlyCase(
+                "ReverseProxyTrustedProxiesLookValid",
+                """
+                {
+                  "configVersion": 1,
+                  "Daemon": {
+                    "Host": "10.0.0.10",
+                    "ExposureMode": "reverse-proxy",
+                    "TrustedProxies": ["10.0.0.5", "10.0.0.0/24"]
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "SkipTunnelProcessCheckIsBoolean",
+                """
+                {
+                  "configVersion": 1,
+                  "Daemon": {
+                    "ExposureMode": "tailscale-serve",
+                    "SkipTunnelProcessCheck": true
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "MemoryAndSubAgentsSectionsValid",
+                """
+                {
+                  "configVersion": 1,
+                  "Memory": {
+                    "RecallTimeoutMs": 500,
+                    "AutoRecallMaxItems": 5
+                  },
+                  "SubAgents": {
+                    "PrefillTimeoutSeconds": 1800,
+                    "NoProgressTimeoutSeconds": 1200
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "SkillSyncSectionValid",
+                """
+                {
+                  "configVersion": 1,
+                  "SkillSync": {
+                    "DisableSystemSkillSync": true
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "ToolsAudienceProfilesAndMcpCapabilityValid",
+                """
+                {
+                  "configVersion": 1,
+                  "Tools": {
+                    "ShellMode": "HostAllowed",
+                    "AudienceProfiles": {
+                      "Public": {
+                        "ToolsMode": "Allowlist",
+                        "AllowedTools": ["file_read", "file_write", "attach_file"],
+                        "McpServersMode": "Allowlist",
+                        "AllowedMcpServers": [],
+                        "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] },
+                        "WriteFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] },
+                        "AttachFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] }
+                      },
+                      "Personal": {
+                        "ToolsMode": "All",
+                        "McpServersMode": "All",
+                        "ReadFiles": { "Mode": "All" },
+                        "WriteFiles": { "Mode": "All" },
+                        "AttachFiles": { "Mode": "All" }
+                      }
+                    }
+                  },
+                  "McpServers": {
+                    "memorizer": {
+                      "Transport": "stdio",
+                      "Command": "uvx",
+                      "Arguments": ["memorizer-mcp"],
+                      "Enabled": false
+                    }
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "DaemonSectionValid",
+                """
+                {
+                  "configVersion": 1,
+                  "Daemon": {
+                    "Host": "0.0.0.0",
+                    "Port": 8443,
+                    "ExposureMode": "tailscale-serve"
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "DaemonSectionAbsent",
+                """
+                {
+                  "configVersion": 1
+                }
+                """),
+            // Bear-trap test for the channel-ingress-attachments migration path:
+            // an existing config without any ChannelAttachments block must
+            // continue to validate against schema v1. New fields on
+            // ToolAudienceProfile are optional, so omitting them is legal.
+            new PassOnlyCase(
+                "ToolsSectionMissingChannelAttachments",
+                """
+                {
+                  "configVersion": 1,
+                  "Tools": {
+                    "AudienceProfiles": {
+                      "Public": {
+                        "ToolsMode": "Allowlist",
+                        "AllowedTools": ["file_read"],
+                        "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] }
+                      },
+                      "Team": {
+                        "ToolsMode": "Allowlist",
+                        "AllowedTools": ["file_read", "attach_file"],
+                        "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] }
+                      },
+                      "Personal": {
+                        "ToolsMode": "All",
+                        "ReadFiles": { "Mode": "All" }
+                      }
+                    }
+                  }
+                }
+                """),
+            // Config that explicitly sets a ChannelAttachments block on one
+            // profile should also validate.
+            new PassOnlyCase(
+                "ChannelAttachmentsBlockIsExplicit",
+                """
+                {
+                  "configVersion": 1,
+                  "Tools": {
+                    "AudienceProfiles": {
+                      "Public": {
+                        "ChannelAttachments": {
+                          "AllowedCategories": ["Image"],
+                          "MaxFileBytes": 26214400,
+                          "MaxFilesPerMessage": 10
+                        }
+                      }
+                    }
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "InputModalitiesIsValidCommaString",
+                """
+                {
+                  "configVersion": 1,
+                  "Models": {
+                    "Main": {
+                      "Provider": "p",
+                      "ModelId": "m",
+                      "InputModalities": "Text, Image",
+                      "OutputModalities": "Text"
+                    }
+                  }
+                }
+                """),
+            new PassOnlyCase(
+                "SessionMaxToolIterationsPerTurnSet",
+                """
+                {
+                  "configVersion": 1,
+                  "Session": {
+                    "MaxToolIterationsPerTurn": 50
+                  }
+                }
+                """),
+        };
+    }
 
-        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
+    [Theory]
+    [MemberData(nameof(PassOnlyConfigCases))]
+    public async Task ReturnsPass_WhenConfigIsValid(PassOnlyCase testCase)
+    {
+        var result = await RunCheckAsync(testCase.Json);
 
         Assert.Equal(DoctorSeverity.Pass, result.Severity);
     }
 
-    [Fact]
-    public async Task ReturnsError_WhenTeamsClientSecretIsPlacedInNormalConfiguration()
-    {
-        const string secret = "teams-pr1-synthetic-sentinel";
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            $$"""
-            {
-              "configVersion": 1,
-              "Teams": {
-                "Enabled": false,
-                "ClientSecret": "{{secret}}"
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var result = await new ConfigSchemaDoctorCheck(paths).RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Error, result.Severity);
-        Assert.DoesNotContain(secret, result.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenReverseProxyTrustedProxiesLookValid()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Daemon": {
-                "Host": "10.0.0.10",
-                "ExposureMode": "reverse-proxy",
-                "TrustedProxies": ["10.0.0.5", "10.0.0.0/24"]
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenSkipTunnelProcessCheck_IsBoolean()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Daemon": {
-                "ExposureMode": "tailscale-serve",
-                "SkipTunnelProcessCheck": true
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
+    // ── Non-pass cases: keep as individual facts (extra assertions/behavior) ──
 
     [Fact]
     public async Task ReturnsError_WhenTrustedProxyMalformed()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -284,10 +291,7 @@ public sealed class ConfigSchemaDoctorCheckTests
                 "TrustedProxies": ["not-an-ip"]
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
         Assert.Contains("TrustedProxies", result.Message, StringComparison.OrdinalIgnoreCase);
@@ -296,11 +300,7 @@ public sealed class ConfigSchemaDoctorCheckTests
     [Fact]
     public async Task ReturnsError_WhenTrustedProxyCidrMalformed()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -309,123 +309,16 @@ public sealed class ConfigSchemaDoctorCheckTests
                 "TrustedProxies": ["127.0.0.1/999"]
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
         Assert.Contains("TrustedProxies", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task ReturnsPass_WhenMemoryAndSubAgentsSectionsValid()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Memory": {
-                "RecallTimeoutMs": 500,
-                "AutoRecallMaxItems": 5
-              },
-              "SubAgents": {
-                "PrefillTimeoutSeconds": 1800,
-                "NoProgressTimeoutSeconds": 1200
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenSkillSyncSectionValid()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "SkillSync": {
-                "DisableSystemSkillSync": true
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenToolsAudienceProfilesAndMcpCapabilityValid()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Tools": {
-                "ShellMode": "HostAllowed",
-                "AudienceProfiles": {
-                  "Public": {
-                    "ToolsMode": "Allowlist",
-                    "AllowedTools": ["file_read", "file_write", "attach_file"],
-                    "McpServersMode": "Allowlist",
-                    "AllowedMcpServers": [],
-                    "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] },
-                    "WriteFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] },
-                    "AttachFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] }
-                  },
-                  "Personal": {
-                    "ToolsMode": "All",
-                    "McpServersMode": "All",
-                    "ReadFiles": { "Mode": "All" },
-                    "WriteFiles": { "Mode": "All" },
-                    "AttachFiles": { "Mode": "All" }
-                  }
-                }
-              },
-              "McpServers": {
-                "memorizer": {
-                  "Transport": "stdio",
-                  "Command": "uvx",
-                  "Arguments": ["memorizer-mcp"],
-                  "Enabled": false
-                }
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
     public async Task ReturnsError_WhenMemoryProviderInvalid()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -433,10 +326,7 @@ public sealed class ConfigSchemaDoctorCheckTests
                 "Provider": "redis"
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
     }
@@ -444,11 +334,7 @@ public sealed class ConfigSchemaDoctorCheckTests
     [Fact]
     public async Task ReturnsError_WhenSubAgentTimeoutTooLow()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -456,10 +342,7 @@ public sealed class ConfigSchemaDoctorCheckTests
                 "PrefillTimeoutSeconds": 2
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
     }
@@ -467,11 +350,7 @@ public sealed class ConfigSchemaDoctorCheckTests
     [Fact]
     public async Task ReturnsError_WhenSubAgentTimeoutTooHigh()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -479,47 +358,15 @@ public sealed class ConfigSchemaDoctorCheckTests
                 "PrefillTimeoutSeconds": 99999
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
     }
 
     [Fact]
-    public async Task ReturnsPass_WhenDaemonSectionValid()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Daemon": {
-                "Host": "0.0.0.0",
-                "Port": 8443,
-                "ExposureMode": "tailscale-serve"
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
     public async Task ReturnsError_WhenDaemonExposureModeInvalid()
     {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -527,135 +374,9 @@ public sealed class ConfigSchemaDoctorCheckTests
                 "ExposureMode": "kubernetes-ingress"
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenDaemonSectionAbsent()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenToolsSectionMissingChannelAttachments()
-    {
-        // Bear-trap test for the channel-ingress-attachments migration path:
-        // an existing config without any ChannelAttachments block must
-        // continue to validate against schema v1. New fields on
-        // ToolAudienceProfile are optional, so omitting them is legal.
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Tools": {
-                "AudienceProfiles": {
-                  "Public": {
-                    "ToolsMode": "Allowlist",
-                    "AllowedTools": ["file_read"],
-                    "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] }
-                  },
-                  "Team": {
-                    "ToolsMode": "Allowlist",
-                    "AllowedTools": ["file_read", "attach_file"],
-                    "ReadFiles": { "Mode": "Roots", "Roots": ["{session_dir}"] }
-                  },
-                  "Personal": {
-                    "ToolsMode": "All",
-                    "ReadFiles": { "Mode": "All" }
-                  }
-                }
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenChannelAttachmentsBlockIsExplicit()
-    {
-        // Config that explicitly sets a ChannelAttachments block on one
-        // profile should also validate.
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Tools": {
-                "AudienceProfiles": {
-                  "Public": {
-                    "ChannelAttachments": {
-                      "AllowedCategories": ["Image"],
-                      "MaxFileBytes": 26214400,
-                      "MaxFilesPerMessage": 10
-                    }
-                  }
-                }
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenInputModalitiesIsValidCommaString()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Models": {
-                "Main": {
-                  "Provider": "p",
-                  "ModelId": "m",
-                  "InputModalities": "Text, Image",
-                  "OutputModalities": "Text"
-                }
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
     }
 
     [Fact]
@@ -664,11 +385,7 @@ public sealed class ConfigSchemaDoctorCheckTests
         // Regression for #988: the legacy array form must now fail schema
         // validation so operators discover the binding mismatch instead of
         // silently getting a wrong (no-override) runtime value.
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -680,35 +397,9 @@ public sealed class ConfigSchemaDoctorCheckTests
                 }
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
-    }
-
-    [Fact]
-    public async Task ReturnsPass_WhenSessionMaxToolIterationsPerTurnSet()
-    {
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
-            """
-            {
-              "configVersion": 1,
-              "Session": {
-                "MaxToolIterationsPerTurn": 50
-              }
-            }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(DoctorSeverity.Pass, result.Severity);
     }
 
     [Fact]
@@ -718,11 +409,7 @@ public sealed class ConfigSchemaDoctorCheckTests
         // must be rejected as an unknown property by the Session schema, so
         // operators upgrading discover the rename via netclaw doctor instead of
         // a silently-ignored value at runtime.
-        var basePath = CreateTempBasePath();
-        var paths = new NetclawPaths(basePath);
-        paths.EnsureDirectoriesExist();
-
-        await File.WriteAllTextAsync(paths.NetclawConfigPath,
+        var result = await RunCheckAsync(
             """
             {
               "configVersion": 1,
@@ -730,13 +417,27 @@ public sealed class ConfigSchemaDoctorCheckTests
                 "MaxToolCallsPerTurn": 30
               }
             }
-            """, TestContext.Current.CancellationToken);
-
-        var check = new ConfigSchemaDoctorCheck(paths);
-        var result = await check.RunAsync(TestContext.Current.CancellationToken);
+            """);
 
         Assert.Equal(DoctorSeverity.Error, result.Severity);
         Assert.Contains("MaxToolCallsPerTurn", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static async Task<DoctorCheckResult> RunCheckAsync(string? configJson = null)
+    {
+        var basePath = CreateTempBasePath();
+        var paths = new NetclawPaths(basePath);
+        paths.EnsureDirectoriesExist();
+
+        if (configJson is not null)
+        {
+            await File.WriteAllTextAsync(paths.NetclawConfigPath, configJson, TestContext.Current.CancellationToken);
+        }
+
+        var check = new ConfigSchemaDoctorCheck(paths);
+        return await check.RunAsync(TestContext.Current.CancellationToken);
     }
 
     private static string CreateTempBasePath()
