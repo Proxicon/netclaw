@@ -5,19 +5,20 @@
 // -----------------------------------------------------------------------
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Microsoft.Teams.Api;
-using Microsoft.Teams.Api.Activities;
-using Microsoft.Teams.Api.Entities;
+using Microsoft.Teams.Apps;
+using Microsoft.Teams.Apps.Schema;
+using Microsoft.Teams.Apps.Schema.Entities;
+using Microsoft.Teams.Core.Schema;
 using Netclaw.Channels.Teams;
 using Netclaw.Daemon.Configuration;
 using Xunit;
-using TeamsAccount = Microsoft.Teams.Api.Account;
-using TeamsAttachment = Microsoft.Teams.Api.Attachment;
-using TeamsChannel = Microsoft.Teams.Api.Channel;
-using TeamsChannelData = Microsoft.Teams.Api.ChannelData;
-using TeamsConversation = Microsoft.Teams.Api.Conversation;
-using TeamsConversationType = Microsoft.Teams.Api.ConversationType;
-using TeamsTeam = Microsoft.Teams.Api.Team;
+using TeamsAccount = Microsoft.Teams.Apps.Schema.TeamsChannelAccount;
+using TeamsAttachment = Microsoft.Teams.Apps.Schema.TeamsAttachment;
+using TeamsChannel = Microsoft.Teams.Apps.Schema.TeamsChannel;
+using TeamsChannelData = Microsoft.Teams.Apps.Schema.TeamsChannelData;
+using TeamsConversation = Microsoft.Teams.Apps.Schema.TeamsConversation;
+using TeamsConversationType = Microsoft.Teams.Apps.Schema.ConversationType;
+using TeamsTeam = Microsoft.Teams.Apps.Schema.Team;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -365,61 +366,52 @@ public sealed class TeamsTenantEvidenceFixtureTests
             ?? (scope == TeamsConversationScope.Channel
                 ? $"CONVERSATION_DEFAULT_TEST_001;messageid={activityId}"
                 : "CONVERSATION_DEFAULT_TEST_001");
-        var activity = new MessageActivity(fixture["text"]?.GetValue<string>() ?? "harmless synthetic text")
+        var payload = new JsonObject
         {
-            Id = activityId,
-            From = new TeamsAccount { Id = fixture["from"]?["id"]?.GetValue<string>() ?? "USER_TEST_001" },
-            Recipient = new TeamsAccount { Id = fixture["recipient"]?["id"]?.GetValue<string>() ?? "28:BOT_TEST_001" },
-            ServiceUrl = "https://service.invalid/",
-            Conversation = new TeamsConversation
+            ["type"] = "message",
+            ["id"] = activityId,
+            ["text"] = fixture["text"]?.GetValue<string>() ?? "harmless synthetic text",
+            ["from"] = new JsonObject
             {
-                Id = conversationId,
-                TenantId = conversation?["tenantId"]?.GetValue<string>() ?? "TENANT_TEST_001",
-                Type = scope == TeamsConversationScope.Channel ? TeamsConversationType.Channel : TeamsConversationType.Personal
+                ["id"] = fixture["from"]?["id"]?.GetValue<string>() ?? "USER_TEST_001"
+            },
+            ["recipient"] = new JsonObject
+            {
+                ["id"] = fixture["recipient"]?["id"]?.GetValue<string>() ?? "28:BOT_TEST_001"
+            },
+            ["serviceUrl"] = "https://service.invalid/",
+            ["conversation"] = new JsonObject
+            {
+                ["id"] = conversationId,
+                ["tenantId"] = conversation?["tenantId"]?.GetValue<string>() ?? "TENANT_TEST_001",
+                ["conversationType"] = (scope == TeamsConversationScope.Channel
+                    ? TeamsConversationType.Channel
+                    : TeamsConversationType.Personal).Value
             }
         };
 
         if (scope == TeamsConversationScope.Channel && fixture["channelData"] is JsonObject channelData)
         {
-            activity.ChannelData = new TeamsChannelData
+            payload["channelData"] = new JsonObject
             {
-                Team = new TeamsTeam { Id = channelData["team"]?["id"]?.GetValue<string>() ?? "TEAM_TEST_001" },
-                Channel = new TeamsChannel { Id = channelData["channel"]?["id"]?.GetValue<string>() ?? "CHANNEL_TEST_001" }
+                ["team"] = new JsonObject
+                {
+                    ["id"] = channelData["team"]?["id"]?.GetValue<string>() ?? "TEAM_TEST_001"
+                },
+                ["channel"] = new JsonObject
+                {
+                    ["id"] = channelData["channel"]?["id"]?.GetValue<string>() ?? "CHANNEL_TEST_001"
+                }
             };
         }
 
-        if (fixture["entities"] is JsonArray entities)
-        {
-            activity.Entities = entities.Select(entity =>
-            {
-                var type = entity!["type"]!.GetValue<string>();
-                return type == "mention"
-                    ? new MentionEntity
-                    {
-                        Type = type,
-                        Text = entity["text"]!.GetValue<string>(),
-                        Mentioned = new TeamsAccount { Id = entity["mentioned"]!["id"]!.GetValue<string>() }
-                    }
-                    : new Entity(type);
-            }).Cast<IEntity>().ToArray();
-        }
+        if (fixture["entities"] is not null)
+            payload["entities"] = fixture["entities"]!.DeepClone();
 
-        if (fixture["attachments"] is JsonArray attachments)
-        {
-            activity.Attachments = attachments.Select(attachment =>
-            {
-                object? content = attachment!["content"] is { } node
-                    ? JsonSerializer.Deserialize<JsonElement>(node.ToJsonString()).Clone()
-                    : null;
-                return new TeamsAttachment(attachment["contentType"]!.GetValue<string>(), content)
-                {
-                    Name = attachment["name"]?.GetValue<string>(),
-                    ContentUrl = attachment["contentUrl"]?.GetValue<string>()
-                };
-            }).ToArray();
-        }
+        if (fixture["attachments"] is not null)
+            payload["attachments"] = fixture["attachments"]!.DeepClone();
 
-        return activity;
+        return MessageActivity.FromActivity(CoreActivity.FromJsonString(payload.ToJsonString()));
     }
 
     private static JsonNode Load(string name)

@@ -7,13 +7,14 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Netclaw.Configuration;
+using Netclaw.Daemon.Configuration;
 
 namespace Netclaw.Daemon.Security;
 
 /// <summary>
-/// Registers the Netclaw multi-scheme auth pipeline: a PolicyScheme selector
-/// that routes to DeviceBearer when an <c>Authorization: Bearer</c> header is
-/// present, otherwise to Loopback (local operator).
+/// Registers the Netclaw multi-scheme auth pipeline. The selector routes the
+/// mapped Teams endpoint to AzureAd, a bearer token to DeviceBearer, and all
+/// other requests to Loopback (local operator).
 /// </summary>
 internal static class NetclawAuthExtensions
 {
@@ -25,7 +26,10 @@ internal static class NetclawAuthExtensions
             .AddPolicyScheme("AuthSelector", "Bearer or Loopback selector", options =>
             {
                 options.ForwardDefaultSelector = ctx =>
-                    ctx.Request.Headers.ContainsKey("Authorization") &&
+                    ctx.GetEndpoint() is not null
+                    && ctx.Request.Path.Equals(TeamsActivityEndpointExtensions.ActivityPath, StringComparison.OrdinalIgnoreCase)
+                        ? TeamsActivityEndpointExtensions.AuthenticationScheme
+                        : ctx.Request.Headers.ContainsKey("Authorization") &&
                     ctx.Request.Headers.Authorization.ToString()
                         .StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
                         ? DeviceTokenAuthenticationHandler.SchemeName

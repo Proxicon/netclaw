@@ -24,6 +24,37 @@ persistent socket transport.
 - Cloud registration, tenant approval, or Teams-app provisioning at daemon
   startup.
 
+### Phase 1.1 runtime modernization record (2026-08-24)
+
+Phase 1.1 replaces the original Teams SDK .NET 2.0.9 plugin host with the
+stable 2.1.0 ASP.NET Core-native host. The 2.0 `App.Builder`, `AddTeams`,
+`UseTeams`, and `AspNetCorePlugin` path is removed. `AddTeamsBotApplication`
+and `UseTeamsBotApplication` register one native `/api/messages` endpoint;
+the endpoint retains Netclaw authorization, body-size, and rate-limit
+conventions.
+
+SDK typed message, mutation, conversation-update, and Adaptive Card action
+handlers are translated immediately to the existing Netclaw-owned contracts.
+The translator remains the tenant, canonical identity, root, mention,
+attachment, and bounded-destination security boundary. A small SDK middleware
+preserves the authenticated request's `replyToId` across the 2.1 typed activity
+projection, which otherwise omits that value. No SDK type crosses to actors,
+sessions, persistence, approvals, or provider orchestration.
+
+The native SDK resolves the current secret-backed `Teams` configuration through
+its supported compatibility mapping to the `AzureAd` client-credential model.
+This keeps the client ID, tenant ID, and `Teams.ClientSecret` ownership and
+shape intact; it does not duplicate credentials, broaden tenancy, or enable an
+unauthenticated development mode. Native SDK activity sources and meters, plus
+ASP.NET Core request instrumentation, feed the existing Netclaw OTLP pipeline
+without adding sensitive Netclaw attributes.
+
+This is an offline implementation record, not live validation. It preserves
+the existing public endpoint, Azure Bot registration, Teams package identity,
+ACL policy, session semantics, approval authority, and persistence format. The
+branch base is the rollback point; live cutover remains an operator-controlled
+smoke gate.
+
 ## Decisions
 
 ### Use the Microsoft Teams SDK at the transport edge
