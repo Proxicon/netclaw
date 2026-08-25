@@ -15,7 +15,8 @@ contract. Teams also currently bypasses the shared prompt classifier.
 
 **Goals:**
 
-- Make generic session approval authority and Team shell eligibility explicit.
+- Make generic session approval authority explicit at the Teams transport
+  boundary without changing core tool eligibility.
 - Apply common approval response and delivery contracts to Teams without
   weakening card callback validation or replay protection.
 - Preserve backwards-readable Teams persistence while adding only bounded
@@ -26,25 +27,13 @@ contract. Teams also currently bypasses the shared prompt classifier.
 
 - No Microsoft Graph reads, history hydration capability, or tenant permission
   change.
+- No change to the upstream Personal-only host shell boundary. Teams approval
+  presentation cannot make an otherwise ineligible tool eligible.
 - No Teams-specific policy or grant store and no mutation of operator config.
 - No live tenant validation, deployment, upstream push, merge, or automerge.
 - No replacement of Teams proactive delivery persistence or channel routing.
 
 ## Decisions
-
-### Generic Team shell gate lives in ToolAccessPolicy
-
-`ToolAccessPolicy` will determine whether a Team shell invocation is eligible
-before it analyzes or prompts. The predicate requires HostAllowed, an explicit
-Team `AllowedTools` entry, an exact `shell_execute = Approval` override, and an
-available interactive-approval capability. The existing Personal path remains
-unchanged.
-
-This is evaluated from audience policy and the generic run scope. It does not
-inspect `ChannelType.Teams`, because channel type is neither a policy input nor
-proof that interaction is available. An alternative of enabling shell inside
-the Teams adapter was rejected because it would create a policy bypass and make
-another Team-capable channel behave differently.
 
 ### Teams uses shared classifiers and response lifecycle
 
@@ -73,6 +62,22 @@ state remains bounded; snapshots continue to capture the current transport
 binding. A replacement does not need raw nonce persistence, only the hash and
 new delivery locator after a successful send.
 
+### Forwarding state is transport-only and recoverable
+
+Teams records the validated selected option as a bounded forwarding state before
+the shared flow sends it to the session. This temporarily prevents another card
+option from changing the selected decision, but it is not a grant or terminal
+approval result. Teams writes its terminal consume record only after the shared
+flow receives a session acknowledgement, or after the session deterministically
+reports that the call is no longer pending.
+
+If the feedback round trip fails before a usable acknowledgement, the current
+card is returned as a retryable single-option card using the same opaque nonce.
+After restart, Teams re-drives the same selected option; a session acknowledgement
+consumes it once and a stale-session response terminates without a second tool
+execution. A recovery retry that cannot reach the session gets a fresh bounded
+transport card for the same selected option.
+
 ### Delivery failure follows the common escalation contract
 
 Normal Teams text output and approval-card delivery use the same telemetry and
@@ -87,9 +92,9 @@ pipeline. Typing remains a best-effort effect because it is not user content.
 - [Replacement-card delivery fails] -> keep the session approval pending,
   surface the transport failure, and allow a later valid presentation attempt;
   never synthesize a denial.
-- [Actor restart occurs after transport consume but before session response] ->
-  preserve consume-once safety and let the session's journal reject stale or
-  replayed feedback deterministically.
+- [Actor restart occurs after transport forwarding begins but before session
+  response] -> re-drive the exact durable selection. The session acknowledgement
+  remains authoritative and terminal consumption is written once.
 - [Tests formerly build dependencies without a detector] -> test helpers
   explicitly supply a safe detector; a missing production detector is treated
   as unavailable and fails closed.

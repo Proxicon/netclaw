@@ -267,34 +267,15 @@ the opaque nonce binding with a fresh card while preserving the pending
 session-owned approval. The old card cannot authorize an action; the replacement
 card may be selected once by the original approved requester.
 
-Team shell access requires all of these explicit conditions: the host permits
-shell execution, the Team audience profile lists `execute_shell`, and that
-profile requires approval for `execute_shell`. `ToolsMode.All` and a default
-approval policy do not satisfy this Team gate.
+Teams uses the generic approval system only after the normal session pipeline
+has found an operation eligible. The adapter does not expand core tool
+eligibility: host shell remains subject to Netclaw's existing Personal-only
+security boundary. Neither a Team allow-list, approval override, card action,
+nor persistent approval grant can make `shell_execute` available to Teams.
 
-The minimum policy addition is independent of the Teams transport settings:
-
-```json
-{
-  "Tools": {
-    "ShellMode": "HostAllowed",
-    "AudienceProfiles": {
-      "Team": {
-        "AllowedTools": ["execute_shell"],
-        "ApprovalPolicy": {
-          "ToolOverrides": {
-            "execute_shell": "Approval"
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-This is policy, not a persistent grant. Persistent approvals remain in
-`~/.netclaw/config/tool-approvals.json` and are managed by the core approval
-store. Do not add this policy merely to force a Teams smoke test.
+Persistent approvals remain in `~/.netclaw/config/tool-approvals.json` and are
+managed exclusively by the core approval store. Teams does not write policy or
+grants.
 
 ## Health checks
 

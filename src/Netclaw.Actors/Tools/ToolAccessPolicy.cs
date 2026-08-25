@@ -159,7 +159,7 @@ public sealed class ToolAccessPolicy
         }
 
         if (IsShellCoupledTool(tool))
-            return IsShellExposedForAudience(audience);
+            return ResolveShellMode() == ShellExecutionMode.HostAllowed && audience == TrustAudience.Personal;
 
         return true;
     }
@@ -268,12 +268,7 @@ public sealed class ToolAccessPolicy
             return ToolAccessDecision.Deny("shell_requires_sandbox_backend");
 
         var shellAudience = ResolveAudience(context.Invocation);
-        if (shellAudience == TrustAudience.Team)
-        {
-            if (!HasExplicitTeamShellApprovalConfiguration(context))
-                return ToolAccessDecision.Deny("shell_requires_team_approval_configuration");
-        }
-        else if (shellAudience != TrustAudience.Personal)
+        if (shellAudience != TrustAudience.Personal)
             return ToolAccessDecision.Deny("shell_requires_personal_context");
 
         // shell_execute authorizes the process before the job starts. This tool
@@ -924,31 +919,6 @@ public sealed class ToolAccessPolicy
 
     private ShellExecutionMode ResolveShellMode()
         => _toolConfig.ShellMode ?? _defaults.ShellExecutionMode;
-
-    private bool IsShellExposedForAudience(TrustAudience audience)
-    {
-        if (ResolveShellMode() != ShellExecutionMode.HostAllowed)
-            return false;
-
-        return audience switch
-        {
-            TrustAudience.Personal => true,
-            TrustAudience.Team => HasExplicitTeamShellApprovalConfiguration(),
-            _ => false
-        };
-    }
-
-    private bool HasExplicitTeamShellApprovalConfiguration()
-    {
-        var team = _profileResolver.ResolveProfile(TrustAudience.Team);
-        return team.AllowedTools.Contains(ShellTool.ToolName, StringComparer.Ordinal)
-               && team.ApprovalPolicy?.ToolOverrides.TryGetValue(ShellTool.ToolName, out var mode) == true
-               && mode == ToolApprovalMode.Approval;
-    }
-
-    private bool HasExplicitTeamShellApprovalConfiguration(ToolExecutionContext context) =>
-        context.RunScope.InteractiveApproval is InteractiveApprovalCapability.Available
-        && HasExplicitTeamShellApprovalConfiguration();
 
     private static TrustAudience ResolveAudience(EffectiveTrustContext? trustContext)
         => trustContext?.EffectiveAudience ?? TrustAudience.Public;

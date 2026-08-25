@@ -17,13 +17,10 @@ or broadening the default Team tool surface.
   authority for approval decisions.
 - Reissue an expired Teams approval card while the generic pending approval is
   still live; an expired card cannot approve or deny the core request.
-- Add a generic, fail-closed Team shell approval capability. It requires
-  HostAllowed shell mode, an explicit Team shell allow-list entry, an exact
-  Team shell Approval override, and available interactive approval.
 - Add Teams coverage to the cross-channel binding contract suite and focused
-  card replay, expiry, classifier, and Team-shell tests.
-- Document the minimal Team policy opt-in and the bounded post-refactor test
-  delta. No live tenant validation is performed by this change.
+  card replay, expiry, classifier, and feedback-recovery tests.
+- Document the bounded post-refactor test delta. No live tenant validation is
+  performed by this change.
 
 ## Capabilities
 
@@ -34,21 +31,20 @@ or broadening the default Team tool surface.
 ### Modified Capabilities
 - `channel-binding-parity`: Teams joins the common binding lifecycle contract
   for safe ingress, approvals, output delivery, and contract coverage.
-- `tool-approval-gates`: Team-audience host shell approval becomes a strict,
-  generic, opt-in capability at the interactive-approval boundary.
 - `netclaw-input-adapters`: Teams executable input uses the shared
   prompt-injection classifier and fails closed when it is unavailable.
 
 ## Impact
 
-Affected implementation areas are `Netclaw.Channels.Teams`, shared channel
-components, `ToolAccessPolicy`, Teams and actor tests, and channel-contract
-documentation. The change introduces no external service, Graph permission,
-tenant configuration, data migration, live message send, or upstream push.
+Affected implementation areas are `Netclaw.Channels.Teams`, minimal shared
+channel components, Teams tests, and channel-contract documentation. The change
+introduces no external service, Graph permission, tenant configuration, data
+migration, live message send, or upstream push.
 
-Security impact: Teams remains default-deny for shell access. Card callback data
-stays opaque and is validated before it reaches the session. The shared
-classifier blocks high-risk input and fails closed when its detector fails.
+Security impact: Teams does not alter Netclaw core tool eligibility. Host shell
+remains Personal-only. Card callback data stays opaque and is validated before
+it reaches the session. The shared classifier blocks high-risk input and fails
+closed when its detector fails.
 
 Operational impact: normal Teams reply delivery reports failures to the session,
 while typing remains best effort. Card reissue adds a bounded transport action

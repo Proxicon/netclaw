@@ -437,7 +437,7 @@ public class DispatchingToolExecutorTests
         });
 
         var ex = await Assert.ThrowsAsync<ToolAccessDeniedException>(() => _restrictedExecutor.ExecuteAsync(toolCall, context, TestContext.Current.CancellationToken));
-        Assert.Equal("shell_requires_team_approval_configuration", ex.DenyReason);
+        Assert.Equal("shell_requires_personal_context", ex.DenyReason);
     }
 
     [Fact]

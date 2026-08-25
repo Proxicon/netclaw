@@ -7,15 +7,12 @@ boundaries changed by the channel-binding and approval-parity refactor.
 
 1. Send one representative Personal approval request and select `Once` or
    `Deny`. Confirm one native terminal card and one session outcome.
-2. With the owner-approved generic Team shell policy already configured, run
-   one harmless Team-audience shell approval. Confirm it reaches a normal
-   approval card and stays unavailable when any required generic gate is
-   removed.
-3. Let one pending card expire, then use the replacement card. Confirm the old
+2. Let one pending card expire, then use the replacement card. Confirm the old
    card cannot act, the replacement resolves the same pending request once, and
    no implicit core Deny is created by expiry.
-4. Restart or recover one binding with a pending approval, then resolve the
-   recovered card once. Confirm no duplicate execution occurs.
+3. Interrupt one approval feedback response before acknowledgement, retry the
+   returned same-option card, and restart once while forwarding is uncertain.
+   Confirm the session resolves once and no selected tool executes twice.
 
 Record only sanitized structural outcomes and counters. Do not change Azure
 Bot, Entra, Teams package, tenant permissions, routes, secrets, or operator

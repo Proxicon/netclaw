@@ -2250,6 +2250,139 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Approval_feedback_failure_keeps_the_selected_card_action_retryable_without_duplicate_execution()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var pipeline = new FailOnceApprovalFeedbackPipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-feedback-retry");
+        var actor = CreateBindingActor(
+            sessionId,
+            CreateDependencies(pipeline, replyClient: replyClient),
+            "teams-approval-feedback-retry");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity(
+                "activity-approval-feedback-retry",
+                "tenant-a",
+                "conversation-approval-feedback-retry"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(CreateApprovalRequest(sessionId, "call-feedback-retry", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var initialCard = Assert.IsType<TeamsApprovalCard>(Assert.Single(replyClient.Messages).ApprovalCard);
+        var approve = Assert.Single(initialCard.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        var failed = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-feedback-retry",
+                    approve.CorrelationId,
+                    approve.Nonce,
+                    "synthetic-activity",
+                    approve.Action),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Unavailable, failed.Disposition);
+        var retryCard = Assert.IsType<TeamsApprovalCard>(failed.TerminalCard);
+        var retry = Assert.Single(retryCard.Actions);
+        Assert.Equal(approve.Action, retry.Action);
+        Assert.Equal(approve.Nonce, retry.Nonce);
+        Assert.Single(pipeline.Feedback);
+
+        var accepted = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-feedback-retry",
+                    retry.CorrelationId,
+                    retry.Nonce,
+                    "synthetic-activity",
+                    retry.Action),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Accepted, accepted.Disposition);
+        Assert.Equal(2, pipeline.Feedback.Count);
+        Assert.Equal(1, pipeline.AcceptedFeedbackCount);
+
+        var duplicate = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-feedback-retry",
+                    retry.CorrelationId,
+                    retry.Nonce,
+                    "synthetic-activity",
+                    retry.Action),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.AlreadyProcessed, duplicate.Disposition);
+        Assert.Equal(2, pipeline.Feedback.Count);
+        Assert.Equal(1, pipeline.AcceptedFeedbackCount);
+    }
+
+    [Fact]
+    public async Task Approval_forwarding_recovers_after_a_lost_feedback_response_without_reexecuting()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var pipeline = new LostApprovalResponsePipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-feedback-recovery");
+        var dependencies = CreateDependencies(pipeline, replyClient: replyClient);
+        var first = CreateBindingActor(sessionId, dependencies, "teams-approval-feedback-recovery-first");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(first, CreateActivity(
+                "activity-approval-feedback-recovery",
+                "tenant-a",
+                "conversation-approval-feedback-recovery"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(CreateApprovalRequest(sessionId, "call-feedback-recovery", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var initialCard = Assert.IsType<TeamsApprovalCard>(Assert.Single(replyClient.Messages).ApprovalCard);
+        var approve = Assert.Single(initialCard.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        var failed = await first.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-feedback-recovery",
+                    approve.CorrelationId,
+                    approve.Nonce,
+                    "synthetic-activity",
+                    approve.Action),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(TeamsApprovalActionDisposition.Unavailable, failed.Disposition);
+
+        Watch(first);
+        first.Tell(PoisonPill.Instance);
+        ExpectTerminated(first, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recovered = CreateBindingActor(sessionId, dependencies, "teams-approval-feedback-recovery-second");
+        await AwaitAssertAsync(() => Assert.Equal(2, pipeline.Feedback.Count), cancellationToken: TestContext.Current.CancellationToken);
+
+        var duplicate = await recovered.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-feedback-recovery",
+                    approve.CorrelationId,
+                    approve.Nonce,
+                    "synthetic-activity",
+                    approve.Action),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.AlreadyProcessed, duplicate.Disposition);
+        Assert.Equal(2, pipeline.Feedback.Count);
+        Assert.Equal(1, pipeline.AcceptedFeedbackCount);
+    }
+
+    [Fact]
     public async Task Expired_approval_reissues_its_card_without_forwarding_a_core_decision()
     {
         const string correlationId = "expired-approval-correlation";
@@ -3260,6 +3393,69 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         {
             Feedback.Add(feedback);
             return Task.FromResult<ISessionResponse>(CommandAck.For(feedback.SessionId));
+        }
+    }
+
+    private sealed class FailOnceApprovalFeedbackPipeline(ISessionPipeline fallback) : ISessionPipeline
+    {
+        private bool _failFirst = true;
+
+        public List<IWithSessionId> Feedback { get; } = [];
+        public int AcceptedFeedbackCount { get; private set; }
+
+        public Task<MaterializedSession> CreateAsync(
+            SessionId sessionId,
+            SessionPipelineOptions options,
+            Akka.Streams.IMaterializer? materializer = null,
+            CancellationToken cancellationToken = default) =>
+            fallback.CreateAsync(sessionId, options, materializer, cancellationToken);
+
+        public Task SendFeedbackAsync(IWithSessionId feedback, CancellationToken ct = default) =>
+            fallback.SendFeedbackAsync(feedback, ct);
+
+        public Task<ISessionResponse> SendFeedbackAndWaitAsync(IWithSessionId feedback, CancellationToken ct = default)
+        {
+            Feedback.Add(feedback);
+            if (_failFirst)
+            {
+                _failFirst = false;
+                return Task.FromException<ISessionResponse>(new InvalidOperationException("synthetic feedback failure"));
+            }
+
+            AcceptedFeedbackCount++;
+            return Task.FromResult<ISessionResponse>(CommandAck.For(feedback.SessionId));
+        }
+    }
+
+    private sealed class LostApprovalResponsePipeline(ISessionPipeline fallback) : ISessionPipeline
+    {
+        private int _attempt;
+
+        public List<IWithSessionId> Feedback { get; } = [];
+        public int AcceptedFeedbackCount { get; private set; }
+
+        public Task<MaterializedSession> CreateAsync(
+            SessionId sessionId,
+            SessionPipelineOptions options,
+            Akka.Streams.IMaterializer? materializer = null,
+            CancellationToken cancellationToken = default) =>
+            fallback.CreateAsync(sessionId, options, materializer, cancellationToken);
+
+        public Task SendFeedbackAsync(IWithSessionId feedback, CancellationToken ct = default) =>
+            fallback.SendFeedbackAsync(feedback, ct);
+
+        public Task<ISessionResponse> SendFeedbackAndWaitAsync(IWithSessionId feedback, CancellationToken ct = default)
+        {
+            Feedback.Add(feedback);
+            if (_attempt++ == 0)
+            {
+                // Simulate a session that committed the decision, then lost its
+                // acknowledgement before the Teams binding could observe it.
+                AcceptedFeedbackCount++;
+                return Task.FromException<ISessionResponse>(new InvalidOperationException("synthetic lost session response"));
+            }
+
+            return Task.FromResult<ISessionResponse>(CommandNack.For(feedback.SessionId, ApprovalNackReasons.PromptExpired));
         }
     }
 

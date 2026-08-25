@@ -8,11 +8,11 @@ an Adaptive Card lifetime or callback into a separate authorization policy.
 ### Requirement: Teams card state is opaque transport state
 
 Teams SHALL persist only the bounded correlation, nonce hash, prompt locator,
-offered option keys, and terminal presentation data needed to bind and replay
-protect a card action. It SHALL not persist a raw nonce, card JSON, raw tool
-arguments, token, SDK object, or policy/grant decision. The session journal
-remains authoritative for whether an approval call is pending and for its
-selected option semantics.
+offered option keys, forwarding state, and terminal presentation data needed to
+bind and replay protect a card action. It SHALL not persist a raw nonce, card
+JSON, raw tool arguments, token, SDK object, or policy/grant decision. The
+session journal remains authoritative for whether an approval call is pending
+and for its selected option semantics.
 
 #### Scenario: Valid card action forwards an exact session option
 
@@ -57,3 +57,31 @@ deny merely because a particular card presentation fails.
 - **WHEN** Teams records the transport result
 - **THEN** the failure is observable through channel delivery telemetry or feedback
 - **AND** the session approval remains pending until an explicit session decision
+
+### Requirement: Uncertain callback forwarding remains recoverable
+
+Teams SHALL persist a bounded forwarding state for the exact validated selected
+option before it sends that option to the shared approval-response flow. It
+SHALL write terminal consumption only after the session acknowledges the option
+or deterministically reports that the approval is no longer pending. A feedback
+failure SHALL leave a usable retry path for the same option and SHALL NOT permit
+a second option or a second tool execution.
+
+#### Scenario: Feedback fails before the binding receives an acknowledgement
+
+- **GIVEN** a valid Teams approval action and a session feedback round trip
+  that fails before the binding receives a response
+- **WHEN** Teams returns the action result
+- **THEN** the card remains retryable for the exact selected option
+- **AND** the core approval remains pending until the session resolves it
+- **AND** no terminal Teams consume record is written solely because feedback
+  failed
+
+#### Scenario: Recovery re-drives an uncertain selection exactly once
+
+- **GIVEN** a persisted Teams forwarding state after a lost session response
+- **WHEN** the binding recovers
+- **THEN** it re-drives the same selected option through the shared flow
+- **AND** a session acknowledgement or stale-session response terminalizes the
+  Teams transport state
+- **AND** repeated callbacks cannot execute the selected tool a second time
