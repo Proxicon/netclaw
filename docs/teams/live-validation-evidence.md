@@ -12,10 +12,22 @@ handlers now terminate at `TeamsSdkActivityTranslator`; session and approval
 authority remain Netclaw-owned.
 
 The existing `Teams` settings and secret-backed `Teams.ClientSecret` remain the
-deployment configuration. SDK 2.1 maps that compatibility section to its
-native `AzureAd` client-credential authentication model. No Azure Bot, Entra
-application, Teams package, tenant, URL, Traefik route, or customer credential
-change is required by this library migration.
+deployment configuration. SDK 2.1 uses its native compatibility mapping when
+`AzureAd:ClientId` is absent, producing its in-memory `AzureAd`
+client-credential configuration from `Teams.ClientId`, `Teams.TenantId`, and
+`Teams.ClientSecret`. Netclaw rejects an enabled Teams configuration with a
+root `AzureAd:ClientId`, so the mapping cannot silently choose conflicting
+credentials. No Azure Bot, Entra application, Teams package, tenant, URL,
+Traefik route, or customer credential change is required by this library
+migration.
+
+Offline coverage proves the SDK-bound inbound `AzureAd` JWT configuration and
+outbound Microsoft identity configuration from the existing `Teams` settings.
+The named `teams-sdk` policy uses `AzureAd` only for `/api/messages`; the
+daemon's generic default policy and `AuthSelector` behavior remain unchanged.
+Native SDK telemetry source subscription is deferred, so Phase 1.1 adds no
+global ASP.NET Core instrumentation. Existing channel telemetry remains the
+supported observability boundary.
 
 The branch base `93df44f924d0f2321b4a7c9ba29d865478ed61a6` is the immediate
 rollback point. Phase 1.1 makes no Teams persistence-format or schema change;

@@ -35,26 +35,28 @@ public static class ToolRegistrationExtensions
         ToolAccessPolicy? toolAccessPolicy = null,
         WebhookRouteStore? webhookRouteStore = null)
     {
-        registry.Register(new ShellTool(config, pathPolicy, shellCommandPolicy));
-        registry.Register(new FileReadTool(config, paths, pathPolicy));
-        registry.Register(new FileListTool(config, paths, pathPolicy));
-        registry.Register(new FileWriteTool(config, paths, pathPolicy));
-        registry.Register(new FileEditTool(config, paths, pathPolicy));
+        ArgumentNullException.ThrowIfNull(toolAccessPolicy);
+
+        registry.RegisterCore(new ShellTool(config, pathPolicy, shellCommandPolicy));
+        registry.RegisterCore(new FileReadTool(config, paths, pathPolicy));
+        registry.RegisterCore(new FileListTool(config, paths, pathPolicy));
+        registry.RegisterCore(new FileSearchTool(config, paths, pathPolicy));
+        registry.RegisterCore(new FileReadManyTool(config, paths, pathPolicy));
+        registry.RegisterCore(new JsonReadTool(config, paths, pathPolicy));
+        registry.RegisterCore(new ToolOutputReadTool());
+        registry.RegisterCore(new FileWriteTool(config, paths, pathPolicy));
+        registry.RegisterCore(new FileEditTool(config, paths, pathPolicy));
         registry.Register(new AttachFileTool(config, paths, pathPolicy));
         if (webhookRouteStore is not null)
-        {
-            registry.Register(new SetWebhookTool(webhookRouteStore));
             registry.Register(new ListWebhooksTool(webhookRouteStore));
-            registry.Register(new DeleteWebhookTool(webhookRouteStore));
-        }
         if (searchBackend is not null)
             registry.Register(new WebSearchTool(searchBackend));
         registry.Register(new WebFetchTool(config));
-        registry.Register(new SetWorkingDirectoryTool(config, paths));
+        registry.RegisterCore(new SetWorkingDirectoryTool(config, paths));
 
         // Register search_tools and load_tool meta-tools (always loaded, "builtin" grant)
-        registry.Register(new SearchToolsTool(registry, toolAccessPolicy));
-        registry.Register(new LoadToolTool(registry, toolAccessPolicy));
+        registry.RegisterCore(new SearchToolsTool(registry, toolAccessPolicy));
+        registry.RegisterCore(new LoadToolTool(registry, toolAccessPolicy));
 
         return registry;
     }
@@ -77,7 +79,7 @@ public static class ToolRegistrationExtensions
         FileSubAgentDefinitionLoader? subAgentLoader = null,
         ILogger<SkillLoadTool>? skillLoadLogger = null)
     {
-        registry.Register(new SkillLoadTool(
+        registry.RegisterCore(new SkillLoadTool(
             skillRegistry,
             scanner,
             mcpPromptLoader,
@@ -87,7 +89,7 @@ public static class ToolRegistrationExtensions
             skillSyncConfig,
             skillLoadLogger,
             subAgentLoader));
-        registry.Register(new SkillReadResourceTool(skillRegistry, scanner, skillSyncConfig));
+        registry.RegisterCore(new SkillReadResourceTool(skillRegistry, scanner, skillSyncConfig));
         registry.Register(new SkillManageTool(skillRegistry, paths, scanner, inventoryRefresher));
         return registry;
     }
@@ -108,6 +110,21 @@ public static class ToolRegistrationExtensions
         registry.Register(new CancelReminderTool(reminderManager, schedulingConfig));
         registry.Register(new ListRemindersTool(reminderManager, schedulingConfig));
         registry.Register(new GetReminderHistoryTool(historyStore, schedulingConfig));
+        return registry;
+    }
+
+    /// <summary>
+    /// Registers the webhook route mutation tools (set, delete). Both ask the
+    /// <see cref="Netclaw.Actors.Webhooks.WebhookRouteActor"/>, the single
+    /// mutation authority for route files. <c>list_webhooks</c> is a read and
+    /// stays on the store — see <see cref="WithFirstPartyTools"/>.
+    /// </summary>
+    public static ToolRegistry WithWebhookRouteTools(
+        this ToolRegistry registry,
+        IActorRef routeActor)
+    {
+        registry.Register(new SetWebhookTool(routeActor));
+        registry.Register(new DeleteWebhookTool(routeActor));
         return registry;
     }
 
