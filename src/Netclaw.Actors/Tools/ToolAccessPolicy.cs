@@ -159,8 +159,7 @@ public sealed class ToolAccessPolicy
         }
 
         if (IsShellCoupledTool(tool))
-            return ResolveShellMode() == ShellExecutionMode.HostAllowed
-                && IsShellAllowedForAudience(new ToolName(tool.Name), audience);
+            return ResolveShellMode() == ShellExecutionMode.HostAllowed && audience == TrustAudience.Personal;
 
         return true;
     }
@@ -269,20 +268,8 @@ public sealed class ToolAccessPolicy
             return ToolAccessDecision.Deny("shell_requires_sandbox_backend");
 
         var shellAudience = ResolveAudience(context.Invocation);
-        if (!IsShellAllowedForAudience(toolName, shellAudience))
-        {
-            return shellAudience == TrustAudience.Team
-                ? ToolAccessDecision.Deny("shell_requires_explicit_team_approval")
-                : ToolAccessDecision.Deny("shell_requires_personal_context");
-        }
-
-        // A Team shell grant exists only to present an approval card in an
-        // interactive channel. Unattended Team runs cannot reuse it.
-        if (shellAudience == TrustAudience.Team
-            && context.RunScope.InteractiveApproval is InteractiveApprovalCapability.Unavailable)
-        {
-            return ToolAccessDecision.Deny("shell_requires_interactive_team_context");
-        }
+        if (shellAudience != TrustAudience.Personal)
+            return ToolAccessDecision.Deny("shell_requires_personal_context");
 
         // shell_execute authorizes the process before the job starts. This tool
         // can only control a job with the same session, audience, and boundary.
@@ -932,26 +919,6 @@ public sealed class ToolAccessPolicy
 
     private ShellExecutionMode ResolveShellMode()
         => _toolConfig.ShellMode ?? _defaults.ShellExecutionMode;
-
-    private bool IsShellAllowedForAudience(ToolName toolName, TrustAudience audience)
-    {
-        if (audience == TrustAudience.Personal)
-            return true;
-
-        if (audience != TrustAudience.Team
-            || !string.Equals(toolName.Value, ShellTool.ToolName, StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        var approvalPolicy = ToolAudienceProfileDefaults
-            .GetResolvedProfile(_toolConfig.AudienceProfiles, TrustAudience.Team)
-            .ApprovalPolicy;
-
-        return approvalPolicy is not null
-            && approvalPolicy.TryGetExplicitMode(toolName.Value, out var mode)
-            && mode == ToolApprovalMode.Approval;
-    }
 
     private static TrustAudience ResolveAudience(EffectiveTrustContext? trustContext)
         => trustContext?.EffectiveAudience ?? TrustAudience.Public;
