@@ -134,41 +134,136 @@ public sealed class TeamsSdkReplyClientTests
 
         Assert.Equal(request.Options.Select(option => option.Label), actions.Select(action => action.GetProperty("title").GetString()));
         Assert.Equal(
-            ["positive", "default", "default", "destructive", "destructive"],
+            ["positive", "default", "default", "default", "destructive"],
             actions.Select(action => action.GetProperty("style").GetString()));
-        Assert.All(actions, action => Assert.Equal("Action.Execute", action.GetProperty("type").GetString()));
+        Assert.All(actions, action =>
+        {
+            Assert.Equal("Action.Execute", action.GetProperty("type").GetString());
+            Assert.Equal("netclaw-approval", action.GetProperty("verb").GetString());
+            var data = action.GetProperty("data");
+            Assert.True(data.TryGetProperty("correlation", out _));
+            Assert.True(data.TryGetProperty("nonce", out _));
+            Assert.True(data.TryGetProperty("action", out _));
+            Assert.Equal(3, data.EnumerateObject().Count());
+        });
 
+        Assert.Equal("1.5", document.RootElement.GetProperty("version").GetString());
+        Assert.Equal("Approval required for a Netclaw tool operation.", document.RootElement.GetProperty("speak").GetString());
         var body = document.RootElement.GetProperty("body");
-        Assert.Equal("🔒 Tool approval required", body[0].GetProperty("text").GetString());
-        var toolColumns = body[1].GetProperty("columns");
-        Assert.Equal("Tool:", toolColumns[0].GetProperty("items")[0].GetProperty("text").GetString());
-        Assert.Equal("Bolder", toolColumns[0].GetProperty("items")[0].GetProperty("weight").GetString());
-        Assert.Equal("shell_execute", toolColumns[1].GetProperty("items")[0].GetProperty("text").GetString());
-        Assert.Equal("Monospace", toolColumns[1].GetProperty("items")[0].GetProperty("fontType").GetString());
-        Assert.Equal("Light", toolColumns[1].GetProperty("items")[0].GetProperty("color").GetString());
+        Assert.Equal("ColumnSet", body[0].GetProperty("type").GetString());
+        Assert.Equal("ShieldLock", body[0].GetProperty("columns")[0].GetProperty("items")[0].GetProperty("name").GetString());
+        Assert.Equal("Approval Required", body[0].GetProperty("columns")[1].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("NETCLAW SECURITY CONTROL", body[0].GetProperty("columns")[1].GetProperty("items")[1].GetProperty("text").GetString());
+        Assert.Equal("Container", body[1].GetProperty("type").GetString());
+        Assert.Equal("Accent", body[1].GetProperty("style").GetString());
+        Assert.Equal("Table", body[2].GetProperty("type").GetString());
+        Assert.False(body[2].GetProperty("firstRowAsHeader").GetBoolean());
+        Assert.False(body[2].TryGetProperty("firstRowAsHeaders", out _));
+        var rows = body[2].GetProperty("rows");
+        Assert.Equal("Tool", rows[0].GetProperty("cells")[0].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("shell_execute", rows[0].GetProperty("cells")[1].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("Command", rows[1].GetProperty("cells")[0].GetProperty("items")[0].GetProperty("text").GetString());
     }
 
     [Fact]
     public void Terminal_denial_card_payload_has_no_actions_and_uses_attention_tone()
     {
-        var card = TeamsApprovalCardRenderer.CreateTerminal(
+        var card = TeamsApprovalCardRenderer.CreateDenied(
             "shell_execute",
             "rmdir netclaw-approval-card-never-created",
-            "Denied.");
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"));
         var payload = TeamsAdaptiveCardPayloadBuilder.Create(card);
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload));
 
         var body = document.RootElement.GetProperty("body");
-        Assert.Equal("⛔ Approval denied", body[0].GetProperty("text").GetString());
-        Assert.Equal("attention", body[0].GetProperty("color").GetString());
-        var toolColumns = body[1].GetProperty("columns");
-        Assert.Equal("Tool:", toolColumns[0].GetProperty("items")[0].GetProperty("text").GetString());
-        Assert.Equal("shell_execute", toolColumns[1].GetProperty("items")[0].GetProperty("text").GetString());
-        var actionColumns = body[2].GetProperty("columns");
-        Assert.Equal("Action:", actionColumns[0].GetProperty("items")[0].GetProperty("text").GetString());
-        Assert.Equal("rmdir netclaw-approval-card-never-created", actionColumns[1].GetProperty("items")[0].GetProperty("text").GetString());
-        Assert.Equal("Denied.", body[3].GetProperty("text").GetString());
+        Assert.Equal("ShieldDismiss", body[0].GetProperty("columns")[0].GetProperty("items")[0].GetProperty("name").GetString());
+        Assert.Equal("Approval Denied", body[0].GetProperty("columns")[1].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Equal("Attention", body[1].GetProperty("style").GetString());
+        Assert.Equal("Table", body[2].GetProperty("type").GetString());
+        Assert.Equal("STATUS: EXECUTION BLOCKED", body[3].GetProperty("items")[0].GetProperty("text").GetString());
         Assert.Empty(document.RootElement.GetProperty("actions").EnumerateArray());
+    }
+
+    [Fact]
+    public void Elevated_granted_and_expired_payloads_keep_the_modern_terminal_visual_language()
+    {
+        var request = new ToolInteractionRequest
+        {
+            SessionId = new SessionId("teams~tenant~personal~conversation/conversation"),
+            Kind = "approval",
+            CallId = new ToolCallId("call-visual-variants"),
+            ToolName = new ToolName("shell_execute"),
+            DisplayText = "remove temporary artefacts",
+            Options = [new ToolInteractionOption(ApprovalOptionKeys.DenyKey, "Deny")]
+        };
+        var cards = new[]
+        {
+            TeamsApprovalCardRenderer.CreateElevatedPending(
+                request,
+                "correlation_123",
+                "nonce_123",
+                "HIGH",
+                "May permanently delete files."),
+            TeamsApprovalCardRenderer.CreateGranted(
+                "shell_execute",
+                "git status",
+                ApprovalOptionKeys.ApproveSession,
+                DateTimeOffset.Parse("2026-08-25T15:25:00Z")),
+            TeamsApprovalCardRenderer.CreateExpired(
+                "shell_execute",
+                "git status",
+                DateTimeOffset.Parse("2026-08-25T15:25:00Z"))
+        };
+
+        var expected = new[]
+        {
+            ("Warning", "Elevated Approval Required", "Warning", false),
+            ("ShieldCheckmark", "Approval Granted", "Good", true),
+            ("ClockDismiss", "Approval Card Expired", "Warning", true)
+        };
+
+        for (var index = 0; index < cards.Length; index++)
+        {
+            var payload = TeamsAdaptiveCardPayloadBuilder.Create(cards[index]);
+            using var document = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+            var body = document.RootElement.GetProperty("body");
+
+            Assert.Equal(expected[index].Item1, body[0].GetProperty("columns")[0].GetProperty("items")[0].GetProperty("name").GetString());
+            Assert.Equal(expected[index].Item2, body[0].GetProperty("columns")[1].GetProperty("items")[0].GetProperty("text").GetString());
+            Assert.Equal(expected[index].Item3, body[1].GetProperty("style").GetString());
+            Assert.Equal("Table", body[2].GetProperty("type").GetString());
+            Assert.Equal(expected[index].Item4, !document.RootElement.GetProperty("actions").EnumerateArray().Any());
+        }
+    }
+
+    [Fact]
+    public void Approval_card_payload_preserves_bounded_unicode_display_text_without_changing_callback_values()
+    {
+        var request = new ToolInteractionRequest
+        {
+            SessionId = new SessionId("teams~tenant~personal~conversation/conversation"),
+            Kind = "approval",
+            CallId = new ToolCallId("call-unicode"),
+            ToolName = new ToolName("filesystem/read_file"),
+            DisplayText = "Read \"Résumé 📄\" from /work/λ",
+            Options =
+            [
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, "Approve once ✓"),
+                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, "Deny")
+            ]
+        };
+
+        var card = TeamsApprovalCardRenderer.CreatePending(request, "correlation_123", "nonce_123");
+        var payload = TeamsAdaptiveCardPayloadBuilder.Create(card);
+        var serialized = JsonSerializer.SerializeToUtf8Bytes(payload);
+        using var document = JsonDocument.Parse(serialized);
+
+        var rows = document.RootElement.GetProperty("body")[2].GetProperty("rows");
+        Assert.Equal("Read \"Résumé 📄\" from /work/λ", rows[1].GetProperty("cells")[1].GetProperty("items")[0].GetProperty("text").GetString());
+        var execute = document.RootElement.GetProperty("actions")[0];
+        Assert.Equal("approve_once", execute.GetProperty("data").GetProperty("action").GetString());
+        Assert.Equal("nonce_123", execute.GetProperty("data").GetProperty("nonce").GetString());
+        Assert.True(serialized.Length <= TeamsApprovalCard.MaxSerializedBytes);
     }
 
     private static TeamsOutboundMessage CreateMessage(string? updateActivityId = null) => new(

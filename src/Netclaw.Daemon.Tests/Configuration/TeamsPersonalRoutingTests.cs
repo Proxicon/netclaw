@@ -212,8 +212,12 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.True(requestLifetime.AllDisposed);
     }
 
-    [Fact]
-    public async Task Http_personal_approval_action_routes_through_the_sdk_action_handler()
+    [Theory]
+    [InlineData("approve_once", "Approval Granted")]
+    [InlineData("deny", "Approval Denied")]
+    public async Task Http_personal_approval_action_replaces_the_source_card_in_place(
+        string selectedAction,
+        string expectedTerminalTitle)
     {
         var requestLifetime = new RequestLifetimeProbe();
         var replyClient = new RequestIndependentReplyClient(requestLifetime);
@@ -236,19 +240,19 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             cancellationToken: TestContext.Current.CancellationToken);
         var approvalCard = replyClient.Messages[0].ApprovalCard;
         Assert.NotNull(approvalCard);
-        var approveOnce = Assert.Single(approvalCard.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+        var selectedApprovalAction = Assert.Single(approvalCard.Actions, action => action.Action == selectedAction);
 
         using var approvalRequest = CreateTeamsActivityRequest(CreateSdkPersonalApprovalAction(
             "request-approval",
             "request-independent-activity",
-            approveOnce.CorrelationId,
-            approveOnce.Nonce,
-            approveOnce.Action));
+            selectedApprovalAction.CorrelationId,
+            selectedApprovalAction.Nonce,
+            selectedApprovalAction.Action));
         var approvalResponseTask = app.GetTestClient().SendAsync(approvalRequest, TestContext.Current.CancellationToken);
 
         var feedback = await sessionManager.ExpectMsgAsync<ToolInteractionResponse>(cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(sessionId, feedback.SessionId);
-        Assert.Equal(ApprovalOptionKeys.ApproveOnceKey, feedback.SelectedKey);
+        Assert.Equal(selectedAction, feedback.SelectedKey.Value);
         sessionManager.LastSender.Tell(new CommandAck(sessionId));
 
         using (var response = await approvalResponseTask)
@@ -258,7 +262,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             var terminalCard = document.RootElement.GetProperty("value");
             Assert.Equal("application/vnd.microsoft.card.adaptive", document.RootElement.GetProperty("type").GetString());
             Assert.Equal("AdaptiveCard", terminalCard.GetProperty("type").GetString());
-            Assert.Equal("✅ Approval granted", terminalCard.GetProperty("body")[0].GetProperty("text").GetString());
+            Assert.Equal(expectedTerminalTitle, terminalCard.GetProperty("body")[0].GetProperty("columns")[1].GetProperty("items")[0].GetProperty("text").GetString());
             Assert.Empty(terminalCard.GetProperty("actions").EnumerateArray());
         }
 
@@ -2636,12 +2640,14 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             TestContext.Current.CancellationToken);
 
         Assert.Equal(TeamsApprovalActionDisposition.Expired, result.Disposition);
-        Assert.Equal("⌛ Approval expired", result.TerminalCard?.Title);
+        Assert.Equal("Approval Card Expired", result.TerminalCard?.Title);
+        Assert.Equal("STATUS: NO DECISION RECORDED", result.TerminalCard?.Footer);
         Assert.Empty(result.TerminalCard?.Actions ?? []);
         Assert.DoesNotContain(pipeline.Feedback, static feedback => feedback is ToolInteractionResponse);
         await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
         var replacement = Assert.IsType<TeamsApprovalCard>(replyClient.Messages[0].ApprovalCard);
         var replacementDeny = Assert.Single(replacement.Actions, action => action.Action == ApprovalOptionKeys.Deny);
+        Assert.NotEqual(nonce, replacementDeny.Nonce);
 
         var stale = await actor.Ask<TeamsApprovalActionResult>(
             new TeamsBindingApprovalAction(
@@ -2859,11 +2865,12 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         await AwaitAssertAsync(() => Assert.Single(pipeline.Feedback), cancellationToken: TestContext.Current.CancellationToken);
         Assert.Single(replyClient.Messages);
         var terminalCard = Assert.IsType<TeamsApprovalCard>(result.TerminalCard);
-        Assert.Equal("✅ Approval granted", terminalCard.Title);
+        Assert.Equal("Approval Granted", terminalCard.Title);
         Assert.Empty(terminalCard.Actions);
-        Assert.Contains("Tool:", terminalCard.Body, StringComparison.Ordinal);
-        Assert.Contains("Action:", terminalCard.Body, StringComparison.Ordinal);
-        Assert.Contains("Approved: Once.", terminalCard.Body, StringComparison.Ordinal);
+        Assert.Contains(new TeamsApprovalCardField("Tool", "safe_tool"), terminalCard.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Request", "Approve safe tool use."), terminalCard.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Approval Scope", "One-time approval"), terminalCard.Fields);
+        Assert.Equal("STATUS: EXECUTION AUTHORIZED", terminalCard.Footer);
     }
 
     [Fact]
@@ -3013,7 +3020,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Empty(pipeline.Feedback);
         Assert.Empty(replyClient.Messages);
         var terminalCard = Assert.IsType<TeamsApprovalCard>(result.TerminalCard);
-        Assert.Equal("⚠️ Approval unavailable", terminalCard.Title);
+        Assert.Equal("Approval Unavailable", terminalCard.Title);
         Assert.Empty(terminalCard.Actions);
         Assert.Equal("This approval is no longer available.", terminalCard.Body);
     }

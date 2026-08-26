@@ -222,24 +222,27 @@ host with normal certificate, monitoring, and recovery controls.
 ## Tool approvals
 
 Teams sends a native Adaptive Card for a tool approval. The card preserves the
-order and labels that the session supplies.
+order and labels that the session supplies. All approval cards target Adaptive
+Cards schema 1.5.
 
-The pending card has a lock icon. The terminal card has an outcome icon.
-The card shows bold labels and muted monospace values. Teams selects the local
-monospace font. Netclaw does not load an external image for these icons.
+Each card has a Fluent icon, a large state title, and the `NETCLAW SECURITY
+CONTROL` subtitle. A semantic banner describes the state. A two-column table
+shows bounded display facts. Terminal cards have a centered status footer.
 
 | Card state | Icon | Card tone |
 | --- | --- | --- |
-| Pending | 🔒 | warning |
-| Approved | ✅ | good |
-| Denied | ⛔ | attention |
+| Pending | ShieldLock | accent |
+| Granted | ShieldCheckmark | good |
+| Denied | ShieldDismiss | attention |
+| Card expired | ClockDismiss | warning |
+| Already processed or unavailable | Info or Warning | neutral |
 
 | Decision | Card style | Effect |
 | --- | --- | --- |
 | Once | positive | Allows the current call only. |
 | This chat | default | Allows the scoped action for this session. |
 | Always here | default | Saves a directory-scoped grant. |
-| Always anywhere | destructive | Saves a global grant. |
+| Always anywhere | default | Saves a global grant. |
 | Deny | destructive | Refuses the current call. |
 
 The Teams client can wrap the action row on a narrow display. This does not
@@ -249,6 +252,26 @@ nonce, expiry, and persisted offered key before it accepts a decision.
 
 Teams approval cards do not accept letter replies. Use a card button. This
 keeps the signed card callback as the only decision path.
+
+A granted card means that the session accepted a decision. It shows the exact
+approval scope and `Pending execution`. It does not claim that the operation
+finished. A denied card appears only after the user selects the explicit Deny
+option. It shows `User rejected the request`.
+
+When an approval reaches a terminal presentation state, Teams returns the
+terminal Adaptive Card in the `Action.Execute` response. The Teams client
+replaces the source pending card in place. Netclaw does not post a second
+Granted, Denied, Already Processed, or Unavailable card.
+
+An expired card is a Teams presentation event. When the requester submits an
+expired pending card, its `Action.Execute` response replaces that source card
+in place with the actionless Expired presentation. No decision was recorded.
+The session approval remains pending, so Netclaw separately posts one new
+pending card with a fresh nonce. Expiry creates no core decision.
+
+The elevated visual exists for a future canonical risk signal. Teams does not
+parse commands or infer risk. Normal cards never show a fabricated `SAFE` or
+`HIGH` risk level.
 
 ### Channel-binding parity
 
