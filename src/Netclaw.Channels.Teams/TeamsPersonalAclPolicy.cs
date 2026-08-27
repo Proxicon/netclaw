@@ -18,6 +18,22 @@ public static class TeamsPersonalAclPolicy
     public static ChannelAclDecision Evaluate(
         TeamsInboundActivity activity,
         TeamsChannelOptions options)
+        => EvaluateCore(activity, options, enforceAllowedUsers: true);
+
+    /// <summary>
+    /// Applies all personal-message gates other than the final user/group
+    /// principal check. The async principal authorizer performs that check after
+    /// this synchronous structural validation succeeds.
+    /// </summary>
+    public static ChannelAclDecision EvaluateStructuralAccess(
+        TeamsInboundActivity activity,
+        TeamsChannelOptions options)
+        => EvaluateCore(activity, options, enforceAllowedUsers: false);
+
+    private static ChannelAclDecision EvaluateCore(
+        TeamsInboundActivity activity,
+        TeamsChannelOptions options,
+        bool enforceAllowedUsers)
     {
         ArgumentNullException.ThrowIfNull(activity);
         ArgumentNullException.ThrowIfNull(options);
@@ -40,7 +56,8 @@ public static class TeamsPersonalAclPolicy
             return ChannelAclDecision.Deny("configured_tenant_mismatch");
         }
 
-        if (!options.AllowedUserIds.Contains(activity.Trust.SenderId, StringComparer.Ordinal))
+        if (enforceAllowedUsers
+            && !options.AllowedUserIds.Contains(activity.Trust.SenderId, StringComparer.Ordinal))
             return ChannelAclDecision.Deny(AclDenyReasons.UserNotAllowed);
 
         return ChannelAclDecision.Allow(

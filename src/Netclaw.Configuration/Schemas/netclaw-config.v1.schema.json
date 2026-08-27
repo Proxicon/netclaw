@@ -127,6 +127,12 @@
           "default": [],
           "items": { "type": "string" }
         },
+        "AllowedGroupIds": {
+          "type": "array",
+          "description": "Canonical Entra group object IDs allowed across Teams conversations. Membership is checked fail closed through Microsoft Graph.",
+          "default": [],
+          "items": { "type": "string" }
+        },
         "ChannelAudiences": {
           "type": "object",
           "description": "Audience overrides keyed by canonical team/channel or team ID. Values are personal, team, or public.",
@@ -154,6 +160,36 @@
               "Audience": {
                 "type": "string",
                 "enum": ["personal", "team", "public"]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "ChannelAccessOverrides": {
+          "type": "array",
+          "description": "Delimiter-safe per-channel principal restrictions. TeamId and ChannelId are canonical IDs; names are never authorization values.",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": ["TeamId", "ChannelId"],
+            "properties": {
+              "TeamId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ChannelId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "AllowedUserIds": {
+                "type": "array",
+                "default": [],
+                "items": { "type": "string" }
+              },
+              "AllowedGroupIds": {
+                "type": "array",
+                "default": [],
+                "items": { "type": "string" }
               }
             },
             "additionalProperties": false

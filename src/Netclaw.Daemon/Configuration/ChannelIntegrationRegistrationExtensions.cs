@@ -15,6 +15,7 @@ using Netclaw.Channels.Mattermost.Transport;
 using Netclaw.Channels.Slack;
 using Netclaw.Channels.Slack.Tools;
 using Netclaw.Channels.Teams;
+using Netclaw.Channels.Teams.Graph;
 using Netclaw.Configuration;
 using Netclaw.Security;
 using Netclaw.Tools;
@@ -290,6 +291,7 @@ public static class ChannelIntegrationRegistrationExtensions
 
         services.AddSingleton(options);
         services.AddSingleton(registration);
+        services.AddTeamsDirectory(options);
         services.AddChannelRegistry();
         services.AddChannelDescriptor(descriptor);
         services.AddSingleton<IChannelRuntimeSnapshotProvider>(

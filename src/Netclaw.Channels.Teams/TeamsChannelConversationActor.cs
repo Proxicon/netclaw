@@ -91,10 +91,9 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
             return;
         }
 
-        var policy = TeamsChannelAclPolicy.EvaluateAccess(ingress.Activity, _dependencies.Options);
-        if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed)
+        if (TeamsActorAclEvaluator.Evaluate(ingress.Activity, _dependencies.Options) is null)
         {
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(policy.ReasonCode);
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("channel_acl_denied");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Denied));
             return;
         }

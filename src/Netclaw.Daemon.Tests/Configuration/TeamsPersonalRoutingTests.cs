@@ -2420,6 +2420,51 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Approval_callback_uses_an_already_cached_operator_label_without_directory_io()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var sessionId = CreateSessionId("tenant-a", "conversation-approval-cached-label");
+        var cacheReads = 0;
+        var dependencies = CreateDependencies(
+            pipeline,
+            replyClient: replyClient,
+            cachedOperatorLabel: _ =>
+            {
+                cacheReads++;
+                return "Grace Hopper <grace@example.test>";
+            });
+        var actor = CreateBindingActor(sessionId, dependencies, "teams-approval-cached-label");
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteAsync(actor, CreateActivity("activity-approval-cached-label", "tenant-a", "conversation-approval-cached-label"))).Disposition);
+        var subscriber = ReceiveOutputSubscriber();
+        subscriber.Tell(CreateApprovalRequest(sessionId, "call-approval-cached-label", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var approvalCard = Assert.IsType<TeamsApprovalCard>(Assert.Single(replyClient.Messages).ApprovalCard);
+        var approve = Assert.Single(approvalCard.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        var accepted = await actor.Ask<TeamsApprovalActionResult>(
+            new TeamsBindingApprovalAction(
+                CreateApprovalAction(
+                    "tenant-a",
+                    "conversation-approval-cached-label",
+                    approve.CorrelationId,
+                    approve.Nonce,
+                    "synthetic-activity",
+                    approve.Action),
+                TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Accepted, accepted.Disposition);
+        Assert.Contains(
+            new TeamsApprovalCardField("Approved By", "Grace Hopper <grace@example.test>"),
+            accepted.TerminalCard?.Fields ?? []);
+        Assert.Equal(1, cacheReads);
+    }
+
+    [Fact]
     public async Task Initial_approval_card_delivery_failure_reissues_a_fresh_card_after_restart()
     {
         var replyClient = new RecordingTeamsReplyClient(
@@ -3539,7 +3584,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         string tenantId = "tenant-a",
         bool enabled = false,
         ITeamsReplyClient? replyClient = null,
-        IPromptInjectionDetector? detector = null) => new(
+        IPromptInjectionDetector? detector = null,
+        Func<string, string?>? cachedOperatorLabel = null) => new(
         new TeamsChannelOptions
         {
             Enabled = enabled,
@@ -3552,7 +3598,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         new TeamsOutputRenderer(),
         TimeProvider.System)
     {
-        PromptInjectionDetector = detector ?? SafeTeamsPromptInjectionDetector.Instance
+        PromptInjectionDetector = detector ?? SafeTeamsPromptInjectionDetector.Instance,
+        CachedOperatorLabel = cachedOperatorLabel
     };
 
     private static ServiceProvider CreateConversationServiceProvider(

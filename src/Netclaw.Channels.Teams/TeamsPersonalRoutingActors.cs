@@ -42,6 +42,12 @@ public sealed record TeamsConversationDependencies(
     /// missing detector is deliberately handled as unavailable at ingress.
     /// </summary>
     public IPromptInjectionDetector? PromptInjectionDetector { get; init; }
+
+    /// <summary>
+    /// Resolves a presentation-only operator label from an already cached
+    /// directory record. It must not perform network I/O.
+    /// </summary>
+    public Func<string, string?>? CachedOperatorLabel { get; init; }
 }
 
 internal readonly record struct TeamsApprovalPromptId(string Value);
@@ -152,12 +158,15 @@ public static class TeamsActorNames
 public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngressSink
 {
     private static readonly TimeSpan RouteTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ApprovalAuthorizationEvidenceTtl = TimeSpan.FromMinutes(10);
+    private const int MaximumApprovalAuthorizationEvidence = 1_024;
 
     private readonly ActorSystem _actorSystem;
     private readonly TeamsChannelOptions _options;
     private readonly IServiceProvider _serviceProvider;
     private readonly object _creationLock = new();
     private readonly Dictionary<string, IActorRef> _conversations = new(StringComparer.Ordinal);
+    private readonly Dictionary<TeamsApprovalAuthorizationKey, DateTimeOffset> _approvalAuthorizationEvidence = [];
 
     public TeamsActorConversationIngressSink(
         ActorSystem actorSystem,
@@ -187,20 +196,33 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
 
         if (activity.Trust.Scope == TeamsConversationScope.Personal)
         {
-            if (!TeamsPersonalAclPolicy.Evaluate(activity, _options).IsAllowed)
+            var structural = TeamsPersonalAclPolicy.EvaluateStructuralAccess(activity, _options);
+            if (!structural.IsAllowed)
                 return TeamsIngressSinkResult.Denied;
 
-            return await RoutePersonalAsync(activity, conversationId, cancellationToken);
+            var authorization = await CreateAuthorizationAsync(activity, structural, cancellationToken).ConfigureAwait(false);
+            if (authorization is null)
+                return TeamsIngressSinkResult.Denied;
+
+            var result = await RoutePersonalAsync(activity.WithAuthorization(authorization), conversationId, cancellationToken);
+            RememberApprovalAuthorization(activity, result);
+            return result;
         }
 
         if (activity.Trust.Scope != TeamsConversationScope.Channel)
             return TeamsIngressSinkResult.Unavailable;
 
-        var policy = TeamsChannelAclPolicy.EvaluateAccess(activity, _options);
-        if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed)
+        var policy = TeamsChannelAclPolicy.EvaluateStructuralAccess(activity, _options);
+        if (policy.Disposition != TeamsChannelPolicyDisposition.Allowed || policy.Acl is null)
             return TeamsIngressSinkResult.Denied;
 
-        return await RouteChannelAsync(activity, conversationId, cancellationToken);
+        var channelAuthorization = await CreateAuthorizationAsync(activity, policy.Acl, cancellationToken).ConfigureAwait(false);
+        if (channelAuthorization is null)
+            return TeamsIngressSinkResult.Denied;
+
+        var routed = await RouteChannelAsync(activity.WithAuthorization(channelAuthorization), conversationId, cancellationToken);
+        RememberApprovalAuthorization(activity, routed);
+        return routed;
     }
 
     public async ValueTask<TeamsApprovalActionResult> RouteApprovalAsync(
@@ -222,8 +244,15 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
 
         if (action.Trust.Scope == TeamsConversationScope.Personal)
         {
-            if (!TeamsPersonalAclPolicy.Evaluate(activity, _options).IsAllowed)
+            if (RequiresApprovalAuthorizationEvidence(activity))
+            {
+                if (!HasApprovalAuthorizationEvidence(activity))
+                    return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+            }
+            else if (!TeamsPersonalAclPolicy.Evaluate(activity, _options).IsAllowed)
+            {
                 return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+            }
 
             return await RoutePersonalApprovalAsync(action, conversationId, cancellationToken);
         }
@@ -236,8 +265,17 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         // Teams omits channelData from a valid adaptiveCard/action invoke.
         // The binding validates a missing destination field against the
         // durable destination that the original approved message captured.
-        if ((action.TeamId is not null || action.ChannelId is not null)
-            && TeamsChannelAclPolicy.EvaluateAccess(activity, _options).Disposition != TeamsChannelPolicyDisposition.Allowed)
+        if (RequiresApprovalAuthorizationEvidence(activity))
+        {
+            if (!HasApprovalAuthorizationEvidence(activity)
+                || ((action.TeamId is not null || action.ChannelId is not null)
+                    && TeamsChannelAclPolicy.EvaluateStructuralAccess(activity, _options).Disposition != TeamsChannelPolicyDisposition.Allowed))
+            {
+                return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+            }
+        }
+        else if ((action.TeamId is not null || action.ChannelId is not null)
+                 && TeamsChannelAclPolicy.EvaluateAccess(activity, _options).Disposition != TeamsChannelPolicyDisposition.Allowed)
         {
             return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
         }
@@ -297,8 +335,110 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         _serviceProvider.GetRequiredService<TeamsOutputRenderer>(),
         _serviceProvider.GetRequiredService<TimeProvider>())
     {
-        PromptInjectionDetector = _serviceProvider.GetService<IPromptInjectionDetector>()
+        PromptInjectionDetector = _serviceProvider.GetService<IPromptInjectionDetector>(),
+        CachedOperatorLabel = CreateCachedOperatorLabelResolver()
     };
+
+    private Func<string, string?>? CreateCachedOperatorLabelResolver()
+    {
+        var cache = _serviceProvider.GetService<ITeamsDirectoryUserCache>();
+        return cache is null ? null : userId => TryGetCachedOperatorLabel(cache, userId);
+    }
+
+    private static string? TryGetCachedOperatorLabel(ITeamsDirectoryUserCache cache, string userId)
+    {
+        try
+        {
+            if (!cache.TryGetCachedUser(userId, out var user)
+                || string.IsNullOrWhiteSpace(user.UserPrincipalName))
+            {
+                return null;
+            }
+
+            var label = string.IsNullOrWhiteSpace(user.DisplayName)
+                ? user.UserPrincipalName
+                : $"{user.DisplayName} <{user.UserPrincipalName}>";
+            return TeamsApprovalAction.NormalizeOperatorDisplayName(label);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async ValueTask<TeamsIngressAuthorization?> CreateAuthorizationAsync(
+        TeamsInboundActivity activity,
+        ChannelAclDecision structural,
+        CancellationToken cancellationToken)
+    {
+        // Minimal hosts can route Teams without Graph registration. The local
+        // authorizer retains legacy and explicit-user behavior, while a group
+        // rule still fails closed because it has no directory boundary.
+        var authorizer = _serviceProvider.GetService<TeamsPrincipalAuthorizer>()
+                         ?? new TeamsPrincipalAuthorizer(_options, directory: null);
+        var decision = await authorizer.AuthorizeAsync(activity, cancellationToken).ConfigureAwait(false);
+        if (!decision.IsAllowed)
+        {
+            ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped(decision.ReasonCode);
+            return null;
+        }
+
+        return TeamsIngressAuthorization.Create(
+            activity,
+            ChannelAclDecision.Allow(structural.Audience, decision.Principal, structural.Provenance));
+    }
+
+    private bool RequiresApprovalAuthorizationEvidence(TeamsInboundActivity activity)
+        => TeamsPrincipalRequirements.Resolve(activity, _options).HasRestriction;
+
+    private void RememberApprovalAuthorization(TeamsInboundActivity activity, TeamsIngressSinkResult result)
+    {
+        if (result is not (TeamsIngressSinkResult.Accepted or TeamsIngressSinkResult.Duplicate)
+            || !RequiresApprovalAuthorizationEvidence(activity))
+        {
+            return;
+        }
+
+        lock (_creationLock)
+        {
+            var now = _serviceProvider.GetRequiredService<TimeProvider>().GetUtcNow();
+            RemoveExpiredApprovalAuthorizationEvidence(now);
+            if (_approvalAuthorizationEvidence.Count >= MaximumApprovalAuthorizationEvidence)
+                _approvalAuthorizationEvidence.Remove(_approvalAuthorizationEvidence.Keys.First());
+
+            _approvalAuthorizationEvidence[TeamsApprovalAuthorizationKey.From(activity)] = now + ApprovalAuthorizationEvidenceTtl;
+        }
+    }
+
+    private bool HasApprovalAuthorizationEvidence(TeamsInboundActivity activity)
+    {
+        lock (_creationLock)
+        {
+            var now = _serviceProvider.GetRequiredService<TimeProvider>().GetUtcNow();
+            RemoveExpiredApprovalAuthorizationEvidence(now);
+            return _approvalAuthorizationEvidence.TryGetValue(TeamsApprovalAuthorizationKey.From(activity), out var expiresAt)
+                   && expiresAt > now;
+        }
+    }
+
+    private readonly record struct TeamsApprovalAuthorizationKey(
+        string SenderId,
+        string TenantId,
+        string ConversationId,
+        TeamsConversationScope Scope)
+    {
+        public static TeamsApprovalAuthorizationKey From(TeamsInboundActivity activity) => new(
+            activity.Trust.SenderId,
+            activity.Trust.TenantId,
+            activity.Trust.ConversationId,
+            activity.Trust.Scope);
+    }
+
+    private void RemoveExpiredApprovalAuthorizationEvidence(DateTimeOffset now)
+    {
+        foreach (var (key, expiresAt) in _approvalAuthorizationEvidence.Where(entry => entry.Value <= now).ToArray())
+            _approvalAuthorizationEvidence.Remove(key);
+    }
 
     private static async ValueTask<TeamsApprovalActionResult> AskApprovalAsync(
         IActorRef conversation,
@@ -513,7 +653,7 @@ public sealed class TeamsPersonalConversationActor : ReceiveActor
             return;
         }
 
-        if (!TeamsPersonalAclPolicy.Evaluate(ingress.Activity, _dependencies.Options).IsAllowed)
+        if (TeamsActorAclEvaluator.Evaluate(ingress.Activity, _dependencies.Options) is null)
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped("personal_acl_denied");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Denied));
@@ -1169,16 +1309,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     }
 
     private ChannelAclDecision? EvaluateAcl(TeamsInboundActivity activity)
-    {
-        if (activity.Trust.Scope == TeamsConversationScope.Personal)
-        {
-            var personal = TeamsPersonalAclPolicy.Evaluate(activity, _dependencies.Options);
-            return personal.IsAllowed ? personal : null;
-        }
-
-        var channel = TeamsChannelAclPolicy.EvaluateAccess(activity, _dependencies.Options);
-        return channel.Disposition == TeamsChannelPolicyDisposition.Allowed ? channel.Acl : null;
-    }
+        => TeamsActorAclEvaluator.Evaluate(activity, _dependencies.Options);
 
     private bool IsAuthorizedChannelContinuation(TeamsBindingIngress ingress)
     {
@@ -2419,7 +2550,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                                 pending,
                                 decision.Action,
                                 DateTimeOffset.FromUnixTimeMilliseconds(consumed.ConsumedAtUnixMilliseconds),
-                                decision.OperatorDisplayName)));
+                                ResolveOperatorDisplayName(decision.SenderId, decision.OperatorDisplayName))));
                     });
                 return;
 
@@ -2565,6 +2696,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 resolvedAt,
                 pending.IsMcpTool,
                 operatorDisplayName);
+
+    private string? ResolveOperatorDisplayName(string senderId, string? callbackDisplayName)
+        => TeamsApprovalAction.NormalizeOperatorDisplayName(callbackDisplayName)
+           ?? _dependencies.CachedOperatorLabel?.Invoke(senderId);
 
     private ToolInteractionRequest CreateApprovalRequest(TeamsPendingApproval pending) => new()
     {
