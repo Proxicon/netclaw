@@ -2398,12 +2398,16 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             approve.CorrelationId,
             approve.Nonce,
             "synthetic-activity",
-            approve.Action);
+            approve.Action,
+            operatorDisplayName: "Ada Lovelace");
         var accepted = await recovered.Ask<TeamsApprovalActionResult>(
             new TeamsBindingApprovalAction(action, TestContext.Current.CancellationToken),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(TeamsApprovalActionDisposition.Accepted, accepted.Disposition);
+        Assert.Contains(
+            new TeamsApprovalCardField("Approved By", "Ada Lovelace"),
+            accepted.TerminalCard?.Fields ?? []);
         await AwaitAssertAsync(() => Assert.Single(pipeline.Feedback), cancellationToken: TestContext.Current.CancellationToken);
         var feedback = Assert.IsType<ToolInteractionResponse>(pipeline.Feedback[0]);
         Assert.Equal(ApprovalOptionKeys.ApproveOnceKey, feedback.SelectedKey);
@@ -3740,7 +3744,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         string correlationId,
         string nonce,
         string promptActivityId,
-        string action) => new(
+        string action,
+        string? operatorDisplayName = null) => new(
         new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
@@ -3759,7 +3764,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         null,
         null,
         promptActivityId,
-        "https://service.invalid/");
+        "https://service.invalid/",
+        operatorDisplayName);
 
     private static ToolInteractionRequest CreateApprovalRequest(
         SessionId sessionId,

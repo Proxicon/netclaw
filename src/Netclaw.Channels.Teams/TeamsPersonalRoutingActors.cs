@@ -2356,6 +2356,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 pending.CorrelationId,
                 pending.ForwardingDecision,
                 pending.ForwardingSenderId!,
+                action.OperatorDisplayName,
                 action.Nonce,
                 Sender));
             return Task.CompletedTask;
@@ -2374,6 +2375,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 pending.CorrelationId,
                 action.Action,
                 action.Trust.SenderId,
+                action.OperatorDisplayName,
                 action.Nonce,
                 replyTo));
         });
@@ -2416,7 +2418,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                             CreateResolvedApprovalCard(
                                 pending,
                                 decision.Action,
-                                DateTimeOffset.FromUnixTimeMilliseconds(consumed.ConsumedAtUnixMilliseconds))));
+                                DateTimeOffset.FromUnixTimeMilliseconds(consumed.ConsumedAtUnixMilliseconds),
+                                decision.OperatorDisplayName)));
                     });
                 return;
 
@@ -2498,8 +2501,9 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 pending.CorrelationId,
                 pending.ForwardingDecision!,
                 pending.ForwardingSenderId!,
+                OperatorDisplayName: null,
                 Nonce: null,
-                ActorRefs.Nobody));
+                ReplyTo: ActorRefs.Nobody));
         }
     }
 
@@ -2545,19 +2549,22 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     private static TeamsApprovalCard CreateResolvedApprovalCard(
         TeamsPendingApproval pending,
         string selectedKey,
-        DateTimeOffset resolvedAt) =>
+        DateTimeOffset resolvedAt,
+        string? operatorDisplayName) =>
         selectedKey == ApprovalOptionKeys.Deny
             ? TeamsApprovalCardRenderer.CreateDenied(
                 pending.ToolName,
                 pending.RequestDisplayText,
                 resolvedAt,
-                pending.IsMcpTool)
+                pending.IsMcpTool,
+                operatorDisplayName)
             : TeamsApprovalCardRenderer.CreateGranted(
                 pending.ToolName,
                 pending.RequestDisplayText,
                 selectedKey,
                 resolvedAt,
-                pending.IsMcpTool);
+                pending.IsMcpTool,
+                operatorDisplayName);
 
     private ToolInteractionRequest CreateApprovalRequest(TeamsPendingApproval pending) => new()
     {
@@ -2860,6 +2867,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         string CorrelationId,
         string Action,
         string SenderId,
+        string? OperatorDisplayName,
         string? Nonce,
         IActorRef ReplyTo) : INoSerializationVerificationNeeded;
 

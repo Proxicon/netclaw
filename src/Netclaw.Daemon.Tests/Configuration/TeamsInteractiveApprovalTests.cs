@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Text.Json;
 using Netclaw.Actors.Protocol;
+using Netclaw.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Tools;
 using Xunit;
@@ -169,6 +170,56 @@ public sealed class TeamsInteractiveApprovalTests
         Assert.Equal("Approval denied. The request was rejected and was not executed.", card.Speak);
     }
 
+    [Fact]
+    public void Terminal_cards_honor_a_valid_operator_display_name()
+    {
+        var granted = TeamsApprovalCardRenderer.CreateGranted(
+            "shell_execute",
+            "git status",
+            ApprovalOptionKeys.ApproveOnce,
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"),
+            operatorDisplayName: "Ada Lovelace");
+        var denied = TeamsApprovalCardRenderer.CreateDenied(
+            "shell_execute",
+            "git status",
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"),
+            operatorDisplayName: "Grace Hopper");
+
+        Assert.Contains(new TeamsApprovalCardField("Approved By", "Ada Lovelace"), granted.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Denied By", "Grace Hopper"), denied.Fields);
+    }
+
+    [Fact]
+    public void Terminal_cards_fall_back_for_unsafe_presenter_labels_and_bound_safe_labels()
+    {
+        var unsafeCard = TeamsApprovalCardRenderer.CreateGranted(
+            "shell_execute",
+            "git status",
+            ApprovalOptionKeys.ApproveOnce,
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"),
+            operatorDisplayName: "Ada\u202eLovelace");
+        var rawGuidCard = TeamsApprovalCardRenderer.CreateDenied(
+            "shell_execute",
+            "git status",
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"),
+            operatorDisplayName: "f9acbff0-9265-4e8f-8fba-9bc16fe46ed5");
+        var longName = new string('A', TeamsApprovalAction.MaxOperatorDisplayNameLength + 40);
+        var boundedCard = TeamsApprovalCardRenderer.CreateGranted(
+            "shell_execute",
+            "git status",
+            ApprovalOptionKeys.ApproveOnce,
+            DateTimeOffset.Parse("2026-08-25T15:25:00Z"),
+            operatorDisplayName: longName);
+
+        Assert.Contains(new TeamsApprovalCardField("Approved By", "Authorized operator"), unsafeCard.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Denied By", "Authorized operator"), rawGuidCard.Fields);
+        Assert.Contains(
+            new TeamsApprovalCardField(
+                "Approved By",
+                ApprovalDisplayTextFormatter.Truncate(longName, TeamsApprovalAction.MaxOperatorDisplayNameLength)),
+            boundedCard.Fields);
+    }
+
     [Theory]
     [InlineData(ApprovalOptionKeys.ApproveOnce, "One-time approval")]
     [InlineData(ApprovalOptionKeys.ApproveSession, "Session approval")]
@@ -188,7 +239,10 @@ public sealed class TeamsInteractiveApprovalTests
         Assert.Equal("STATUS: EXECUTION AUTHORIZED", card.Footer);
         Assert.Empty(card.Actions);
         Assert.Contains(new TeamsApprovalCardField("Approval Scope", scope), card.Fields);
-        Assert.Contains(new TeamsApprovalCardField("Execution State", "Pending execution"), card.Fields);
+        Assert.Contains(new TeamsApprovalCardField("Execution State", "Execution Approved"), card.Fields);
+        var terminalText = string.Join('\n', [card.Body, card.Banner, card.Footer, card.Speak, card.Summary]);
+        Assert.DoesNotContain("success", terminalText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("complete", terminalText, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

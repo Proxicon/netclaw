@@ -171,6 +171,26 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
                 "invalid_approval_action_context");
         }
 
+        var sender = activity.From!;
+        var suppliedOperatorDisplayName = sender.Name;
+        var operatorDisplayName = TeamsApprovalAction.NormalizeOperatorDisplayName(suppliedOperatorDisplayName);
+        if (IsRawIdentifierDisplayName(
+                suppliedOperatorDisplayName,
+                sender.Id,
+                sender.AadObjectId,
+                authenticatedTenantId,
+                activity.Conversation!.Id,
+                activity.Id,
+                rootActivityId,
+                activity.ChannelData?.Team?.Id,
+                activity.ChannelData?.Channel?.Id,
+                replyToActivityId,
+                correlation,
+                nonce))
+        {
+            operatorDisplayName = null;
+        }
+
         return TeamsTranslationResult.Accepted(new TeamsApprovalAction(
             CreateTrust(activity, authenticatedTenantId!, scope),
             correlation,
@@ -180,7 +200,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             activity.ChannelData?.Team?.Id,
             activity.ChannelData?.Channel?.Id,
             replyToActivityId,
-            serviceUrl.ToString()));
+            serviceUrl.ToString(),
+            operatorDisplayName));
     }
 
     private TeamsTranslationResult TranslateMessage(MessageActivity activity, string? authenticatedTenantId)
@@ -299,6 +320,11 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
 
     private static string GetCanonicalSenderId(TeamsChannelAccount sender) =>
         string.IsNullOrWhiteSpace(sender.AadObjectId) ? sender.Id! : sender.AadObjectId;
+
+    private static bool IsRawIdentifierDisplayName(string? displayName, params string?[] identifiers) =>
+        !string.IsNullOrWhiteSpace(displayName)
+        && identifiers.Any(identifier => !string.IsNullOrWhiteSpace(identifier)
+                                        && string.Equals(displayName.Trim(), identifier.Trim(), StringComparison.Ordinal));
 
     private bool TryValidateCommon(
         TeamsActivity activity,
