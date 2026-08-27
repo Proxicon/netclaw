@@ -107,13 +107,14 @@ public static class TeamsApprovalCardRenderer
         string requestDisplayText,
         string selectedKey,
         DateTimeOffset approvedAt,
-        bool isMcpTool = false)
+        bool isMcpTool = false,
+        string? operatorDisplayName = null)
     {
         var fields = BuildPrimaryFields(toolName, requestDisplayText, isMcpTool)
-            .Append(new TeamsApprovalCardField("Approved By", "Authorized operator"))
+            .Append(new TeamsApprovalCardField("Approved By", PresenterLabel(operatorDisplayName)))
             .Append(new TeamsApprovalCardField("Approval Scope", ApprovalScopeDescription(selectedKey, isMcpTool)))
             .Append(new TeamsApprovalCardField("Approved At", FormatTimestamp(approvedAt)))
-            .Append(new TeamsApprovalCardField("Execution State", "Pending execution"))
+            .Append(new TeamsApprovalCardField("Execution State", "Execution Approved"))
             .ToArray();
         return CreateTerminalCard(
             "Approval Granted",
@@ -129,10 +130,11 @@ public static class TeamsApprovalCardRenderer
         string toolName,
         string requestDisplayText,
         DateTimeOffset deniedAt,
-        bool isMcpTool = false)
+        bool isMcpTool = false,
+        string? operatorDisplayName = null)
     {
         var fields = BuildPrimaryFields(toolName, requestDisplayText, isMcpTool)
-            .Append(new TeamsApprovalCardField("Denied By", "Authorized operator"))
+            .Append(new TeamsApprovalCardField("Denied By", PresenterLabel(operatorDisplayName)))
             .Append(new TeamsApprovalCardField("Denied At", FormatTimestamp(deniedAt)))
             .Append(new TeamsApprovalCardField("Reason", "User rejected the request"))
             .ToArray();
@@ -268,6 +270,9 @@ public static class TeamsApprovalCardRenderer
 
     private static string Truncate(string value, int maximumLength)
         => value.Length <= maximumLength ? value : value[..maximumLength];
+
+    private static string PresenterLabel(string? operatorDisplayName) =>
+        TeamsApprovalAction.NormalizeOperatorDisplayName(operatorDisplayName) ?? "Authorized operator";
 
     private static TeamsApprovalCardField[] BuildPendingFields(ToolInteractionRequest request)
     {

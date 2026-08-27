@@ -679,6 +679,72 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_carries_a_safe_presenter_label_without_changing_canonical_sender_identity()
+    {
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "tenant" },
+            new FakeTimeProvider());
+
+        var result = translator.Translate(
+            CreateSdkApprovalAction(
+                ApprovalOptionKeys.ApproveOnce,
+                senderId: "teams-transport-sender",
+                aadObjectId: "operator-aad-object",
+                displayName: " Ada Lovelace "),
+            "tenant");
+
+        var action = Assert.IsType<TeamsApprovalAction>(result.ApprovalAction);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("operator-aad-object", action.Trust.SenderId);
+        Assert.Equal("Ada Lovelace", action.OperatorDisplayName);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("operator-aad-object")]
+    [InlineData("d73d8cc1-50d1-4ed6-9ebd-dce8ad6cfd69")]
+    [InlineData("Ada\u202eLovelace")]
+    public void Translator_discards_missing_or_unsafe_presenter_labels(string? displayName)
+    {
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "tenant" },
+            new FakeTimeProvider());
+
+        var result = translator.Translate(
+            CreateSdkApprovalAction(
+                ApprovalOptionKeys.Deny,
+                senderId: "teams-transport-sender",
+                aadObjectId: "operator-aad-object",
+                displayName: displayName),
+            "tenant");
+
+        var action = Assert.IsType<TeamsApprovalAction>(result.ApprovalAction);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("operator-aad-object", action.Trust.SenderId);
+        Assert.Null(action.OperatorDisplayName);
+    }
+
+    [Fact]
+    public void Translator_discards_a_long_presenter_label_that_matches_the_raw_sender_identifier()
+    {
+        var longSenderId = new string('s', TeamsApprovalAction.MaxOperatorDisplayNameLength + 40);
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "tenant" },
+            new FakeTimeProvider());
+
+        var result = translator.Translate(
+            CreateSdkApprovalAction(
+                ApprovalOptionKeys.Deny,
+                senderId: longSenderId,
+                displayName: longSenderId),
+            "tenant");
+
+        var action = Assert.IsType<TeamsApprovalAction>(result.ApprovalAction);
+        Assert.Equal(longSenderId, action.Trust.SenderId);
+        Assert.Null(action.OperatorDisplayName);
+    }
+
+    [Fact]
     public void Translator_enforces_configured_and_activity_tenant_boundaries_without_identifier_disclosure()
     {
         var translator = new TeamsSdkActivityTranslator(
@@ -2097,7 +2163,11 @@ public sealed class TeamsChannelFoundationTests
             ?? throw new InvalidOperationException($"The SDK did not create {typeof(TActivity).Name} for '{type}'.");
     }
 
-    private static InvokeActivity CreateSdkApprovalAction(string action)
+    private static InvokeActivity CreateSdkApprovalAction(
+        string action,
+        string senderId = "sender",
+        string? aadObjectId = null,
+        string? displayName = null)
     {
         var coreActivity = CoreActivity.FromJsonString(JsonSerializer.Serialize(new
         {
@@ -2105,7 +2175,7 @@ public sealed class TeamsChannelFoundationTests
             name = "adaptiveCard/action",
             id = "approval-action",
             replyToId = "approval-prompt",
-            from = new { id = "sender" },
+            from = new { id = senderId, aadObjectId, name = displayName },
             serviceUrl = "https://service.invalid/",
             conversation = new
             {

@@ -4,8 +4,10 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Text;
 using Netclaw.Actors.Channels;
+using Netclaw.Channels;
 using Netclaw.Configuration;
 
 namespace Netclaw.Channels.Teams;
@@ -232,11 +234,13 @@ public sealed record TeamsApprovalAction(
     string? TeamId,
     string? ChannelId,
     string? PromptActivityId,
-    string ServiceUrl)
+    string ServiceUrl,
+    string? OperatorDisplayName = null)
 {
     public const int MaxCorrelationLength = 128;
     public const int MaxNonceLength = 128;
     public const int MaxActionLength = 64;
+    public const int MaxOperatorDisplayNameLength = 128;
 
     public bool IsChannel => Trust.Scope == TeamsConversationScope.Channel;
 
@@ -256,6 +260,25 @@ public sealed record TeamsApprovalAction(
         !string.IsNullOrWhiteSpace(value)
         && value.Length <= maximumLength
         && value.All(static character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
+
+    /// <summary>
+    /// Normalizes an optional Teams-supplied presenter label for terminal-card
+    /// display. It is never an authorization or persistence value.
+    /// </summary>
+    public static string? NormalizeOperatorDisplayName(string? displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName)
+            || displayName.Any(static character => char.IsControl(character)
+                                                || char.GetUnicodeCategory(character) == UnicodeCategory.Format))
+        {
+            return null;
+        }
+
+        var normalized = displayName.Trim();
+        return string.IsNullOrWhiteSpace(normalized) || Guid.TryParse(normalized, out _)
+            ? null
+            : ApprovalDisplayTextFormatter.Truncate(normalized, MaxOperatorDisplayNameLength);
+    }
 }
 
 /// <summary>
