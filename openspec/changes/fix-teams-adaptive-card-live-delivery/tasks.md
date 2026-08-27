@@ -13,4 +13,4 @@
 
 - [x] 3.1 Run focused Teams tests and the broader channel containment suites.
 - [x] 3.2 Run build, solution tests, Slopwatch, header, diff, and strict OpenSpec checks.
-- [ ] 3.3 Create a corrective PR to `dev` and record the owner live-smoke gate.
+- [x] 3.3 Create a corrective PR to `dev` and record the owner live-smoke gate.
