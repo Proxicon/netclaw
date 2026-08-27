@@ -229,9 +229,19 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
     private async Task HandleApprovalActionAsync(TeamsConversationApprovalAction action)
     {
         var replyTo = Sender;
-        if (action.CancellationToken.IsCancellationRequested
-            || !IsExpectedApprovalConversation(action.Action)
-            || action.Action.RootActivityId is not { } rootActivityId
+        if (action.CancellationToken.IsCancellationRequested)
+        {
+            replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Cancelled));
+            return;
+        }
+
+        if (!IsExpectedApprovalConversation(action.Action))
+        {
+            RejectApprovalAction(replyTo, "approval_action_session_mismatch");
+            return;
+        }
+
+        if (action.Action.RootActivityId is not { } rootActivityId
             || !TeamsSessionIdentifierCodec.TryCreateChannel(
                 action.Action.Trust.TenantId,
                 action.Action.Trust.ConversationId,
@@ -239,9 +249,14 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
                 out var sessionId,
                 out _))
         {
-            replyTo.Tell(new TeamsApprovalActionResult(action.CancellationToken.IsCancellationRequested
-                ? TeamsApprovalActionDisposition.Cancelled
-                : TeamsApprovalActionDisposition.Rejected));
+            RejectApprovalAction(replyTo, "approval_action_session_identity_invalid");
+            return;
+        }
+
+        if (!_activityMappings.TryGetValue(ActivityFingerprint.Create(rootActivityId), out var mapped)
+            || !string.Equals(mapped.SessionId, sessionId.Value, StringComparison.Ordinal))
+        {
+            RejectApprovalAction(replyTo, "approval_action_destination_invalid");
             return;
         }
 
@@ -272,6 +287,13 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
         {
             replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Failed));
         }
+    }
+
+    private void RejectApprovalAction(IActorRef replyTo, string reasonCode)
+    {
+        ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(reasonCode);
+        _log.Warning("Teams approval action rejected: reason={0}", reasonCode);
+        replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
     }
 
     private void HandleReminder(TeamsConversationReminder reminder)

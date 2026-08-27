@@ -228,8 +228,16 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
             return await RoutePersonalApprovalAsync(action, conversationId, cancellationToken);
         }
 
-        if (action.Trust.Scope != TeamsConversationScope.Channel
-            || TeamsChannelAclPolicy.Evaluate(activity, _options).Disposition != TeamsChannelPolicyDisposition.Allowed)
+        if (action.Trust.Scope != TeamsConversationScope.Channel)
+        {
+            return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+        }
+
+        // Teams omits channelData from a valid adaptiveCard/action invoke.
+        // The binding validates a missing destination field against the
+        // durable destination that the original approved message captured.
+        if ((action.TeamId is not null || action.ChannelId is not null)
+            && TeamsChannelAclPolicy.EvaluateAccess(activity, _options).Disposition != TeamsChannelPolicyDisposition.Allowed)
         {
             return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
         }
@@ -670,11 +678,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             operationTimeout: ApprovalOperationTimeout,
             pendingRequests: _pendingApprovalRequests,
             hasObservedApprovalRequest: () => _pendingApprovalRequests.Count > 0,
-            postWrongRequesterWarningAsync: () =>
-            {
-                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_wrong_user");
-                return Task.CompletedTask;
-            },
+            postWrongRequesterWarningAsync: () => Task.CompletedTask,
             // Teams journals its opaque transport decision independently. The
             // shared flow still removes its recovered request only after the
             // session acknowledges the exact selected option.
@@ -2230,20 +2234,50 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
 
         var action = received.Action;
-        if (!TryGetExpectedSessionId(action, out var expectedSessionId)
-            || expectedSessionId != _sessionId
-            || !TryCreateDestination(action, out var destination)
-            || !TeamsApprovalAction.IsSupportedAction(action.Action)
-            || !_pendingApprovals.TryGetValue(action.CorrelationId, out var pending)
-            // Proactive Teams sends can succeed without returning an activity ID.
-            // The one-time nonce remains the required card binding in that case; when
-            // an ID was retained, continue requiring the action to target that card.
-            || (pending.PromptId is not null
-                && !string.Equals(pending.PromptId, action.PromptActivityId, StringComparison.Ordinal))
-            || !TeamsApprovalCardRenderer.NonceMatches(pending.NonceHash, action.Nonce))
+        var replyTo = Sender;
+        if (!TryGetExpectedSessionId(action, out var expectedSessionId))
         {
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_rejected");
-            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+            RejectApprovalAction(replyTo, "approval_action_session_identity_invalid");
+            return Task.CompletedTask;
+        }
+
+        if (expectedSessionId != _sessionId)
+        {
+            RejectApprovalAction(replyTo, "approval_action_session_mismatch");
+            return Task.CompletedTask;
+        }
+
+        if (!TryResolveApprovalDestination(action, out var destination))
+        {
+            RejectApprovalAction(replyTo, "approval_action_destination_invalid");
+            return Task.CompletedTask;
+        }
+
+        if (!TeamsApprovalAction.IsSupportedAction(action.Action))
+        {
+            RejectApprovalAction(replyTo, "approval_action_key_invalid");
+            return Task.CompletedTask;
+        }
+
+        if (!_pendingApprovals.TryGetValue(action.CorrelationId, out var pending))
+        {
+            RejectApprovalAction(replyTo, "approval_action_correlation_not_found");
+            return Task.CompletedTask;
+        }
+
+        // Proactive Teams sends can succeed without returning an activity ID.
+        // The one-time nonce remains the required card binding in that case; when
+        // an ID was retained, continue requiring the action to target that card.
+        if (pending.PromptId is not null
+            && !string.Equals(pending.PromptId, action.PromptActivityId, StringComparison.Ordinal))
+        {
+            RejectApprovalAction(replyTo, "approval_action_prompt_locator_mismatch");
+            return Task.CompletedTask;
+        }
+
+        if (!TeamsApprovalCardRenderer.NonceMatches(pending.NonceHash, action.Nonce))
+        {
+            RejectApprovalAction(replyTo, "approval_action_nonce_mismatch");
             return Task.CompletedTask;
         }
 
@@ -2253,8 +2287,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 pending.RequesterSenderId,
                 action.Trust.SenderId))
         {
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_wrong_user");
-            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+            RejectApprovalAction(replyTo, "approval_action_wrong_requester");
             return Task.CompletedTask;
         }
 
@@ -2278,8 +2311,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
         if (!pending.OfferedOptionKeys.Contains(action.Action, StringComparer.Ordinal))
         {
-            ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_option_unavailable");
-            Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+            RejectApprovalAction(replyTo, "approval_action_option_not_offered");
             return Task.CompletedTask;
         }
 
@@ -2316,8 +2348,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         {
             if (!string.Equals(pending.ForwardingDecision, action.Action, StringComparison.Ordinal))
             {
-                ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("approval_action_retry_mismatch");
-                Sender.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+                RejectApprovalAction(replyTo, "approval_action_retry_mismatch");
                 return Task.CompletedTask;
             }
 
@@ -2330,7 +2361,6 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             return Task.CompletedTask;
         }
 
-        var replyTo = Sender;
         Persist(new TeamsApprovalForwardingStarted
         {
             CorrelationId = pending.CorrelationId,
@@ -2348,6 +2378,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 replyTo));
         });
         return Task.CompletedTask;
+    }
+
+    private void RejectApprovalAction(IActorRef replyTo, string reasonCode)
+    {
+        ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered(reasonCode);
+        _log.Warning("Teams approval action rejected: reason={0}", reasonCode);
+        replyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
     }
 
     private async Task ForwardApprovalDecisionAsync(ForwardTeamsApprovalDecision decision)
@@ -2384,7 +2421,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 return;
 
             case ApprovalResponseDisposition.WrongRequester:
-                decision.ReplyTo.Tell(new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected));
+                RejectApprovalAction(decision.ReplyTo, "approval_action_wrong_requester");
                 return;
 
             case ApprovalResponseDisposition.NoLongerPending:
@@ -2585,6 +2622,57 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             destination = null!;
             return false;
         }
+    }
+
+    private bool TryResolveApprovalDestination(TeamsApprovalAction action, out TeamsOutboundDestination destination)
+    {
+        if (action.Trust.Scope == TeamsConversationScope.Personal)
+            return TryCreateDestination(action, out destination);
+
+        destination = null!;
+        if (action.Trust.Scope != TeamsConversationScope.Channel
+            || _destination is not { } persistedDestination
+            || persistedDestination.Scope != TeamsConversationScope.Channel
+            || !TeamsOutboundDestination.IsValidServiceUrl(action.ServiceUrl)
+            || !string.Equals(persistedDestination.TenantId, action.Trust.TenantId, StringComparison.Ordinal)
+            || !string.Equals(persistedDestination.ConversationId, action.Trust.ConversationId, StringComparison.Ordinal)
+            || !string.Equals(persistedDestination.RootActivityId, action.RootActivityId, StringComparison.Ordinal)
+            || ((action.TeamId is null) != (action.ChannelId is null)))
+        {
+            return false;
+        }
+
+        if (action.TeamId is not null
+            && (!TryCreateDestination(action, out var callbackDestination)
+                || !string.Equals(callbackDestination.TeamId, persistedDestination.TeamId, StringComparison.Ordinal)
+                || !string.Equals(callbackDestination.ChannelId, persistedDestination.ChannelId, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        try
+        {
+            var trustedDestinationActivity = new TeamsInboundActivity(
+                action.Trust,
+                string.Empty,
+                new TeamsReplyMetadata(action.PromptActivityId, action.RootActivityId, persistedDestination.ServiceUrl),
+                isMentioned: true,
+                kind: TeamsIngressActivityKind.AdaptiveCardAction,
+                teamId: persistedDestination.TeamId,
+                channelId: persistedDestination.ChannelId);
+            if (TeamsChannelAclPolicy.EvaluateAccess(trustedDestinationActivity, _dependencies.Options).Disposition
+                != TeamsChannelPolicyDisposition.Allowed)
+            {
+                return false;
+            }
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        destination = persistedDestination;
+        return true;
     }
 
     private void ApplyApprovalPendingCreated(TeamsApprovalPendingCreated created)
