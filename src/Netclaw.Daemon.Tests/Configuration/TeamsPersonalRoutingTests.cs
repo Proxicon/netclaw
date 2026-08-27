@@ -269,6 +269,80 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Single(replyClient.Messages);
     }
 
+    [Theory]
+    [InlineData(ApprovalOptionKeys.ApproveOnce, "Approval Granted", false)]
+    [InlineData(ApprovalOptionKeys.Deny, "Approval Denied", false)]
+    [InlineData(ApprovalOptionKeys.ApproveOnce, "Approval Granted", true)]
+    [InlineData(ApprovalOptionKeys.Deny, "Approval Denied", true)]
+    public async Task Http_channel_approval_action_without_channel_data_replaces_the_source_card_in_place(
+        string selectedAction,
+        string expectedTerminalTitle,
+        bool isThreadReply)
+    {
+        var requestLifetime = new RequestLifetimeProbe();
+        var replyClient = new RequestIndependentReplyClient(requestLifetime);
+        var sessionManager = CreateTestProbe();
+        await using var app = await BuildRequestIndependenceHostAsync(
+            requestLifetime,
+            replyClient,
+            sessionManager.Ref,
+            includeChannel: true);
+        const string conversationId = "request-channel-approval;messageid=request-channel-approval-root";
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel(
+            "tenant-a",
+            conversationId,
+            "request-channel-approval-root",
+            out var sessionId,
+            out _));
+
+        using (var request = CreateTeamsActivityRequest(CreateSdkChannelRootMessage(
+                   conversationId,
+                   "request-channel-approval-root")))
+        using (var response = await app.GetTestClient().SendAsync(request, TestContext.Current.CancellationToken))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        await sessionManager.ExpectMsgAsync<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var subscription = await sessionManager.ExpectMsgAsync<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        await sessionManager.ExpectMsgAsync<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        if (isThreadReply)
+        {
+            using var threadRequest = CreateTeamsActivityRequest(CreateSdkChannelReplyMessage(conversationId));
+            using var threadResponse = await app.GetTestClient().SendAsync(threadRequest, TestContext.Current.CancellationToken);
+            Assert.Equal(HttpStatusCode.OK, threadResponse.StatusCode);
+            await sessionManager.ExpectMsgAsync<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+            await sessionManager.ExpectMsgAsync<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        }
+
+        subscription.Subscriber.Tell(CreateApprovalRequest(sessionId, "request-channel-approval-call", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(
+            () => Assert.Single(replyClient.Messages),
+            cancellationToken: TestContext.Current.CancellationToken);
+        var approvalCard = Assert.IsType<TeamsApprovalCard>(Assert.Single(replyClient.Messages).ApprovalCard);
+        var selectedApprovalAction = Assert.Single(approvalCard.Actions, action => action.Action == selectedAction);
+
+        using var approvalRequest = CreateTeamsActivityRequest(CreateSdkChannelApprovalAction(
+            conversationId,
+            "request-independent-activity",
+            selectedApprovalAction.CorrelationId,
+            selectedApprovalAction.Nonce,
+            selectedApprovalAction.Action));
+        var approvalResponseTask = app.GetTestClient().SendAsync(approvalRequest, TestContext.Current.CancellationToken);
+
+        var feedback = await sessionManager.ExpectMsgAsync<ToolInteractionResponse>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(sessionId, feedback.SessionId);
+        Assert.Equal(selectedAction, feedback.SelectedKey.Value);
+        sessionManager.LastSender.Tell(new CommandAck(sessionId));
+
+        using var approvalResponse = await approvalResponseTask;
+        Assert.Equal(HttpStatusCode.OK, approvalResponse.StatusCode);
+        using var document = JsonDocument.Parse(await approvalResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        var terminalCard = document.RootElement.GetProperty("value");
+        Assert.Equal(expectedTerminalTitle, terminalCard.GetProperty("body")[0].GetProperty("columns")[1].GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Empty(terminalCard.GetProperty("actions").EnumerateArray());
+    }
+
     [Fact]
     public async Task Http_channel_root_capture_survives_request_scope_disposal_without_a_top_level_fallback()
     {
@@ -3349,6 +3423,79 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         ((CoreActivity)activity).ReplyToId = promptActivityId;
         return activity;
     }
+
+    private static InvokeActivity CreateSdkChannelApprovalAction(
+        string conversationId,
+        string promptActivityId,
+        string correlationId,
+        string nonce,
+        string action)
+    {
+        var activity = InvokeActivity.FromActivity(CoreActivity.FromJsonString(JsonSerializer.Serialize(new
+        {
+            type = "invoke",
+            name = "adaptiveCard/action",
+            id = "request-channel-approval-action",
+            replyToId = promptActivityId,
+            from = new { id = "user-a" },
+            conversation = new
+            {
+                id = conversationId,
+                tenantId = "tenant-a",
+                conversationType = TeamsConversationType.Channel.Value
+            },
+            serviceUrl = "https://request-service.invalid/",
+            value = new
+            {
+                action = new
+                {
+                    type = "Action.Execute",
+                    data = new Dictionary<string, object>
+                    {
+                        ["correlation"] = correlationId,
+                        ["nonce"] = nonce,
+                        ["action"] = action
+                    }
+                }
+            }
+        })));
+
+        // The live Action.Execute fixture omits channelData. Keep the raw
+        // reply locator so the host middleware follows the SDK boundary.
+        ((CoreActivity)activity).ReplyToId = promptActivityId;
+        return activity;
+    }
+
+    private static MessageActivity CreateSdkChannelReplyMessage(string conversationId) =>
+        MessageActivity.FromActivity(CoreActivity.FromJsonString(JsonSerializer.Serialize(new
+        {
+            type = "message",
+            text = "<at>bot</at> thread approval input",
+            id = "request-channel-approval-reply",
+            from = new { id = "user-a" },
+            recipient = new { id = "28:bot" },
+            conversation = new
+            {
+                id = conversationId,
+                tenantId = "tenant-a",
+                conversationType = TeamsConversationType.Channel.Value
+            },
+            channelData = new
+            {
+                team = new { id = "team-a" },
+                channel = new { id = "channel-a" }
+            },
+            entities = new[]
+            {
+                new
+                {
+                    type = "mention",
+                    mentioned = new { id = "28:bot" },
+                    text = "<at>bot</at>"
+                }
+            },
+            serviceUrl = "https://request-service.invalid/"
+        })));
 
     private static MessageActivity CreateSdkChannelRootMessage(string conversationId, string rootActivityId) =>
         MessageActivity.FromActivity(CoreActivity.FromJsonString(JsonSerializer.Serialize(new
