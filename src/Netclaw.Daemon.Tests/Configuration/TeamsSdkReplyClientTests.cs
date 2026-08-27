@@ -5,6 +5,8 @@
 // -----------------------------------------------------------------------
 using System.Net;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Netclaw.Actors.Protocol;
 using Netclaw.Channels.Teams;
 using Netclaw.Daemon.Configuration;
@@ -19,7 +21,7 @@ public sealed class TeamsSdkReplyClientTests
     public async Task Reply_client_maps_create_and_update_success_without_exposing_sdk_data()
     {
         var operations = new FakeOperations("created", "updated");
-        var client = new TeamsSdkReplyClient(operations);
+        var client = CreateClient(operations);
 
         var created = await client.DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
         var updated = await client.DeliverAsync(CreateMessage(updateActivityId: "processing"), TestContext.Current.CancellationToken);
@@ -35,7 +37,7 @@ public sealed class TeamsSdkReplyClientTests
     public async Task Reply_client_sends_native_typing_without_requiring_a_message_activity_id()
     {
         var operations = new FakeOperations();
-        var client = new TeamsSdkReplyClient(operations);
+        var client = CreateClient(operations);
         var destination = CreateMessage().Destination;
 
         var result = await client.SendTypingAsync(destination, TestContext.Current.CancellationToken);
@@ -49,7 +51,7 @@ public sealed class TeamsSdkReplyClientTests
     public async Task Reply_client_maps_typing_transport_failures_to_safe_results()
     {
         var operations = new FakeOperations { TypingOutcome = "unavailable" };
-        var client = new TeamsSdkReplyClient(operations);
+        var client = CreateClient(operations);
 
         var result = await client.SendTypingAsync(CreateMessage().Destination, TestContext.Current.CancellationToken);
 
@@ -62,7 +64,7 @@ public sealed class TeamsSdkReplyClientTests
     [InlineData("unauthorized")]
     public async Task Reply_client_maps_transport_failures_to_safe_unavailable_results(string failure)
     {
-        var client = new TeamsSdkReplyClient(new FakeOperations(failure));
+        var client = CreateClient(new FakeOperations(failure));
 
         var result = await client.DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
 
@@ -74,7 +76,7 @@ public sealed class TeamsSdkReplyClientTests
     [Fact]
     public async Task Reply_client_maps_message_size_failures_without_the_response_body()
     {
-        var client = new TeamsSdkReplyClient(new FakeOperations("too-large"));
+        var client = CreateClient(new FakeOperations("too-large"));
 
         var result = await client.DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
 
@@ -85,7 +87,7 @@ public sealed class TeamsSdkReplyClientTests
     [Fact]
     public async Task Reply_client_maps_a_missing_destination_to_a_permanent_safe_result()
     {
-        var result = await new TeamsSdkReplyClient(new FakeOperations("missing-destination"))
+        var result = await CreateClient(new FakeOperations("missing-destination"))
             .DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
 
         Assert.Equal(TeamsDeliveryStatus.InvalidDestination, result.Status);
@@ -95,9 +97,9 @@ public sealed class TeamsSdkReplyClientTests
     [Fact]
     public async Task Reply_client_maps_cancellation_and_sanitizes_unknown_exceptions()
     {
-        var cancelled = await new TeamsSdkReplyClient(new FakeOperations("cancelled"))
+        var cancelled = await CreateClient(new FakeOperations("cancelled"))
             .DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
-        var failure = await new TeamsSdkReplyClient(new FakeOperations("secret"))
+        var failure = await CreateClient(new FakeOperations("secret"))
             .DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
 
         Assert.Equal(TeamsDeliveryStatus.Cancelled, cancelled.Status);
@@ -163,6 +165,94 @@ public sealed class TeamsSdkReplyClientTests
         Assert.Equal("Tool", rows[0].GetProperty("cells")[0].GetProperty("items")[0].GetProperty("text").GetString());
         Assert.Equal("shell_execute", rows[0].GetProperty("cells")[1].GetProperty("items")[0].GetProperty("text").GetString());
         Assert.Equal("Command", rows[1].GetProperty("cells")[0].GetProperty("items")[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void Pending_mcp_approval_card_uses_the_actual_teams_sdk_activity_serializer()
+    {
+        var request = new ToolInteractionRequest
+        {
+            SessionId = new SessionId("teams~tenant~personal~conversation/conversation"),
+            Kind = "approval",
+            CallId = new ToolCallId("call-helpdesk-capabilities"),
+            ToolName = new ToolName("helpdesk-dev/helpdesk_capabilities"),
+            DisplayText = "Inspect the available helpdesk development capabilities.",
+            Options =
+            [
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveOnceKey, ApprovalOptionKeys.ApproveOnceLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.ApproveSessionKey, ApprovalOptionKeys.ApproveSessionLabel),
+                new ToolInteractionOption(ApprovalOptionKeys.DenyKey, ApprovalOptionKeys.DenyLabel)
+            ]
+        };
+        var card = TeamsApprovalCardRenderer.CreatePending(request, "correlation_123", "nonce_123");
+
+        var activity = TeamsSdkActivityFactory.CreateMessage(CreateMessage(approvalCard: card));
+        using var document = JsonDocument.Parse(activity.ToJson());
+
+        Assert.Equal("message", document.RootElement.GetProperty("type").GetString());
+        Assert.False(document.RootElement.TryGetProperty("text", out _));
+        var attachment = Assert.Single(document.RootElement.GetProperty("attachments").EnumerateArray());
+        Assert.Equal("application/vnd.microsoft.card.adaptive", attachment.GetProperty("contentType").GetString());
+        var payload = attachment.GetProperty("content");
+        Assert.Equal("1.5", payload.GetProperty("version").GetString());
+        Assert.Equal("Action.Execute", payload.GetProperty("actions")[0].GetProperty("type").GetString());
+        Assert.Equal("netclaw-approval", payload.GetProperty("actions")[0].GetProperty("verb").GetString());
+        Assert.Equal(
+            request.Options.Select(option => option.Key.Value),
+            payload.GetProperty("actions").EnumerateArray()
+                .Select(action => action.GetProperty("data").GetProperty("action").GetString()));
+
+        var body = payload.GetProperty("body");
+        var icon = body[0].GetProperty("columns")[0].GetProperty("items")[0];
+        Assert.Equal("ShieldLock", icon.GetProperty("name").GetString());
+        Assert.Equal("Accent", icon.GetProperty("color").GetString());
+        Assert.Equal("Large", icon.GetProperty("size").GetString());
+        Assert.Equal("Regular", icon.GetProperty("style").GetString());
+        Assert.Equal("Accent", body[1].GetProperty("style").GetString());
+        Assert.Equal("Accent", body[1].GetProperty("items")[0].GetProperty("color").GetString());
+        Assert.Equal("Default", body[2].GetProperty("gridStyle").GetString());
+        Assert.False(body[2].GetProperty("firstRowAsHeader").GetBoolean());
+        Assert.DoesNotContain("correlation_123", payload.GetProperty("speak").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("nonce_123", payload.GetProperty("speak").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Plain_text_and_typing_activities_keep_their_native_teams_serialization_shape()
+    {
+        var textActivity = TeamsSdkActivityFactory.CreateMessage(CreateMessage());
+        var typingActivity = TeamsSdkActivityFactory.CreateTyping(CreateMessage().Destination);
+
+        using var textDocument = JsonDocument.Parse(textActivity.ToJson());
+        using var typingDocument = JsonDocument.Parse(typingActivity.ToJson());
+
+        Assert.Equal("reply", textDocument.RootElement.GetProperty("text").GetString());
+        Assert.False(textDocument.RootElement.TryGetProperty("attachments", out _));
+        Assert.Equal("typing", typingDocument.RootElement.GetProperty("type").GetString());
+        Assert.False(typingDocument.RootElement.TryGetProperty("replyToId", out _));
+    }
+
+    [Theory]
+    [InlineData("approval_payload_build_failed")]
+    [InlineData("approval_activity_build_failed")]
+    [InlineData("approval_activity_serialize_failed")]
+    [InlineData("sdk_create_failed")]
+    [InlineData("sdk_reply_failed")]
+    [InlineData("sdk_update_failed")]
+    public async Task Reply_client_maps_staged_delivery_failures_to_safe_diagnostics(string failureCode)
+    {
+        var logger = new RecordingLogger<TeamsSdkReplyClient>();
+        var client = new TeamsSdkReplyClient(new FakeOperations(failureCode), logger);
+
+        var result = await client.DeliverAsync(CreateMessage(), TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsDeliveryStatus.Failed, result.Status);
+        Assert.Equal(failureCode, result.ReasonCode);
+        var diagnostic = Assert.Single(logger.Entries);
+        Assert.Contains(failureCode, diagnostic, StringComparison.Ordinal);
+        Assert.Contains("InvalidOperationException", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", diagnostic, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tenant", diagnostic, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("service", diagnostic, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -266,7 +356,12 @@ public sealed class TeamsSdkReplyClientTests
         Assert.True(serialized.Length <= TeamsApprovalCard.MaxSerializedBytes);
     }
 
-    private static TeamsOutboundMessage CreateMessage(string? updateActivityId = null) => new(
+    private static TeamsSdkReplyClient CreateClient(ITeamsSdkReplyOperations operations) =>
+        new(operations, NullLogger<TeamsSdkReplyClient>.Instance);
+
+    private static TeamsOutboundMessage CreateMessage(
+        string? updateActivityId = null,
+        TeamsApprovalCard? approvalCard = null) => new(
         new TeamsOutboundDestination(
             "tenant",
             "conversation",
@@ -276,7 +371,8 @@ public sealed class TeamsSdkReplyClientTests
         "reply",
         "idempotency",
         "correlation",
-        updateActivityId: updateActivityId);
+        updateActivityId: updateActivityId,
+        approvalCard: approvalCard);
 
     private sealed class FakeOperations(params string[] outcomes) : ITeamsSdkReplyOperations
     {
@@ -300,6 +396,11 @@ public sealed class TeamsSdkReplyClientTests
                 "missing-destination" => Task.FromException<string?>(new HttpRequestException("gone", null, HttpStatusCode.Gone)),
                 "cancelled" => Task.FromException<string?>(new OperationCanceledException()),
                 "secret" => Task.FromException<string?>(new InvalidOperationException("secret tenant service URL body")),
+                "approval_payload_build_failed" or "approval_activity_build_failed" or "approval_activity_serialize_failed"
+                    or "sdk_create_failed" or "sdk_reply_failed" or "sdk_update_failed"
+                    => Task.FromException<string?>(new TeamsSdkDeliveryException(
+                        outcome,
+                        new InvalidOperationException("secret tenant service URL body"))),
                 _ => Task.FromResult<string?>(outcome)
             };
         }
@@ -315,6 +416,25 @@ public sealed class TeamsSdkReplyClientTests
                 "secret" => Task.FromException(new InvalidOperationException("secret tenant service URL body")),
                 _ => Task.CompletedTask
             };
+        }
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<string> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add(formatter(state, exception));
         }
     }
 }

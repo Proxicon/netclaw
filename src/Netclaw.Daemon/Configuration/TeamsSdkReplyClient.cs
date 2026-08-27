@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Net;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Core.Schema;
 using Netclaw.Channels.Teams;
@@ -15,7 +16,9 @@ namespace Netclaw.Daemon.Configuration;
 /// Executes the Teams SDK calls at the daemon transport edge. The SDK context
 /// contains the authenticated application client and never enters an actor.
 /// </summary>
-internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) : ITeamsReplyClient
+internal sealed class TeamsSdkReplyClient(
+    ITeamsSdkReplyOperations operations,
+    ILogger<TeamsSdkReplyClient> logger) : ITeamsReplyClient
 {
     public async Task<TeamsDeliveryResult> DeliverAsync(
         TeamsOutboundMessage message,
@@ -47,7 +50,7 @@ internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) :
         }, cancellationToken);
     }
 
-    private static async Task<TeamsDeliveryResult> ExecuteAsync(
+    private async Task<TeamsDeliveryResult> ExecuteAsync(
         Func<CancellationToken, Task<TeamsDeliveryResult>> operation,
         CancellationToken cancellationToken)
     {
@@ -58,36 +61,52 @@ internal sealed class TeamsSdkReplyClient(ITeamsSdkReplyOperations operations) :
         {
             return await operation(cancellationToken);
         }
+        catch (TeamsSdkDeliveryException exception)
+        {
+            logger.LogWarning(
+                "Teams SDK outbound delivery failed: stage={Stage}; exception_type={ExceptionType}",
+                exception.ReasonCode,
+                exception.InnerException?.GetType().Name ?? exception.GetType().Name);
+            return MapFailure(exception.InnerException ?? exception, exception.ReasonCode);
+        }
         catch (OperationCanceledException)
         {
             return new TeamsDeliveryResult(TeamsDeliveryStatus.Cancelled, ReasonCode: "cancelled");
         }
-        catch (HttpRequestException exception) when (exception.StatusCode == HttpStatusCode.RequestEntityTooLarge
-                                                    || exception.Message.Contains("MessageSizeTooBig", StringComparison.Ordinal))
+        catch (Exception exception)
         {
-            return new TeamsDeliveryResult(TeamsDeliveryStatus.RejectedTooLarge, ReasonCode: "output_too_large");
+            return MapFailure(exception, "sdk_delivery_failed");
         }
-        catch (HttpRequestException exception) when (exception.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+    }
+
+    private static TeamsDeliveryResult MapFailure(Exception exception, string failureCode)
+    {
+        if (exception is HttpRequestException httpRequestException)
         {
-            return new TeamsDeliveryResult(TeamsDeliveryStatus.InvalidDestination, ReasonCode: "sdk_destination_invalid");
+            if (httpRequestException.StatusCode == HttpStatusCode.RequestEntityTooLarge
+                || httpRequestException.Message.Contains("MessageSizeTooBig", StringComparison.Ordinal))
+            {
+                return new TeamsDeliveryResult(TeamsDeliveryStatus.RejectedTooLarge, ReasonCode: "output_too_large");
+            }
+
+            if (httpRequestException.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+                return new TeamsDeliveryResult(TeamsDeliveryStatus.InvalidDestination, ReasonCode: "sdk_destination_invalid");
+
+            return new TeamsDeliveryResult(
+                TeamsDeliveryStatus.Unavailable,
+                ReasonCode: failureCode == "sdk_delivery_failed" ? "sdk_unavailable" : failureCode);
         }
-        catch (HttpRequestException)
+
+        if (exception is UnauthorizedAccessException)
         {
-            return new TeamsDeliveryResult(TeamsDeliveryStatus.Unavailable, ReasonCode: "sdk_unavailable");
+            return new TeamsDeliveryResult(
+                TeamsDeliveryStatus.Unavailable,
+                ReasonCode: failureCode == "sdk_delivery_failed" ? "sdk_unauthorized" : failureCode);
         }
-        catch (UnauthorizedAccessException)
-        {
-            return new TeamsDeliveryResult(TeamsDeliveryStatus.Unavailable, ReasonCode: "sdk_unauthorized");
-        }
-        catch (Exception exception) when (exception.Message.Contains("MessageSizeTooBig", StringComparison.Ordinal))
-        {
-            return new TeamsDeliveryResult(TeamsDeliveryStatus.RejectedTooLarge, ReasonCode: "output_too_large");
-        }
-        catch (Exception)
-        {
-            // SDK messages can contain remote response data. Expose only a safe code.
-            return new TeamsDeliveryResult(TeamsDeliveryStatus.Failed, ReasonCode: "sdk_delivery_failed");
-        }
+
+        return exception.Message.Contains("MessageSizeTooBig", StringComparison.Ordinal)
+            ? new TeamsDeliveryResult(TeamsDeliveryStatus.RejectedTooLarge, ReasonCode: "output_too_large")
+            : new TeamsDeliveryResult(TeamsDeliveryStatus.Failed, ReasonCode: failureCode);
     }
 }
 
@@ -108,60 +127,140 @@ internal sealed class TeamsSdkReplyOperations(
     public async Task<string?> DeliverAsync(TeamsOutboundMessage message, CancellationToken cancellationToken)
     {
         var serviceUrl = new Uri(message.Destination.ServiceUrl, UriKind.Absolute);
-        var activity = new MessageActivityInput()
-            .WithText(message.ApprovalCard is null ? message.Text : string.Empty);
-        if (message.ApprovalCard is { } approvalCard)
-        {
-            var payload = TeamsAdaptiveCardPayloadBuilder.Create(approvalCard);
-            activity.AddAdaptiveCardAttachment(payload);
-        }
+        var activity = TeamsSdkActivityFactory.CreateMessage(message);
 
         // The application owns authenticated client credentials. It survives
         // the original HTTP request and sends to the validated destination
         // recovered by the binding actor.
         if (!string.IsNullOrWhiteSpace(message.UpdateActivityId))
         {
-            var updated = await app.Api
-                .ForServiceUrl(serviceUrl)
-                .Conversations
-                .UpdateActivityAsync(
-                    message.Destination.ConversationId,
-                    message.UpdateActivityId,
-                    activity,
-                    cancellationToken: cancellationToken);
+            var updated = await ExecuteSdkCallAsync(
+                () => app.Api
+                    .ForServiceUrl(serviceUrl)
+                    .Conversations
+                    .UpdateActivityAsync(
+                        message.Destination.ConversationId,
+                        message.UpdateActivityId,
+                        activity,
+                        cancellationToken: cancellationToken),
+                "sdk_update_failed");
             return updated.Id;
         }
 
-        var proactiveSent = string.IsNullOrWhiteSpace(message.ReplyToActivityId)
-            ? await app.SendAsync(
-                message.Destination.ConversationId,
-                activity,
-                serviceUrl,
-                cancellationToken: cancellationToken)
-            : await app.ReplyAsync(
+        if (string.IsNullOrWhiteSpace(message.ReplyToActivityId))
+        {
+            var proactiveSent = await ExecuteSdkCallAsync(
+                () => app.SendAsync(
+                    message.Destination.ConversationId,
+                    activity,
+                    serviceUrl,
+                    cancellationToken: cancellationToken),
+                "sdk_create_failed");
+            return proactiveSent?.Id;
+        }
+
+        var reply = await ExecuteSdkCallAsync(
+            () => app.ReplyAsync(
                 message.Destination.ConversationId,
                 message.ReplyToActivityId,
                 activity,
                 serviceUrl,
-                cancellationToken: cancellationToken);
-        return proactiveSent?.Id;
+                cancellationToken: cancellationToken),
+            "sdk_reply_failed");
+        return reply?.Id;
     }
 
     public async Task SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken)
     {
-        var activity = new CoreActivityInput("typing")
+        var activity = TeamsSdkActivityFactory.CreateTyping(destination);
+
+        await ExecuteSdkCallAsync(
+            () => app.SendActivityAsync(
+                destination.ConversationId,
+                activity,
+                new Uri(destination.ServiceUrl, UriKind.Absolute),
+                cancellationToken: cancellationToken),
+            "sdk_create_failed");
+    }
+
+    private static async Task<T> ExecuteSdkCallAsync<T>(Func<Task<T>> call, string failureCode)
+    {
+        try
+        {
+            return await call();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (TeamsSdkDeliveryException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new TeamsSdkDeliveryException(failureCode, exception);
+        }
+    }
+}
+
+internal static class TeamsSdkActivityFactory
+{
+    public static MessageActivityInput CreateMessage(TeamsOutboundMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        if (message.ApprovalCard is not { } approvalCard)
+            return new MessageActivityInput().WithText(message.Text);
+
+        JsonElement payload;
+        try
+        {
+            payload = JsonSerializer.SerializeToElement(TeamsAdaptiveCardPayloadBuilder.Create(approvalCard));
+        }
+        catch (Exception exception)
+        {
+            throw new TeamsSdkDeliveryException("approval_payload_build_failed", exception);
+        }
+
+        var activity = new MessageActivityInput();
+        try
+        {
+            activity.AddAdaptiveCardAttachment(payload);
+        }
+        catch (Exception exception)
+        {
+            throw new TeamsSdkDeliveryException("approval_activity_build_failed", exception);
+        }
+
+        try
+        {
+            _ = activity.ToJson();
+        }
+        catch (Exception exception)
+        {
+            throw new TeamsSdkDeliveryException("approval_activity_serialize_failed", exception);
+        }
+
+        return activity;
+    }
+
+    public static CoreActivityInput CreateTyping(TeamsOutboundDestination destination)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        return new CoreActivityInput("typing")
         {
             ReplyToId = destination.Scope == TeamsConversationScope.Channel
                 ? destination.RootActivityId
                 : null
         };
-
-        await app.SendActivityAsync(
-            destination.ConversationId,
-            activity,
-            new Uri(destination.ServiceUrl, UriKind.Absolute),
-            cancellationToken: cancellationToken);
     }
+}
+
+internal sealed class TeamsSdkDeliveryException(string reasonCode, Exception innerException)
+    : Exception(reasonCode, innerException)
+{
+    public string ReasonCode { get; } = reasonCode;
 }
 
 internal static class TeamsAdaptiveCardPayloadBuilder
