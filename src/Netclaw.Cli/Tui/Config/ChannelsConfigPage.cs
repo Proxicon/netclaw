@@ -864,7 +864,11 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         {
             StageSingleInput();
             ViewModel.ApplyAllowedGroups();
+            return;
         }
+
+        _singleInput?.HandleInput(keyInfo);
+        StageSingleInput();
     }
 
     private void HandleDirectMessagesKey(ConsoleKeyInfo keyInfo)
