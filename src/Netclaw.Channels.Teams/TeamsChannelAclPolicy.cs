@@ -27,7 +27,7 @@ public sealed record TeamsChannelPolicyDecision(
 public static class TeamsChannelAclPolicy
 {
     public static TeamsChannelPolicyDecision Evaluate(TeamsInboundActivity activity, TeamsChannelOptions options)
-        => EvaluateCore(activity, options, enforceMentionOnly: true);
+        => EvaluateCore(activity, options, enforceMentionOnly: true, enforceAllowedUsers: true);
 
     /// <summary>
     /// Evaluates every identity, channel, and audience gate without applying
@@ -35,12 +35,21 @@ public static class TeamsChannelAclPolicy
     /// that rule after it has resolved an established root.
     /// </summary>
     public static TeamsChannelPolicyDecision EvaluateAccess(TeamsInboundActivity activity, TeamsChannelOptions options)
-        => EvaluateCore(activity, options, enforceMentionOnly: false);
+        => EvaluateCore(activity, options, enforceMentionOnly: false, enforceAllowedUsers: true);
+
+    /// <summary>
+    /// Applies all non-principal channel gates. The asynchronous principal
+    /// authorizer runs after this method so group checks never execute for an
+    /// activity that already fails tenant, team, channel, root, or audience.
+    /// </summary>
+    public static TeamsChannelPolicyDecision EvaluateStructuralAccess(TeamsInboundActivity activity, TeamsChannelOptions options)
+        => EvaluateCore(activity, options, enforceMentionOnly: false, enforceAllowedUsers: false);
 
     private static TeamsChannelPolicyDecision EvaluateCore(
         TeamsInboundActivity activity,
         TeamsChannelOptions options,
-        bool enforceMentionOnly)
+        bool enforceMentionOnly,
+        bool enforceAllowedUsers)
     {
         ArgumentNullException.ThrowIfNull(activity);
         ArgumentNullException.ThrowIfNull(options);
@@ -60,7 +69,9 @@ public static class TeamsChannelAclPolicy
             return Deny(AclDenyReasons.ChannelNotAllowed);
         if (string.IsNullOrWhiteSpace(activity.Trust.SenderId))
             return Deny(AclDenyReasons.MissingUserId);
-        if (options.AllowedUserIds.Length > 0 && !options.AllowedUserIds.Contains(activity.Trust.SenderId, StringComparer.Ordinal))
+        if (enforceAllowedUsers
+            && options.AllowedUserIds.Length > 0
+            && !options.AllowedUserIds.Contains(activity.Trust.SenderId, StringComparer.Ordinal))
             return Deny(AclDenyReasons.UserNotAllowed);
         if (!TeamsSessionIdentifierCodec.IsValidActivityIdentifier(activity.Trust.ActivityId)
             || activity.Reply?.RootActivityId is not { } rootActivityId
@@ -80,7 +91,8 @@ public static class TeamsChannelAclPolicy
                 activity.ChannelId,
                 out var audience))
             return Deny("invalid_channel_audience");
-        var isExplicitUser = options.AllowedUserIds.Contains(activity.Trust.SenderId, StringComparer.Ordinal);
+        var isExplicitUser = enforceAllowedUsers
+                             && options.AllowedUserIds.Contains(activity.Trust.SenderId, StringComparer.Ordinal);
         return new TeamsChannelPolicyDecision(
             TeamsChannelPolicyDisposition.Allowed,
             "channel_acl_allowed",

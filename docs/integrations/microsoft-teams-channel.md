@@ -152,6 +152,86 @@ genuine bot mention.
 Use `ChannelAudienceOverrides` for canonical IDs that contain configuration
 delimiters. An exact team and channel entry takes precedence over a team entry.
 
+## Directory discovery and group authorization
+
+The same Entra application that hosts the Teams bot can be used for directory
+lookup. Netclaw uses an application `ClientSecretCredential` with the
+`https://graph.microsoft.com/.default` scope; it never stores Graph access
+tokens and it does not create a second Graph secret.
+
+An Entra administrator must grant admin consent for exactly these Microsoft
+Graph **application** permissions:
+
+- `Team.ReadBasic.All` — Team display metadata used for discovery.
+- `Channel.ReadBasic.All` — channel names and descriptions.
+- `User.Read.All` — user display name, UPN, and mail metadata.
+- `GroupMember.Read.All` — security/Microsoft 365 group discovery and checked
+  group membership.
+
+Do not add `Directory.Read.All` for this feature. The Teams package RSC
+permission described above is separate from these Graph application
+permissions.
+
+`netclaw config` now lists **Microsoft Teams** after Mattermost. The secure
+first-connect flow captures Tenant ID, application/client ID, Bot ID, and a
+masked client secret. Existing secrets render as `configured`; blank secret
+input preserves them, while credential rotation is explicit. The configuration
+UI searches Teams, channels, users, and groups through a bounded shared
+directory boundary. The advanced/manual path accepts canonical Teams and Entra
+object IDs directly, so an existing valid configuration remains manageable
+when discovery is unavailable.
+
+Names, UPNs, and mail addresses are presentation metadata only. Authorization
+always persists and compares canonical object IDs. For example:
+
+```json
+{
+  "Teams": {
+    "AllowedGroupIds": ["<group_allow_teams_netclaw-object-id>"],
+    "ChannelAccessOverrides": [
+      {
+        "TeamId": "<team-id>",
+        "ChannelId": "<ai-testing-channel-id>",
+        "AllowedUserIds": ["<operator-object-id>"],
+        "AllowedGroupIds": ["<ai-testing-operators-group-id>"]
+      }
+    ]
+  }
+}
+```
+
+A verified member of `group_allow_teams_netclaw` may interact in an otherwise
+authorized Teams channel. The explicit user in the example gains access only
+to `AI-Testing` (plus any global permission); a group match never bypasses the
+tenant, Team, channel, root, audience, or mention checks.
+
+For an allowed channel, global and matching channel-specific user/group rules
+are unioned. If none are configured, legacy allowed-channel behavior remains
+unchanged. Once any rule exists, a sender must match one. DMs always remain
+fail-closed: `AllowDirectMessages` must be true and the sender must match a
+global user ID or verified global group membership. Channel-specific rules do
+not grant DM access.
+
+Group membership uses Graph `checkMemberGroups` against the authenticated
+sender object ID. Requests are deduplicated, split into batches of at most 20
+groups, and stop after a positive result. An explicit allowed user bypasses
+Graph completely. A timeout, 401/403, exhausted/throttled 429, unavailable
+service, or malformed response denies group-derived access with a safe reason;
+it never weakens authorization.
+
+Directory calls use a bounded in-memory cache. User profiles and membership
+evidence last 10 minutes. Team, channel, and group lookup values last 30
+minutes. User search values last 5 minutes. Cache keys hash canonical
+tenant/resource data and contain neither secrets nor raw typed search text.
+Approval card callbacks do not issue a new Graph request just to enrich a
+display label: they use the Teams callback name, an already-cached profile, or
+`Authorized operator`.
+
+`netclaw doctor` reports offline, non-secret Teams configuration diagnostics
+and lists the consent required for configured group authorization. It never
+prints or probes client secrets, access tokens, authorization headers, or full
+tenant responses.
+
 ## Phase 1.1 runtime modernization
 
 The Teams transport uses the stable Microsoft Teams SDK for .NET 2.1 native

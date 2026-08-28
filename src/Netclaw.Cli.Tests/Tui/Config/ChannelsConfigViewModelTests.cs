@@ -6,6 +6,7 @@
 using System.Text.Json;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Slack;
+using Netclaw.Channels.Teams;
 using Netclaw.Cli.Config;
 using Netclaw.Cli.Discord;
 using Netclaw.Cli.Mattermost;
@@ -28,14 +29,16 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     {
         { ChannelType.Slack, "Slack", ["Slack.BotToken", "Slack.AppToken"] },
         { ChannelType.Discord, "Discord", ["Discord.BotToken"] },
-        { ChannelType.Mattermost, "Mattermost", ["Mattermost.BotToken"] }
+        { ChannelType.Mattermost, "Mattermost", ["Mattermost.BotToken"] },
+        { ChannelType.Teams, "Teams", ["Teams.ClientSecret"] }
     };
 
     public static TheoryData<ChannelType> ChannelTypes { get; } = new()
     {
         ChannelType.Slack,
         ChannelType.Discord,
-        ChannelType.Mattermost
+        ChannelType.Mattermost,
+        ChannelType.Teams
     };
 
     public ChannelsConfigViewModelTests()
@@ -53,7 +56,351 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
 
         var labels = vm.Step.Adapters.Select(static item => item.DisplayName).ToArray();
 
-        Assert.Equal(["Slack", "Discord", "Mattermost"], labels);
+        Assert.Equal(["Slack", "Discord", "Mattermost", "Microsoft Teams"], labels);
+    }
+
+    [Fact]
+    public async Task Teams_draft_persists_canonical_principals_without_writing_client_secret_to_normal_config()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+              "AllowedUserIds": ["user-a"],
+              "AllowedGroupIds": ["group-a"],
+              "ChannelAccessOverrides": [
+                {
+                  "TeamId": "team-a",
+                  "ChannelId": "channel-a",
+                  "AllowedUserIds": ["channel-user"],
+                  "AllowedGroupIds": ["channel-group"]
+                }
+              ],
+              "MentionOnly": true
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """
+            { "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }
+            """);
+        using var vm = CreateViewModel();
+
+        var teams = vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        Assert.True(vm.Step.IsAdapterEnabled(ChannelType.Teams));
+        Assert.True(teams.HasPersistedClientSecret);
+        Assert.Equal("group-a", teams.AllowedGroupIdsInput);
+        var channelAccess = Assert.Single(teams.ChannelAccessOverrides);
+        Assert.Equal("team-a", channelAccess.TeamId);
+        Assert.Equal("channel-a", channelAccess.ChannelId);
+
+        teams.AllowedGroupIdsInput = "group-b";
+        teams.AllowedUserIdsInput = "user-b";
+        var saved = await vm.SaveAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(saved);
+        var normalConfig = File.ReadAllText(_paths.NetclawConfigPath);
+        Assert.DoesNotContain("teams-secret", normalConfig, StringComparison.Ordinal);
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupIds", out var groups));
+        Assert.Equal(["group-b"], ToStringArray(groups));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var users));
+        Assert.Equal(["user-b"], ToStringArray(users));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.ChannelAccessOverrides", out var overrides));
+        var roundTripped = Assert.IsType<object[]>(overrides);
+        var savedOverride = Assert.IsType<JsonElement>(Assert.Single(roundTripped));
+        Assert.Equal("team-a", savedOverride.GetProperty("TeamId").GetString());
+        Assert.Equal("channel-a", savedOverride.GetProperty("ChannelId").GetString());
+        var secrets = ConfigFileHelper.LoadJsonDict(_paths.SecretsPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(secrets, "Teams.ClientSecret", out var secret));
+        Assert.Equal("teams-secret", ConfigFileHelper.DecryptIfEncrypted(_paths, secret?.ToString()));
+    }
+
+    [Fact]
+    public void Known_Teams_config_reentry_opens_management_without_credential_subflow()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        vm.Step.CursorIndex = GetAdapterIndex(vm, ChannelType.Teams);
+
+        Assert.True(vm.TryOpenSelectedAdapterManagement());
+        Assert.Equal(ChannelsConfigScreen.AdapterMenu, vm.Screen.Value);
+        Assert.False(vm.Step.IsInSubFlow);
+        Assert.Equal(ChannelType.Teams, vm.ActiveAdapterType);
+    }
+
+    [Fact]
+    public async Task Manual_Teams_team_channel_user_and_group_paths_persist_canonical_ids()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginManualTeamsChannelEntry();
+        vm.AddChannelInput = "channel-a";
+        await vm.AddChannelFromInputAsync();
+
+        vm.BeginTeamsUserSearch();
+        vm.BeginManualTeamsUserEntry();
+        vm.AllowedUsersInput = "user-a";
+        vm.ApplyAllowedUsers();
+        await vm.PendingConfigWrite;
+
+        vm.BeginTeamsGroupSearch();
+        vm.BeginManualTeamsGroupEntry();
+        vm.AllowedGroupsInput = "group-a";
+        vm.ApplyAllowedGroups();
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedTeamIds", out var teams));
+        Assert.Equal(["team-a"], ToStringArray(teams));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedChannelIds", out var channels));
+        Assert.Equal(["channel-a"], ToStringArray(channels));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var users));
+        Assert.Equal(["user-a"], ToStringArray(users));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupIds", out var groups));
+        Assert.Equal(["group-a"], ToStringArray(groups));
+    }
+
+    [Fact]
+    public async Task Save_disabled_existing_Teams_preserves_dormant_fields_and_secret()
+    {
+        WriteAllChannelConfig();
+        WriteAllChannelSecrets();
+        using var vm = CreateViewModel();
+
+        vm.Step.ToggleAdapter(GetAdapterIndex(vm, ChannelType.Teams));
+        await vm.SaveAsync(TestContext.Current.CancellationToken);
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.Enabled", out var enabled));
+        Assert.False(Assert.IsType<bool>(enabled));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedTeamIds", out var teams));
+        Assert.Equal(["team-a"], ToStringArray(teams));
+
+        var secrets = ConfigFileHelper.LoadJsonDict(_paths.SecretsPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(secrets, "Teams.ClientSecret", out var secret));
+        Assert.Equal("teams-secret", ConfigFileHelper.DecryptIfEncrypted(_paths, secret?.ToString()));
+    }
+
+    [Fact]
+    public async Task Discovered_Teams_channel_persists_only_canonical_team_and_channel_ids()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        vm.AddDiscoveredTeamsChannel(
+            new TeamsDirectoryTeam("team-id", "Operations", "Operations Team"),
+            new TeamsDirectoryChannel("team-id", "channel-id", "Incident response", null));
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedTeamIds", out var teams));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedChannelIds", out var channels));
+        Assert.Equal(["team-id"], ToStringArray(teams));
+        Assert.Equal(["channel-id"], ToStringArray(channels));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.ChannelAudienceOverrides", out var audienceOverrides));
+        var savedAudience = Assert.IsType<JsonElement>(Assert.Single(Assert.IsType<object[]>(audienceOverrides)));
+        Assert.Equal("team-id", savedAudience.GetProperty("TeamId").GetString());
+        Assert.Equal("channel-id", savedAudience.GetProperty("ChannelId").GetString());
+        Assert.Equal("team", savedAudience.GetProperty("Audience").GetString());
+        Assert.DoesNotContain("Operations", File.ReadAllText(_paths.NetclawConfigPath), StringComparison.Ordinal);
+        Assert.DoesNotContain("Incident response", File.ReadAllText(_paths.NetclawConfigPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Saved_Teams_channel_without_a_directory_label_renders_a_safe_abbreviation()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a", "team-b"],
+                "AllowedChannelIds": ["abcdefghijklmnopqrst"]
+              }
+            }
+            """);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+
+        var row = Assert.Single(vm.GetChannelRows(includeAddAction: false));
+        Assert.Equal("Teams channel abcdefgh…mnopqrst", row.DisplayName);
+        Assert.Equal("abcdefghijklmnopqrst", row.Id);
+    }
+
+    [Fact]
+    public async Task Saved_Teams_channel_uses_cached_directory_labels_without_rewriting_its_ids()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        var directory = new DirectoryLabelFixture();
+        using var vm = CreateViewModel(teamsDirectoryFactory: _ => directory);
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        await vm.PendingLabelRefresh!;
+
+        var row = Assert.Single(vm.GetChannelRows(includeAddAction: false));
+        Assert.Equal("Operations / Incident response", row.DisplayName);
+        Assert.Equal("channel-a", row.Id);
+        Assert.Equal(1, directory.TeamLookups);
+        Assert.Equal(1, directory.ChannelLookups);
+        Assert.DoesNotContain("Operations", File.ReadAllText(_paths.NetclawConfigPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Discovered_Teams_principals_persist_canonical_ids_not_display_metadata()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        vm.AddDiscoveredTeamsUser(new TeamsDirectoryUser("user-id", "Maya King", "maya@example.test", null));
+        vm.AddDiscoveredTeamsGroup(new TeamsDirectoryGroup("group-id", "Operations", "ops@example.test", TeamsDirectoryGroupKind.Security));
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var users));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupIds", out var groups));
+        Assert.Equal(["user-id"], ToStringArray(users));
+        Assert.Equal(["group-id"], ToStringArray(groups));
+        var normalConfig = File.ReadAllText(_paths.NetclawConfigPath);
+        Assert.DoesNotContain("Maya King", normalConfig, StringComparison.Ordinal);
+        Assert.DoesNotContain("maya@example.test", normalConfig, StringComparison.Ordinal);
+        Assert.DoesNotContain("Operations", normalConfig, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Discovered_Teams_channel_principals_persist_to_the_exact_structured_override()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        vm.ActivateSelectedChannelRow();
+        Assert.Equal(ChannelsConfigScreen.TeamsChannelAccess, vm.Screen.Value);
+
+        vm.ActivateChannelAccessRow();
+        Assert.Equal(ChannelsConfigScreen.TeamsUserSearch, vm.Screen.Value);
+        vm.AddDiscoveredTeamsUser(new TeamsDirectoryUser("channel-user", "Maya King", "maya@example.test", null));
+        await vm.PendingConfigWrite;
+
+        vm.MoveChannelAccessRow(1);
+        vm.ActivateChannelAccessRow();
+        Assert.Equal(ChannelsConfigScreen.TeamsGroupSearch, vm.Screen.Value);
+        vm.AddDiscoveredTeamsGroup(new TeamsDirectoryGroup("channel-group", "Operations", "ops@example.test", TeamsDirectoryGroupKind.Security));
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.ChannelAccessOverrides", out var overrides));
+        var savedOverride = Assert.IsType<JsonElement>(Assert.Single(Assert.IsType<object[]>(overrides)));
+        Assert.Equal("team-a", savedOverride.GetProperty("TeamId").GetString());
+        Assert.Equal("channel-a", savedOverride.GetProperty("ChannelId").GetString());
+        Assert.Equal("channel-user", Assert.Single(savedOverride.GetProperty("AllowedUserIds").EnumerateArray()).GetString());
+        Assert.Equal("channel-group", Assert.Single(savedOverride.GetProperty("AllowedGroupIds").EnumerateArray()).GetString());
+        var normalConfig = File.ReadAllText(_paths.NetclawConfigPath);
+        Assert.DoesNotContain("Maya King", normalConfig, StringComparison.Ordinal);
+        Assert.DoesNotContain("maya@example.test", normalConfig, StringComparison.Ordinal);
+        Assert.DoesNotContain("Operations", normalConfig, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -965,7 +1312,8 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         foreach (var secretPath in secretPaths)
             Assert.False(ConfigFileHelper.TryGetPathValue(secrets, secretPath, out _));
         Assert.True(vm.IsSaved.Value);
-        Assert.Equal($"{type} reset saved.", vm.Status.Value.Text);
+        var displayName = type == ChannelType.Teams ? "Microsoft Teams" : type.ToString();
+        Assert.Equal($"{displayName} reset saved.", vm.Status.Value.Text);
     }
 
     [Theory]
@@ -1700,11 +2048,82 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     private ChannelsConfigViewModel CreateViewModel(
         FakeSlackProbe? slackProbe = null,
         FakeDiscordProbe? discordProbe = null,
-        FakeMattermostProbe? mattermostProbe = null)
+        FakeMattermostProbe? mattermostProbe = null,
+        Func<TeamsChannelOptions, ITeamsDirectory>? teamsDirectoryFactory = null)
         => new(_paths,
             slackProbe ?? new FakeSlackProbe(),
             discordProbe ?? new FakeDiscordProbe(),
-            mattermostProbe ?? new FakeMattermostProbe());
+            mattermostProbe ?? new FakeMattermostProbe(),
+            TimeProvider.System,
+            teamsDirectoryFactory: teamsDirectoryFactory);
+
+    private sealed class DirectoryLabelFixture : ITeamsDirectory
+    {
+        public int TeamLookups { get; private set; }
+
+        public int ChannelLookups { get; private set; }
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>> SearchTeamsAsync(
+            string query,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryTeam>> GetTeamAsync(
+            string teamId,
+            CancellationToken cancellationToken = default)
+        {
+            TeamLookups++;
+            return ValueTask.FromResult(
+                TeamsDirectoryOperationResult<TeamsDirectoryTeam>.Available(new TeamsDirectoryTeam(teamId, "Operations", null)));
+        }
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>> GetChannelsAsync(
+            string teamId,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryChannel>> GetChannelAsync(
+            string teamId,
+            string channelId,
+            CancellationToken cancellationToken = default)
+        {
+            ChannelLookups++;
+            return ValueTask.FromResult(
+                TeamsDirectoryOperationResult<TeamsDirectoryChannel>.Available(
+                    new TeamsDirectoryChannel(teamId, channelId, "Incident response", null)));
+        }
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryUser>>> SearchUsersAsync(
+            string query,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryUser>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryGroup>>> SearchGroupsAsync(
+            string query,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryGroup>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryGroup>> GetGroupAsync(
+            string groupId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryGroup>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryUser>> GetUserAsync(
+            string userId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryUser>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlySet<string>>> CheckUserGroupMembershipAsync(
+            string userId,
+            IReadOnlyCollection<string> groupIds,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(
+                TeamsDirectoryOperationResult<IReadOnlySet<string>>.Available(new HashSet<string>(StringComparer.Ordinal)));
+    }
 
     private void WriteFreshConfig()
         => File.WriteAllText(_paths.NetclawConfigPath, """{ "configVersion": 1 }""");
@@ -2072,6 +2491,16 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
                 "ServerUrl": "https://mattermost.example.com",
                 "AllowedChannelIds": ["town-square"],
                 "ChannelAudiences": { "town-square": "team" }
+              },
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+                "AllowedUserIds": ["user-a"],
+                "AllowedGroupIds": ["group-a"]
               }
             }
             """);
@@ -2092,6 +2521,9 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
               },
               "Mattermost": {
                 "BotToken": "mattermost-token"
+              },
+              "Teams": {
+                "ClientSecret": "teams-secret"
               }
             }
             """);

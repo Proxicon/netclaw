@@ -1,0 +1,148 @@
+# config-teams.tape - configure Microsoft Teams entirely through its offline
+# canonical-ID paths in `netclaw config`.
+#
+# Exercises:
+#   netclaw config -> Channels -> Microsoft Teams first-connect -> configured
+#   management -> manual Team/channel, user, and group paths -> safe return.
+# All identifiers are synthetic. The tape never submits a directory search, so
+# it does not acquire a Graph token or contact a Teams tenant.
+
+Output "/tmp/tape-config-teams.gif"
+
+# `config` deliberately refuses an uninitialised home. Seed only the schema
+# marker; the Teams first-connect flow below owns every Teams setting.
+Type "mkdir -p $NETCLAW_HOME/config"
+Enter
+Type "jq -n '{configVersion:1}' > $NETCLAW_HOME/config/netclaw.json"
+Enter
+
+Type "netclaw config"
+Enter
+# The self-contained native CLI can need a cold extraction on a fresh tape HOME.
+Wait+Screen@30s /Settings Areas/
+
+# Channels is row 3 in the dashboard list. Microsoft Teams is the fourth
+# adapter in the picker, immediately before the semantic Done row.
+Down 2
+Enter
+Wait+Screen@10s /Which channels would you like to connect/
+Wait+Screen@10s /Slack/
+Wait+Screen@10s /Discord/
+Wait+Screen@10s /Mattermost/
+Wait+Screen@10s /Microsoft Teams/
+Wait+Screen@10s /Done adding channels/
+
+Down 3
+Enter
+Wait+Screen@10s /Entra tenant ID/
+Type "11111111-1111-1111-1111-111111111111"
+Enter
+Wait+Screen@10s /Entra application \/ client ID/
+Type "22222222-2222-2222-2222-222222222222"
+Enter
+Wait+Screen@10s /Teams bot ID/
+Type "33333333-3333-3333-3333-333333333333"
+Enter
+Wait+Screen@10s /Teams client secret/
+Type "teams-smoke-client-secret"
+Enter
+Wait+Screen@10s /canonical Team IDs/
+Type "44444444-4444-4444-4444-444444444444"
+Enter
+Wait+Screen@10s /canonical channel IDs/
+
+# Leave the initial channel list blank. The manual channel path below proves
+# the same persisted canonical boundary without performing directory lookup.
+Enter
+Wait+Screen@10s /Allow Teams direct messages/
+Down
+Enter
+Wait+Screen@10s /global Entra user IDs/
+Type "66666666-6666-6666-6666-666666666666"
+Enter
+Wait+Screen@10s /global Entra group IDs/
+Type "88888888-8888-8888-8888-888888888888"
+Enter
+Wait+Screen@10s /Microsoft Teams > Channels & Permissions/
+Wait+Screen@10s /Microsoft Teams channel setup saved/
+Wait+Screen@10s /Done adding channels/
+
+# Return to the picker, then prove that re-entering Teams opens management
+# rather than credential prompts.
+Escape
+Wait+Screen@10s /Microsoft Teams is configured/
+Wait+Screen@10s /Manage channels and permissions/
+Wait+Screen@10s /Manage allowed users/
+Wait+Screen@10s /Manage allowed groups/
+Wait+Screen@10s /Directory \/ Graph status/
+Wait+Screen@10s /Rotate credentials/
+Escape
+Wait+Screen@10s /Which channels would you like to connect/
+Wait+Screen@10s /Microsoft Teams/
+# Returning to the picker resets its cursor to Slack. Teams is asserted above
+# and deliberately selected as the fourth adapter before re-entry.
+Down 3
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+
+# Add one channel via the explicit manual canonical-ID path. Do not submit a
+# directory query; M moves directly from Team search to the local ID entry.
+Down
+Enter
+Wait+Screen@10s /Microsoft Teams > Add channel/
+Wait+Screen@10s /Press M for the advanced canonical-ID path/
+Type "m"
+Wait+Screen@10s /Advanced: canonical Teams channel IDs/
+Type "55555555-5555-5555-5555-555555555555"
+Enter
+Wait+Screen@10s /Microsoft Teams > Channels & Permissions/
+Wait+Screen@10s /at the Team default and saved/
+
+# Return to management and add an allowed user via its manual path.
+Escape
+Wait+Screen@10s /Microsoft Teams is configured/
+Down
+Enter
+Wait+Screen@10s /Microsoft Teams > Allowed users/
+Wait+Screen@10s /Press M for the advanced canonical-ID path/
+Type "m"
+Wait+Screen@10s /Microsoft Teams > Allowed Users/
+Wait+Screen@10s /Advanced path: enter canonical Entra user IDs/
+Type ",77777777-7777-7777-7777-777777777777"
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+Wait+Screen@10s /Allowed users saved/
+
+# Repeat for allowed groups. This covers the real focused text-input route,
+# rather than a view-model-only persistence path.
+Down
+Enter
+Wait+Screen@10s /Microsoft Teams > Allowed groups/
+Wait+Screen@10s /Press M for the advanced canonical-ID path/
+Type "m"
+Wait+Screen@10s /Microsoft Teams > Allowed Groups/
+Wait+Screen@10s /Advanced path: enter canonical Entra group IDs/
+Type ",99999999-9999-9999-9999-999999999999"
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+Wait+Screen@10s /Allowed group settings saved/
+
+# Use the picker-level semantic Done key, not an adapter count, to return.
+Escape
+Wait+Screen@10s /Which channels would you like to connect/
+Wait+Screen@10s /Done adding channels/
+Type "d"
+Wait+Screen@10s /Settings Areas/
+
+Ctrl+Q
+
+# Alt-screen restore guard (CSI ?1049l): avoid typing into the restoring TUI.
+Sleep 1s
+Wait+Screen@10s /TAPE\$/
+
+Type "echo CONFIG_TEAMS_EXIT=$?"
+Enter
+Wait+Screen@5s /CONFIG_TEAMS_EXIT=0/
+
+Type "exit"
+Enter

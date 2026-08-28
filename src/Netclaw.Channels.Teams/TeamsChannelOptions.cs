@@ -30,6 +30,21 @@ public sealed class TeamsChannelAudienceOverride
 }
 
 /// <summary>
+/// Delimiter-safe user and group restrictions for one canonical Teams channel.
+/// Team and channel membership never grant access by themselves.
+/// </summary>
+public sealed class TeamsChannelAccessOverride
+{
+    public string TeamId { get; init; } = string.Empty;
+
+    public string ChannelId { get; init; } = string.Empty;
+
+    public string[] AllowedUserIds { get; init; } = [];
+
+    public string[] AllowedGroupIds { get; init; } = [];
+}
+
+/// <summary>
 /// Configuration for the disabled-by-default Microsoft Teams integration.
 /// ClientSecret is loaded only from the existing secrets overlay or NETCLAW_
 /// environment variables and is never included in the normal configuration schema.
@@ -64,6 +79,12 @@ public sealed class TeamsChannelOptions : IRemoteChatChannelOptions
     public string[] AllowedUserIds { get; init; } = [];
 
     /// <summary>
+    /// Entra group object IDs permitted across all Teams conversations. Group
+    /// membership is verified through the bounded directory boundary.
+    /// </summary>
+    public string[] AllowedGroupIds { get; init; } = [];
+
+    /// <summary>
     /// Per-channel audience overrides. Keys use canonical team/channel or team
     /// identities; values are personal, team, or public.
     /// </summary>
@@ -75,4 +96,11 @@ public sealed class TeamsChannelOptions : IRemoteChatChannelOptions
     /// over team-wide entries and the public fallback.
     /// </summary>
     public TeamsChannelAudienceOverride[] ChannelAudienceOverrides { get; init; } = [];
+
+    /// <summary>
+    /// Per-channel user and group restrictions. These entries are intentionally
+    /// structured so canonical IDs containing delimiters are never composed into
+    /// a configuration key.
+    /// </summary>
+    public TeamsChannelAccessOverride[] ChannelAccessOverrides { get; init; } = [];
 }

@@ -184,7 +184,8 @@ public sealed record TeamsInboundActivity
         TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message,
         string? teamId = null,
         string? channelId = null,
-        ImmutableArray<TeamsMention> mentions = default)
+        ImmutableArray<TeamsMention> mentions = default,
+        TeamsIngressAuthorization? authorization = null)
     {
         Trust = trust ?? throw new ArgumentNullException(nameof(trust));
         Text = text ?? throw new ArgumentNullException(nameof(text));
@@ -200,6 +201,7 @@ public sealed record TeamsInboundActivity
         TeamId = teamId;
         ChannelId = channelId;
         Mentions = mentions.IsDefault ? [] : mentions;
+        Authorization = authorization;
     }
 
     public TeamsIngressTrustContext Trust { get; }
@@ -219,6 +221,25 @@ public sealed record TeamsInboundActivity
     public string? ChannelId { get; }
 
     public ImmutableArray<TeamsMention> Mentions { get; }
+
+    /// <summary>
+    /// An in-memory ingress authorization handoff. SDK translation never sets
+    /// this value; only the local asynchronous routing edge may attach one.
+    /// </summary>
+    public TeamsIngressAuthorization? Authorization { get; }
+
+    public TeamsInboundActivity WithAuthorization(TeamsIngressAuthorization authorization) =>
+        new(
+            Trust,
+            Text,
+            Reply,
+            IsMentioned,
+            Attachments,
+            Kind,
+            TeamId,
+            ChannelId,
+            Mentions,
+            authorization);
 }
 
 /// <summary>
