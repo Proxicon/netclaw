@@ -386,7 +386,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
     {
         var fields = ViewModel.GetCredentialFields();
         var layout = Layouts.Vertical()
-            .WithChild(Header($"  {ViewModel.ActiveAdapterName} > Credentials"))
+            .WithChild(Header($"  {ViewModel.GetCredentialsScreenTitle()}"))
             .WithChild(Hint("  Secret fields are blank by design. Leave blank to keep existing secrets."))
             .WithChild(Layouts.Empty().Height(1));
 
@@ -398,7 +398,6 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 Focus.SetFocus(input);
 
             layout = layout
-                .WithChild(new TextNode($"  {field.Label}:").WithForeground(i == ViewModel.CredentialFieldIndex ? Color.Cyan : Color.White))
                 .WithChild(WizardStepHelpers.BuildTextInputPanel(input, field.Label));
 
             if (!string.IsNullOrWhiteSpace(field.Hint))
@@ -446,7 +445,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AllowedGroups => "  Use comma-separated canonical Entra group IDs. Blank removes group-derived access.",
                     ChannelsConfigScreen.DirectoryStatus => "  Run netclaw doctor for offline configuration diagnostics. Esc returns to the menu.",
                     ChannelsConfigScreen.DirectMessages => "  Space toggles DMs. Left/right changes the DM audience.",
-                    ChannelsConfigScreen.RotateCredentials => "  Blank secret fields preserve existing secrets. Tab switches fields.",
+                    ChannelsConfigScreen.RotateCredentials => "  Blank secret fields preserve existing secrets. Tab and Shift+Tab switch fields.",
                     ChannelsConfigScreen.ResetConfirm => "  Reset writes immediately when confirmed.",
                     _ => string.Empty
                 };
@@ -485,7 +484,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AllowedGroups => " [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.DirectoryStatus => " [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.DirectMessages => " [↑/↓] Navigate  [Space] Toggle  [←/→] Audience  [Enter] Apply  [Esc] Menu",
-                    ChannelsConfigScreen.RotateCredentials => " [Tab] Field  [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
+                    ChannelsConfigScreen.RotateCredentials => " [Tab/Shift+Tab] Field  [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.ResetConfirm => " [↑/↓] Navigate  [Enter] Select  [Esc] Menu  [Ctrl+Q] Quit",
                     _ => ViewModel.Step.IsInSubFlow
                         ? " [Enter] Next  [Esc] Back  [Ctrl+Q] Quit"
@@ -511,6 +510,12 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         if (keyInfo.Key == ConsoleKey.Q && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control))
         {
             ViewModel.RequestQuit();
+            return true;
+        }
+
+        if (ViewModel.Screen.Value == ChannelsConfigScreen.RotateCredentials
+            && ViewModel.IsCredentialSaveInProgress)
+        {
             return true;
         }
 
@@ -904,14 +909,15 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
         if (keyInfo.Key == ConsoleKey.Tab)
         {
-            ViewModel.MoveCredentialField(1);
+            StageCredentialInput(fields[ViewModel.CredentialFieldIndex]);
+            ViewModel.MoveCredentialField(keyInfo.Modifiers.HasFlag(ConsoleModifiers.Shift) ? -1 : 1);
             return;
         }
 
         if (keyInfo.Key == ConsoleKey.Enter)
         {
-            StageCredentialInput(fields[ViewModel.CredentialFieldIndex]);
-            ViewModel.ApplyCredentials();
+            StageAllCredentialInputs();
+            _ = ViewModel.ApplyCredentialsAsync();
             return;
         }
 
@@ -1016,6 +1022,12 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
     {
         if (_credentialInputs.TryGetValue(field.Key, out var input))
             ViewModel.StageCredentialDraftValue(field.Key, input.Text);
+    }
+
+    private void StageAllCredentialInputs()
+    {
+        foreach (var field in ViewModel.GetCredentialFields())
+            StageCredentialInput(field);
     }
 
     private void ResetTextInputs()

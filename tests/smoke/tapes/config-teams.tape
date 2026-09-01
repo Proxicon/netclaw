@@ -75,12 +75,55 @@ Wait+Screen@10s /Manage channels and permissions/
 Wait+Screen@10s /Manage allowed users/
 Wait+Screen@10s /Manage allowed groups/
 Wait+Screen@10s /Directory \/ Graph status/
-Wait+Screen@10s /Rotate credentials/
+Wait+Screen@10s /Connection & credentials/
+
+# Exercise the configured connection form through the actual Termina input
+# path. Tab must wrap from the secret to tenant, and Shift+Tab must return to
+# the secret. These values replace the first-connect values above.
+Down 6
+Enter
+Wait+Screen@10s /Microsoft Teams > Connection & credentials/
+Wait+Screen@10s /Entra tenant ID/
+Backspace 64
+Type "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+Tab
+Backspace 64
+Type "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+Tab
+Backspace 64
+Type "cccccccc-cccc-cccc-cccc-cccccccccccc"
+Tab
+Type "teams-smoke-replacement-secret"
+Tab
+Shift+Tab
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+Wait+Screen@10s /Microsoft Teams connection saved/
+
+# Reopen the form after persistence. Non-secret IDs must load. The secret
+# input stays blank and identifies its persisted value without exposing it.
+Escape
+Wait+Screen@10s /Which channels would you like to connect/
+# The picker keeps its prior cursor position. Clamp it to Slack, then select
+# Teams explicitly, so this remains deterministic after any management flow.
+Up 3
+Down 3
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+Down 6
+Enter
+Wait+Screen@10s /aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/
+Wait+Screen@10s /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/
+Wait+Screen@10s /cccccccc-cccc-cccc-cccc-cccccccccccc/
+Wait+Screen@10s /configured - leave blank to keep/
+Escape
+Wait+Screen@10s /Microsoft Teams is configured/
 Escape
 Wait+Screen@10s /Which channels would you like to connect/
 Wait+Screen@10s /Microsoft Teams/
-# Returning to the picker resets its cursor to Slack. Teams is asserted above
-# and deliberately selected as the fourth adapter before re-entry.
+# The picker retains its prior cursor position. Clamp it to Slack, then select
+# Teams explicitly before re-entry.
+Up 3
 Down 3
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/

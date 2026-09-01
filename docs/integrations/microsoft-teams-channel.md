@@ -156,8 +156,10 @@ delimiters. An exact team and channel entry takes precedence over a team entry.
 
 The same Entra application that hosts the Teams bot can be used for directory
 lookup. Netclaw uses an application `ClientSecretCredential` with the
-`https://graph.microsoft.com/.default` scope; it never stores Graph access
-tokens and it does not create a second Graph secret.
+`https://graph.microsoft.com/.default` scope. It uses `TenantId`, `ClientId`,
+and `ClientSecret` for app-only Graph access. `BotId` configures Teams
+transport. It does not authenticate Graph access. Netclaw never stores Graph
+access tokens and it does not create a second Graph secret.
 
 An Entra administrator must grant admin consent for exactly these Microsoft
 Graph **application** permissions:
@@ -173,16 +175,18 @@ permission described above is separate from these Graph application
 permissions.
 
 `netclaw config` now lists **Microsoft Teams** after Mattermost. The secure
-first-connect flow captures Tenant ID, application/client ID, Bot ID, and a
-masked client secret. Existing secrets render as `configured`; blank secret
-input preserves them, while credential rotation is explicit. The configuration
-UI searches Teams, channels, users, and groups through a bounded shared
-directory boundary. The advanced/manual path accepts canonical Teams and Entra
-object IDs directly, so an existing valid configuration remains manageable
-when discovery is unavailable.
+connection flow captures Tenant ID, application/client ID, Bot ID, and a
+masked client secret. The menu shows `Configure Teams connection` until the
+connection is complete. It then shows `Connection & credentials`. Existing
+secrets render as `configured`; blank secret input preserves them. The
+configuration UI searches Teams, channels, users, and groups through a bounded
+shared directory boundary. The advanced/manual path accepts canonical Teams
+and Entra object IDs directly, so an existing valid configuration remains
+manageable when discovery is unavailable.
 
-Names, UPNs, and mail addresses are presentation metadata only. Authorization
-always persists and compares canonical object IDs. For example:
+Names, UPNs, and mail addresses are presentation metadata only. Channel lists
+can show `Team name / Channel name` after a directory lookup. Netclaw persists
+and compares canonical IDs only. Directory labels are cache data. For example:
 
 ```json
 {

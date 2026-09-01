@@ -320,6 +320,184 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Legacy_unmapped_Teams_channel_uses_a_unique_directory_match_without_rewriting_its_id()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a", "team-b"],
+                "AllowedChannelIds": ["legacy-channel"]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        var directory = new DirectoryLabelFixture { LegacyChannelId = "legacy-channel", LegacyChannelTeamId = "team-b" };
+        using var vm = CreateViewModel(teamsDirectoryFactory: _ => directory);
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        await vm.PendingLabelRefresh!;
+
+        var row = Assert.Single(vm.GetChannelRows(includeAddAction: false));
+        Assert.Equal("Operations / Incident response", row.DisplayName);
+        Assert.Equal("legacy-channel", row.Id);
+        Assert.Equal(["legacy-channel"], PersistedChannels(ChannelType.Teams));
+    }
+
+    [Fact]
+    public async Task Legacy_unmapped_Teams_channel_with_multiple_directory_matches_keeps_a_safe_abbreviation()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a", "team-b"],
+                "AllowedChannelIds": ["abcdefghijklmnopqrst"]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        var directory = new DirectoryLabelFixture { LegacyChannelId = "abcdefghijklmnopqrst", LegacyChannelTeamId = null };
+        using var vm = CreateViewModel(teamsDirectoryFactory: _ => directory);
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        await vm.PendingLabelRefresh!;
+
+        var row = Assert.Single(vm.GetChannelRows(includeAddAction: false));
+        Assert.Equal("Teams channel abcdefgh…mnopqrst", row.DisplayName);
+        Assert.Equal("abcdefghijklmnopqrst", row.Id);
+    }
+
+    [Fact]
+    public async Task Teams_connection_apply_persists_all_staged_fields_before_it_returns_to_management()
+    {
+        WriteAllChannelConfig();
+        WriteAllChannelSecrets();
+        var directories = new List<DirectoryLabelFixture>();
+        using var vm = CreateViewModel(teamsDirectoryFactory: _ =>
+        {
+            var directory = new DirectoryLabelFixture();
+            directories.Add(directory);
+            return directory;
+        });
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        await vm.PendingLabelRefresh!;
+        vm.GoBack();
+        vm.BeginRotateCredentials();
+        vm.StageCredentialDraftValue("tenant", "tenant-new");
+        vm.StageCredentialDraftValue("client", "client-new");
+        vm.StageCredentialDraftValue("botid", "bot-new");
+        vm.StageCredentialDraftValue("secret", "secret-new");
+
+        await vm.ApplyCredentialsAsync();
+
+        var teams = vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        Assert.Equal(ChannelsConfigScreen.AdapterMenu, vm.Screen.Value);
+        Assert.False(vm.IsCredentialSaveInProgress);
+        Assert.True(teams.HasPersistedClientSecret);
+        Assert.Equal("Microsoft Teams connection saved.", vm.Status.Value.Text);
+        Assert.Equal(2, directories.Count);
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.TenantId", out var tenant));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.ClientId", out var client));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.BotId", out var bot));
+        Assert.Equal("tenant-new", tenant);
+        Assert.Equal("client-new", client);
+        Assert.Equal("bot-new", bot);
+        Assert.DoesNotContain("secret-new", File.ReadAllText(_paths.NetclawConfigPath), StringComparison.Ordinal);
+
+        var secrets = ConfigFileHelper.LoadJsonDict(_paths.SecretsPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(secrets, "Teams.ClientSecret", out var secret));
+        Assert.Equal("secret-new", ConfigFileHelper.DecryptIfEncrypted(_paths, secret?.ToString()));
+    }
+
+    [Fact]
+    public async Task Teams_connection_validation_keeps_the_draft_and_focuses_the_invalid_field()
+    {
+        WriteAllChannelConfig();
+        WriteAllChannelSecrets();
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginRotateCredentials();
+        vm.StageCredentialDraftValue("tenant", "");
+        vm.StageCredentialDraftValue("client", "client-new");
+        vm.StageCredentialDraftValue("botid", "bot-new");
+        vm.StageCredentialDraftValue("secret", "secret-new");
+
+        await vm.ApplyCredentialsAsync();
+
+        Assert.Equal(ChannelsConfigScreen.RotateCredentials, vm.Screen.Value);
+        Assert.Equal(0, vm.CredentialFieldIndex);
+        Assert.Equal("client-new", vm.ClientIdInput);
+        Assert.Equal("bot-new", vm.BotIdInput);
+        Assert.Equal("secret-new", vm.ClientSecretInput);
+        Assert.Equal(ChannelsEditorValidationMessages.TeamsTenantIdRequired, vm.Status.Value.Text);
+    }
+
+    [Fact]
+    public void Teams_connection_field_navigation_wraps_in_both_directions()
+    {
+        WriteAllChannelConfig();
+        WriteAllChannelSecrets();
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginRotateCredentials();
+        for (var expected = 1; expected < 4; expected++)
+        {
+            vm.MoveCredentialField(1);
+            Assert.Equal(expected, vm.CredentialFieldIndex);
+        }
+
+        vm.MoveCredentialField(1);
+        Assert.Equal(0, vm.CredentialFieldIndex);
+        vm.MoveCredentialField(-1);
+        Assert.Equal(3, vm.CredentialFieldIndex);
+    }
+
+    [Fact]
+    public void Teams_directory_status_does_not_require_a_bot_id_for_Graph_configuration()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        var status = vm.GetDirectoryStatusLines();
+
+        Assert.Contains("Teams connection: incomplete", status);
+        Assert.Contains("Graph app credentials: configured; access not yet verified", status);
+    }
+
+    [Fact]
     public async Task Discovered_Teams_principals_persist_canonical_ids_not_display_metadata()
     {
         File.WriteAllText(_paths.NetclawConfigPath,
@@ -1283,8 +1461,7 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         vm.BotTokenInput = "xoxb-new";
         vm.AppTokenInput = string.Empty;
 
-        vm.ApplyCredentials();
-        await vm.SaveAsync(TestContext.Current.CancellationToken);
+        await vm.ApplyCredentialsAsync();
 
         var secrets = ConfigFileHelper.LoadJsonDict(_paths.SecretsPath);
         Assert.True(ConfigFileHelper.TryGetPathValue(secrets, "Slack.BotToken", out var botToken));
@@ -2063,6 +2240,10 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
 
         public int ChannelLookups { get; private set; }
 
+        public string? LegacyChannelId { get; init; }
+
+        public string? LegacyChannelTeamId { get; init; }
+
         public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>> SearchTeamsAsync(
             string query,
             int maximumResults,
@@ -2081,8 +2262,15 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>> GetChannelsAsync(
             string teamId,
             int maximumResults,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>.Available([]));
+            CancellationToken cancellationToken = default)
+        {
+            var shouldReturnLegacyChannel = LegacyChannelId is not null
+                                            && (LegacyChannelTeamId is null || string.Equals(LegacyChannelTeamId, teamId, StringComparison.Ordinal));
+            IReadOnlyList<TeamsDirectoryChannel> channels = shouldReturnLegacyChannel
+                ? [new TeamsDirectoryChannel(teamId, LegacyChannelId!, "Incident response", null)]
+                : [];
+            return ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>.Available(channels));
+        }
 
         public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryChannel>> GetChannelAsync(
             string teamId,

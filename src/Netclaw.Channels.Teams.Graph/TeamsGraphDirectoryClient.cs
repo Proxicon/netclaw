@@ -441,11 +441,19 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
         }
         catch (OperationCanceledException) when (deadline.IsCancellationRequested)
         {
-            return TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_unavailable");
+            return TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_timeout");
+        }
+        catch (AuthenticationFailedException)
+        {
+            return TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_authentication_failed");
         }
         catch (ApiException exception)
         {
             return TeamsDirectoryOperationResult<T>.Unavailable(ReasonFor(exception));
+        }
+        catch (HttpRequestException)
+        {
+            return TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_network_unavailable");
         }
         catch (InvalidDataException)
         {
@@ -453,7 +461,7 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
         }
         catch (Exception)
         {
-            return TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_unavailable");
+            return TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_request_failed");
         }
     }
 
@@ -678,8 +686,9 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
 
     private static string ReasonFor(ApiException exception) => exception.ResponseStatusCode switch
     {
-        401 or 403 => "teams_directory_permission_unavailable",
-        429 => "teams_directory_unavailable",
-        _ => "teams_directory_unavailable"
+        401 => "teams_directory_authentication_failed",
+        403 => "teams_directory_permission_denied",
+        429 => "teams_directory_network_unavailable",
+        _ => "teams_directory_request_failed"
     };
 }
