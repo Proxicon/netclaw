@@ -265,6 +265,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         LoadAudienceDrafts(savedDraft);
         Step.OnEnter(_context, NavigationDirection.Forward);
         _mapper.ApplyToStep(Step, savedDraft);
+        if (_activeAdapterType == ChannelType.Teams)
+            StartChannelLabelResolution(ChannelType.Teams);
         IsSaved.Value = true;
         Status.Value = BuildSaveStatus(successMessage, unresolved);
         NotifyContentChanged();
@@ -734,6 +736,15 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (row.IsAction || row.IsDirectMessage)
             return;
 
+        if (_activeAdapterType == ChannelType.Teams)
+        {
+            var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+            var nextMentionOnly = !teams.MentionOnly;
+            teams.MentionOnly = nextMentionOnly;
+            AutosaveCompletedAction($"Microsoft Teams require @mentions in all selected channels {(nextMentionOnly ? "on" : "off")} and saved.");
+            return;
+        }
+
         var next = !GetChannelMentionRequired(_activeAdapterType, row.Id);
         SetChannelMentionRequired(_activeAdapterType, row.Id, next);
         // Autosave like the audience toggle: without an immediate save an Esc
@@ -972,7 +983,6 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         TrySetTeamsChannelAudience(channel.Id, audience, team.Id);
         _teamsById[team.Id] = team;
         _teamsChannelsByIdentity[TeamsChannelIdentity(team.Id, channel.Id)] = channel;
-        SetChannelMentionRequired(ChannelType.Teams, channel.Id, audience is TrustAudience.Team or TrustAudience.Public);
         _channelRowIndex = Math.Max(GetChannelRows().Count - 3, 0);
         Screen.Value = ChannelsConfigScreen.ChannelPermissions;
         UpdateAdapterPickerSummary(ChannelType.Teams);
@@ -2553,9 +2563,11 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     }
 
     private bool GetChannelMentionRequired(ChannelType type, string channelId)
-        => _channelMentionRequired.TryGetValue(type, out var mentionRequired)
-            && mentionRequired.TryGetValue(channelId, out var required)
-            && required;
+        => type == ChannelType.Teams
+            ? Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).MentionOnly
+            : _channelMentionRequired.TryGetValue(type, out var mentionRequired)
+              && mentionRequired.TryGetValue(channelId, out var required)
+              && required;
 
     private void SetChannelMentionRequired(ChannelType type, string channelId, bool value)
     {

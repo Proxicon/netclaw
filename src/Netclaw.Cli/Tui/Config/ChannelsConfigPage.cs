@@ -200,9 +200,16 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Hint($"  {AudienceLabel(row.Audience)} — {AudienceDescription(row.Audience)}"));
 
         if (!row.IsDirectMessage)
+        {
+            var isTeams = ViewModel.ActiveAdapterType == ChannelType.Teams;
             description = description.WithChild(Hint(row.MentionRequired
-                ? "  Require @mention: bot stays quiet until @mentioned, then catches up on the thread."
-                : "  Require @mention off: bot replies to every message in the thread (default)."));
+                ? isTeams
+                    ? "  Require @mention: applies to every selected Teams channel; the bot stays quiet until @mentioned."
+                    : "  Require @mention: bot stays quiet until @mentioned, then catches up on the thread."
+                : isTeams
+                    ? "  Require @mention off: applies to every selected Teams channel; the bot replies to every message."
+                    : "  Require @mention off: bot replies to every message in the thread (default)."));
+        }
 
         return description;
     }
@@ -434,6 +441,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 var help = ViewModel.Screen.Value switch
                 {
                     ChannelsConfigScreen.AdapterMenu => "  Manage this adapter without re-entering credentials.",
+                    ChannelsConfigScreen.ChannelPermissions when ViewModel.ActiveAdapterType == ChannelType.Teams => "  Left/right sets audience. Space toggles @mention for every selected Teams channel. Enter on Done finishes. a adds, Delete removes.",
                     ChannelsConfigScreen.ChannelPermissions => "  Left/right sets audience. Space toggles Require @mention. Enter on Done finishes. a adds, Delete removes.",
                     ChannelsConfigScreen.AddChannel => "  Enter applies the channel draft. Esc cancels.",
                     ChannelsConfigScreen.TeamsTeamSearch => "  Enter searches, then selects the Team. M opens the advanced canonical-ID path.",
