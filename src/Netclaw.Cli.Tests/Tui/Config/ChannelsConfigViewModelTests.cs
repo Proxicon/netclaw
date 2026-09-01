@@ -429,6 +429,50 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Teams_directory_uses_the_effective_Komodo_environment_connection()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "stale-tenant",
+                "ClientId": "stale-client",
+                "BotId": "stale-bot"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "stale-secret" } }""");
+
+        TeamsChannelOptions? captured = null;
+        using var vm = CreateViewModel(
+            teamsDirectoryFactory: options =>
+            {
+                captured = options;
+                return new DirectoryLabelFixture();
+            },
+            environmentVariableReader: name => name switch
+            {
+                "NETCLAW_Teams__TenantId" => "live-tenant",
+                "NETCLAW_Teams__ClientId" => "live-client",
+                "NETCLAW_Teams__ClientSecret" => "live-secret",
+                _ => null
+            });
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginAllowedUsers();
+        vm.DirectorySearchInput = "bo";
+        await vm.SearchUsersFromInputAsync();
+
+        Assert.NotNull(captured);
+        Assert.Equal("live-tenant", captured.TenantId);
+        Assert.Equal("live-client", captured.ClientId);
+        Assert.Equal("live-secret", captured.ClientSecret!.Value);
+    }
+
+    [Fact]
     public async Task Teams_connection_validation_keeps_the_draft_and_focuses_the_invalid_field()
     {
         WriteAllChannelConfig();
@@ -2226,13 +2270,15 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         FakeSlackProbe? slackProbe = null,
         FakeDiscordProbe? discordProbe = null,
         FakeMattermostProbe? mattermostProbe = null,
-        Func<TeamsChannelOptions, ITeamsDirectory>? teamsDirectoryFactory = null)
+        Func<TeamsChannelOptions, ITeamsDirectory>? teamsDirectoryFactory = null,
+        Func<string, string?>? environmentVariableReader = null)
         => new(_paths,
             slackProbe ?? new FakeSlackProbe(),
             discordProbe ?? new FakeDiscordProbe(),
             mattermostProbe ?? new FakeMattermostProbe(),
             TimeProvider.System,
-            teamsDirectoryFactory: teamsDirectoryFactory);
+            teamsDirectoryFactory: teamsDirectoryFactory,
+            environmentVariableReader: environmentVariableReader);
 
     private sealed class DirectoryLabelFixture : ITeamsDirectory
     {

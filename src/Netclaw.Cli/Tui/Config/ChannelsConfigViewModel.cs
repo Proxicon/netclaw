@@ -32,6 +32,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     private readonly TimeProvider _timeProvider;
     private readonly TuiNavigation? _navigation;
     private readonly Func<TeamsChannelOptions, ITeamsDirectory>? _teamsDirectoryFactory;
+    private readonly Func<string, string?> _environmentVariableReader;
     private readonly ChannelsConfigPersistenceMapper _mapper = new();
     private readonly ChannelsEditorValidationAdapter _validator = new();
     private readonly WizardContext _context;
@@ -76,7 +77,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         IMattermostProbe mattermostProbe,
         TimeProvider timeProvider,
         TuiNavigation? navigation = null,
-        Func<TeamsChannelOptions, ITeamsDirectory>? teamsDirectoryFactory = null)
+        Func<TeamsChannelOptions, ITeamsDirectory>? teamsDirectoryFactory = null,
+        Func<string, string?>? environmentVariableReader = null)
     {
         _paths = paths;
         _slackProbe = slackProbe;
@@ -85,6 +87,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _navigation = navigation;
         _teamsDirectoryFactory = teamsDirectoryFactory;
+        _environmentVariableReader = environmentVariableReader ?? Environment.GetEnvironmentVariable;
         Status = new ReactiveProperty<ConfigStatusMessage>(new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral));
         Step = new ChannelPickerStepViewModel(slackProbe, discordProbe, mattermostProbe)
         {
@@ -983,9 +986,11 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             return _teamsDirectorySearch;
 
         var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
-        var secret = GetEffectiveSecret("Teams.ClientSecret", teams.ClientSecret, teams.HasPersistedClientSecret);
-        if (string.IsNullOrWhiteSpace(teams.TenantId)
-            || string.IsNullOrWhiteSpace(teams.ClientId)
+        var tenantId = GetEffectiveTeamsSetting("TenantId", teams.TenantId);
+        var clientId = GetEffectiveTeamsSetting("ClientId", teams.ClientId);
+        var secret = GetEffectiveTeamsClientSecret(teams);
+        if (string.IsNullOrWhiteSpace(tenantId)
+            || string.IsNullOrWhiteSpace(clientId)
             || string.IsNullOrWhiteSpace(secret))
         {
             Status.Value = new ConfigStatusMessage("Graph credentials are incomplete. Use the advanced canonical-ID path or configure Teams credentials.", ConfigStatusTone.Error);
@@ -995,8 +1000,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         var options = new TeamsChannelOptions
         {
-            TenantId = teams.TenantId,
-            ClientId = teams.ClientId,
+            TenantId = tenantId,
+            ClientId = clientId,
             ClientSecret = new SensitiveString(secret)
         };
         var directory = _teamsDirectoryFactory?.Invoke(options)
@@ -1463,13 +1468,17 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal IReadOnlyList<string> GetDirectoryStatusLines()
     {
         var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
-        var teamsConnectionConfigured = !string.IsNullOrWhiteSpace(teams.TenantId)
-                                       && !string.IsNullOrWhiteSpace(teams.ClientId)
-                                       && !string.IsNullOrWhiteSpace(teams.BotId)
-                                       && teams.HasPersistedClientSecret;
-        var graphCredentialsConfigured = !string.IsNullOrWhiteSpace(teams.TenantId)
-                                        && !string.IsNullOrWhiteSpace(teams.ClientId)
-                                        && teams.HasPersistedClientSecret;
+        var tenantId = GetEffectiveTeamsSetting("TenantId", teams.TenantId);
+        var clientId = GetEffectiveTeamsSetting("ClientId", teams.ClientId);
+        var botId = GetEffectiveTeamsSetting("BotId", teams.BotId);
+        var hasClientSecret = !string.IsNullOrWhiteSpace(GetEffectiveTeamsClientSecret(teams));
+        var teamsConnectionConfigured = !string.IsNullOrWhiteSpace(tenantId)
+                                       && !string.IsNullOrWhiteSpace(clientId)
+                                       && !string.IsNullOrWhiteSpace(botId)
+                                       && hasClientSecret;
+        var graphCredentialsConfigured = !string.IsNullOrWhiteSpace(tenantId)
+                                        && !string.IsNullOrWhiteSpace(clientId)
+                                        && hasClientSecret;
         var groupsConfigured = GetAllowedGroupIds(ChannelType.Teams).Count > 0;
         return
         [
@@ -2731,11 +2740,25 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     private bool HasCompleteTeamsConnection()
     {
         var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
-        return !string.IsNullOrWhiteSpace(teams.TenantId)
-               && !string.IsNullOrWhiteSpace(teams.ClientId)
-               && !string.IsNullOrWhiteSpace(teams.BotId)
-               && teams.HasPersistedClientSecret;
+        return !string.IsNullOrWhiteSpace(GetEffectiveTeamsSetting("TenantId", teams.TenantId))
+               && !string.IsNullOrWhiteSpace(GetEffectiveTeamsSetting("ClientId", teams.ClientId))
+               && !string.IsNullOrWhiteSpace(GetEffectiveTeamsSetting("BotId", teams.BotId))
+               && !string.IsNullOrWhiteSpace(GetEffectiveTeamsClientSecret(teams));
     }
+
+    // The daemon treats NETCLAW_* variables as the highest-priority source. The
+    // TUI's live Graph lookup must use that same connection, otherwise a stale
+    // secrets.json value can make discovery fail while the deployed connector works.
+    private string? GetEffectiveTeamsSetting(string name, string? persistedValue)
+    {
+        var environmentValue = Normalize(_environmentVariableReader($"NETCLAW_Teams__{name}"));
+        return string.IsNullOrWhiteSpace(environmentValue) ? Normalize(persistedValue) : environmentValue;
+    }
+
+    private string? GetEffectiveTeamsClientSecret(TeamsStepViewModel teams)
+        => GetEffectiveTeamsSetting(
+            "ClientSecret",
+            GetEffectiveSecret("Teams.ClientSecret", teams.ClientSecret, teams.HasPersistedClientSecret));
 
     private static string GetAdapterDisplayName(ChannelType type) => type switch
     {
