@@ -41,6 +41,31 @@ public sealed class TeamsGraphDirectoryClientTests
         Assert.Equal(0, handler.TeamRecordRequests);
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "teams_directory_authentication_failed")]
+    [InlineData(HttpStatusCode.Forbidden, "teams_directory_permission_denied")]
+    public async Task Directory_request_classifies_authentication_and_permission_failures(HttpStatusCode statusCode, string reasonCode)
+    {
+        using var httpClient = new HttpClient(new StatusCodeHandler(statusCode));
+        using var graphClient = new GraphServiceClient(
+            httpClient,
+            new AnonymousAuthenticationProvider(),
+            "https://graph.test/v1.0");
+        using var cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = 16 });
+        using var directory = new TeamsGraphDirectoryClient(graphClient, "tenant-a", cache, TimeProvider.System);
+
+        var result = await directory.GetTeamAsync("team-1", TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsAvailable);
+        Assert.Equal(reasonCode, result.ReasonCode);
+    }
+
+    private sealed class StatusCodeHandler(HttpStatusCode statusCode) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(statusCode));
+    }
+
     private sealed class TeamsDirectoryHttpHandler : HttpMessageHandler
     {
         public int TeamListRequests { get; private set; }
