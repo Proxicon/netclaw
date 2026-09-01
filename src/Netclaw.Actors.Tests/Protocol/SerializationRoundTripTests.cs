@@ -49,6 +49,23 @@ public sealed class SerializationRoundTripTests : TestKit
     }
 
     [Fact]
+    public void ReminderDelivery_round_trips_teams_current_session_origin()
+    {
+        var original = new ReminderDelivery
+        {
+            Kind = DeliveryKind.CurrentSession,
+            SessionId = "teams-conversation-1",
+            OriginChannelType = ChannelType.Teams
+        };
+
+        var result = NetclawProtoMapper.FromProto(NetclawProtoMapper.ToProto(original));
+
+        Assert.Equal(original.Kind, result.Kind);
+        Assert.Equal(original.SessionId, result.SessionId);
+        Assert.Equal(ChannelType.Teams, result.OriginChannelType);
+    }
+
+    [Fact]
     public void SessionId_round_trips()
     {
         var original = new SessionId("C99999/1708531200.000100");
