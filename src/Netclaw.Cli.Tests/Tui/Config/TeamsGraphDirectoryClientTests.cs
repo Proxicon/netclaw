@@ -41,6 +41,26 @@ public sealed class TeamsGraphDirectoryClientTests
         Assert.Equal(0, handler.TeamRecordRequests);
     }
 
+    [Fact]
+    public async Task Channel_list_omits_the_unsupported_top_query_option()
+    {
+        using var handler = new TeamsDirectoryHttpHandler();
+        using var httpClient = new HttpClient(handler);
+        using var graphClient = new GraphServiceClient(
+            httpClient,
+            new AnonymousAuthenticationProvider(),
+            "https://graph.test/v1.0");
+        using var cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = 16 });
+        using var directory = new TeamsGraphDirectoryClient(graphClient, "tenant-a", cache, TimeProvider.System);
+
+        var result = await directory.GetChannelsAsync("team-1", 25, TestContext.Current.CancellationToken);
+
+        Assert.True(result.IsAvailable);
+        Assert.Single(result.Value!);
+        Assert.NotNull(handler.ChannelListRequestUri);
+        Assert.DoesNotContain("top=", handler.ChannelListRequestUri.Query, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.Unauthorized, "teams_directory_authentication_failed")]
     [InlineData(HttpStatusCode.Forbidden, "teams_directory_permission_denied")]
@@ -72,6 +92,8 @@ public sealed class TeamsGraphDirectoryClientTests
 
         public int TeamRecordRequests { get; private set; }
 
+        public Uri? ChannelListRequestUri { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri?.AbsolutePath ?? string.Empty;
@@ -85,6 +107,12 @@ public sealed class TeamsGraphDirectoryClientTests
             {
                 TeamRecordRequests++;
                 return Task.FromResult(Json("""{ "id": "team-1", "displayName": "Operations" }"""));
+            }
+
+            if (path.EndsWith("/teams/team-1/channels", StringComparison.Ordinal))
+            {
+                ChannelListRequestUri = request.RequestUri;
+                return Task.FromResult(Json("""{ "value": [{ "id": "channel-1", "displayName": "General" }] }"""));
             }
 
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));

@@ -164,7 +164,9 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
             {
                 var response = await _graphClient.Teams[canonicalTeamId].Channels.GetAsync(request =>
                 {
-                    request.QueryParameters.Top = maximum;
+                    // The List channels API supports only $filter and $select;
+                    // sending $top causes Graph to reject the entire request.
+                    // Keep the caller's bound locally while following paging links.
                     request.QueryParameters.Select = ["id", "displayName", "description"];
                 }, token).ConfigureAwait(false);
                 var channels = new List<Microsoft.Graph.Models.Channel>();
