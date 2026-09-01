@@ -1475,6 +1475,54 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Teams_mention_toggle_persists_the_global_rule_and_restarts_directory_labels()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "MentionOnly": false,
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a", "channel-b"],
+                "ChannelAudienceOverrides": [
+                  { "TeamId": "team-a", "ChannelId": "channel-a", "Audience": "team" },
+                  { "TeamId": "team-a", "ChannelId": "channel-b", "Audience": "team" }
+                ]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        var directory = new DirectoryLabelFixture();
+        using var vm = CreateViewModel(teamsDirectoryFactory: _ => directory);
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        Assert.All(vm.GetChannelRows(includeAddAction: false), row => Assert.False(row.MentionRequired));
+
+        vm.ToggleSelectedChannelMentionRequired();
+        await vm.PendingConfigWrite;
+        await vm.PendingLabelRefresh!;
+
+        var rows = vm.GetChannelRows(includeAddAction: false);
+        Assert.All(rows, row => Assert.True(row.MentionRequired));
+        Assert.All(rows, row => Assert.Equal("Operations / Incident response", row.DisplayName));
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.MentionOnly", out var mentionOnly));
+        Assert.True(Assert.IsType<bool>(mentionOnly));
+
+        using var reloaded = CreateViewModel();
+        reloaded.OpenAdapterManagement(ChannelType.Teams);
+        reloaded.ActivateManagementMenuItem();
+        Assert.All(reloaded.GetChannelRows(includeAddAction: false), row => Assert.True(row.MentionRequired));
+    }
+
+    [Fact]
     public async Task Direct_message_audience_is_saved_without_touching_channels()
     {
         WriteChannelConfig();
