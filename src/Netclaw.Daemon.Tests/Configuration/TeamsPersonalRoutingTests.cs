@@ -914,6 +914,53 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Attachment_pipeline_failure_after_async_ingress_releases_the_activity_reservation()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var pipeline = new FailThenDelegatePipeline(CreatePipeline(TestActor));
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateAttachmentDependencies(pipeline, paths),
+            "teams-attachment-pipeline-failure");
+        var activity = CreateAttachmentActivity(
+            "attachment-pipeline-failure",
+            string.Empty,
+            [CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Failed, (await RouteAsync(actor, activity)).Disposition);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        ReceiveDispatchedMessage();
+    }
+
+    [Fact]
+    public async Task Attachment_pipeline_cancellation_after_async_ingress_releases_the_activity_reservation()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        using var cancellation = new CancellationTokenSource();
+        var pipeline = new CancelThenDelegatePipeline(CreatePipeline(TestActor), cancellation);
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateAttachmentDependencies(pipeline, paths),
+            "teams-attachment-pipeline-cancelled");
+        var activity = CreateAttachmentActivity(
+            "attachment-pipeline-cancelled",
+            string.Empty,
+            [CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+
+        var cancelled = await actor.Ask<TeamsBindingRouteResult>(
+            new TeamsBindingIngress(activity, cancellation.Token),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Cancelled, cancelled.Disposition);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        ReceiveDispatchedMessage();
+    }
+
+    [Fact]
     public async Task Safe_text_and_rejected_attachment_create_one_safe_model_turn_and_one_rejection()
     {
         using var root = new DisposableTempDir();

@@ -985,8 +985,15 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         Command<RecoverPendingApprovalPresentationsCommand>(_ => RecoverPendingApprovalPresentations());
         CommandAsync<DenyTeamsApprovalRequest>(DenyApprovalRequestAsync);
         CommandAsync<DispatchReservedActivity>(DispatchReservedActivityAsync);
+        Command<ReleaseReservedActivity>(release =>
+            ReleaseReservation(release.Dispatch, release.Disposition));
         Command<BeginTeamsReminderDispatch>(BeginReminderDispatch);
         CommandAsync<DispatchTeamsReminder>(DispatchReminderAsync);
+        Command<CompleteReminderDispatchFailure>(failure =>
+        {
+            CompleteReminderFailure(failure.DeliveryKey, failure.FailureReason);
+            failure.ReplyTo.Tell(CommandNack.For(_sessionId, failure.ReplyMessage));
+        });
         Command<MarkRecoveredProactiveDeliveriesUnknown>(_ => MarkRecoveredDeliveriesUnknown());
         Command<SaveTeamsMigrationSnapshot>(_ => SaveMigrationSnapshot());
         CommandAsync<BindingOutput>(HandleOutputAsync);
@@ -1189,6 +1196,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private async Task DispatchReservedActivityAsync(DispatchReservedActivity dispatch)
     {
+        // CommandAsync continuations run outside Akka's ambient actor context.
+        // Attachment ingress performs real asynchronous I/O, so capture the
+        // context-bound values before its first await and return durable failure
+        // handling to the mailbox below.
+        var context = Context;
+        var self = Self;
+
         try
         {
             var input = await BuildChannelInputAsync(dispatch.Activity, dispatch.CancellationToken).ConfigureAwait(false);
@@ -1199,7 +1213,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 return;
             }
 
-            var writer = await EnsurePipelineAsync(dispatch.CancellationToken);
+            var writer = await EnsurePipelineAsync(context, self, dispatch.CancellationToken);
             await writer.WriteAsync(input, dispatch.CancellationToken);
             ChannelTelemetry.For(ChannelType.Teams).RecordMessageEnqueued();
             ChannelTelemetry.For(ChannelType.Teams).RecordEventRouted(
@@ -1212,15 +1226,15 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
         catch (OperationCanceledException) when (dispatch.CancellationToken.IsCancellationRequested)
         {
-            ReleaseReservation(dispatch, TeamsBindingRouteDisposition.Cancelled);
+            self.Tell(new ReleaseReservedActivity(dispatch, TeamsBindingRouteDisposition.Cancelled));
         }
         catch (ChannelClosedException)
         {
-            ReleaseReservation(dispatch, TeamsBindingRouteDisposition.Failed);
+            self.Tell(new ReleaseReservedActivity(dispatch, TeamsBindingRouteDisposition.Failed));
         }
         catch (Exception)
         {
-            ReleaseReservation(dispatch, TeamsBindingRouteDisposition.Failed);
+            self.Tell(new ReleaseReservedActivity(dispatch, TeamsBindingRouteDisposition.Failed));
         }
     }
 
@@ -1310,9 +1324,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
 
     private async Task DispatchReminderAsync(DispatchTeamsReminder dispatch)
     {
+        var context = Context;
+        var self = Self;
+
         try
         {
-            var writer = await EnsurePipelineAsync(CancellationToken.None);
+            var writer = await EnsurePipelineAsync(context, self, CancellationToken.None);
             var source = dispatch.Reminder.Source with { AckTarget = dispatch.ReplyTo };
             if (source.DeliveryObserver is { } observer)
                 _reminderDeliveryObservers[dispatch.DeliveryKey] = observer;
@@ -1336,13 +1353,19 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
         catch (ChannelClosedException)
         {
-            CompleteReminderFailure(dispatch.DeliveryKey, "Teams pipeline is unavailable.");
-            dispatch.ReplyTo.Tell(CommandNack.For(_sessionId, "Teams pipeline is unavailable."));
+            self.Tell(new CompleteReminderDispatchFailure(
+                dispatch.DeliveryKey,
+                dispatch.ReplyTo,
+                "Teams pipeline is unavailable.",
+                "Teams pipeline is unavailable."));
         }
         catch (Exception)
         {
-            CompleteReminderFailure(dispatch.DeliveryKey, "Teams pipeline dispatch failed.");
-            dispatch.ReplyTo.Tell(CommandNack.For(_sessionId, "Teams pipeline dispatch failed."));
+            self.Tell(new CompleteReminderDispatchFailure(
+                dispatch.DeliveryKey,
+                dispatch.ReplyTo,
+                "Teams pipeline dispatch failed.",
+                "Teams pipeline dispatch failed."));
         }
     }
 
@@ -1364,14 +1387,16 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             });
     }
 
-    private async Task<ChannelWriter<ChannelInput>> EnsurePipelineAsync(CancellationToken cancellationToken)
+    private async Task<ChannelWriter<ChannelInput>> EnsurePipelineAsync(
+        IActorContext context,
+        IActorRef self,
+        CancellationToken cancellationToken)
     {
         if (_pipelineHandle.InputQueue is { } writer)
             return writer;
 
-        var self = Self;
         return await _pipelineHandle.InitializeWithChannelAsync(
-            Context,
+            context,
             _sessionId,
             new SessionPipelineOptions
             {
@@ -3290,6 +3315,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         IActorRef ReplyTo,
         CancellationToken CancellationToken) : INoSerializationVerificationNeeded;
 
+    private sealed record ReleaseReservedActivity(
+        DispatchReservedActivity Dispatch,
+        TeamsBindingRouteDisposition Disposition) : INoSerializationVerificationNeeded;
+
     private sealed record BeginTeamsReminderDispatch(
         DeliverTrustedSessionTurn Reminder,
         IActorRef ReplyTo,
@@ -3299,6 +3328,12 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         DeliverTrustedSessionTurn Reminder,
         IActorRef ReplyTo,
         string DeliveryKey) : INoSerializationVerificationNeeded;
+
+    private sealed record CompleteReminderDispatchFailure(
+        string DeliveryKey,
+        IActorRef ReplyTo,
+        string FailureReason,
+        string ReplyMessage) : INoSerializationVerificationNeeded;
 
     private sealed record MarkRecoveredProactiveDeliveriesUnknown : INoSerializationVerificationNeeded;
 
