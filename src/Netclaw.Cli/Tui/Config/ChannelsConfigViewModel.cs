@@ -145,6 +145,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal string? AddChannelInput { get; set; }
     internal string? AllowedUsersInput { get; set; }
     internal string? AllowedGroupsInput { get; set; }
+    internal string? AllowedGroupChatsInput { get; set; }
+    internal bool GroupChatsEnabled { get; set; }
+    internal bool AttachmentsEnabled { get; private set; }
     internal string? DirectorySearchInput { get; set; }
     internal bool DirectMessagesEnabled { get; set; }
     internal string? BotTokenInput { get; set; }
@@ -561,6 +564,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (_activeAdapterType == ChannelType.Teams)
         {
             items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageGroups, "Manage allowed groups", "Restrict messages to verified Entra group members."));
+            items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageGroupChats, "Manage Group Chats", "Use canonical chat IDs and strict mention policy."));
+            items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageAttachments, "Attachments", "Enable supported inbound Teams attachments."));
             items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.DirectoryStatus, "Directory / Graph status", "Review safe directory capability and consent guidance."));
         }
 
@@ -610,6 +615,12 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             case ChannelsManagementAction.ManageGroups:
                 BeginAllowedGroups();
                 break;
+            case ChannelsManagementAction.ManageGroupChats:
+                BeginGroupChats();
+                break;
+            case ChannelsManagementAction.ManageAttachments:
+                BeginAttachments();
+                break;
             case ChannelsManagementAction.DirectoryStatus:
                 Screen.Value = ChannelsConfigScreen.DirectoryStatus;
                 break;
@@ -641,10 +652,14 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         var channelCount = GetChannelIds(_activeAdapterType).Count;
         var userCount = GetAllowedUserIds(_activeAdapterType).Count;
         var groupCount = GetAllowedGroupIds(_activeAdapterType).Count;
+        var groupChatCount = _activeAdapterType == ChannelType.Teams
+            ? ChannelCsv.ParseCsv(Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedGroupChatIdsInput, trimHash: false).Count
+            : 0;
         var credentials = GetCredentialSummary(_activeAdapterType);
         var dm = GetAllowDirectMessages(_activeAdapterType) ? "enabled" : "disabled";
         var enabled = Step.IsAdapterEnabled(_activeAdapterType) ? "enabled" : "disabled";
-        var groups = _activeAdapterType == ChannelType.Teams ? $" · {Pluralize(groupCount, "group", "groups")}" : string.Empty;
+        var groups = _activeAdapterType == ChannelType.Teams
+            ? $" · {Pluralize(groupCount, "group", "groups")} · {Pluralize(groupChatCount, "Group Chat", "Group Chats")}" : string.Empty;
         return $"{enabled} · {credentials} · {Pluralize(channelCount, "channel", "channels")} · {Pluralize(userCount, "user", "users")}{groups} · DMs {dm}";
     }
 
@@ -1203,6 +1218,63 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         UpdateAdapterPickerSummary(_activeAdapterType);
         Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction("Allowed group settings saved.");
+        NotifyContentChanged();
+    }
+
+    internal void BeginGroupChats()
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        GroupChatsEnabled = teams.AllowGroupChats;
+        AllowedGroupChatsInput = teams.AllowedGroupChatIdsInput;
+        Screen.Value = ChannelsConfigScreen.GroupChats;
+        Status.Value = new ConfigStatusMessage(
+            "Group Chat names are display-only. Save canonical chat IDs.",
+            ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void ToggleGroupChats()
+    {
+        GroupChatsEnabled = !GroupChatsEnabled;
+        NotifyContentChanged();
+    }
+
+    internal void ApplyGroupChats()
+    {
+        var groupChatIds = ChannelCsv.ParseCsv(AllowedGroupChatsInput, trimHash: false);
+        if (groupChatIds.Any(id => !TeamsSessionIdentifierCodec.IsCanonicalGroupChatConversationId(id)))
+        {
+            Status.Value = new ConfigStatusMessage(
+                "Each Group Chat ID must use the canonical 19:…@thread.v2 format.",
+                ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        teams.AllowGroupChats = GroupChatsEnabled;
+        teams.AllowedGroupChatIdsInput = ChannelCsv.JoinOrNull(groupChatIds);
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        Screen.Value = ChannelsConfigScreen.AdapterMenu;
+        AutosaveCompletedAction("Microsoft Teams Group Chat settings saved.");
+        NotifyContentChanged();
+    }
+
+    internal void BeginAttachments()
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        AttachmentsEnabled = teams.AllowAttachments;
+        Screen.Value = ChannelsConfigScreen.Attachments;
+        Status.Value = new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void ToggleAttachments()
+    {
+        AttachmentsEnabled = !AttachmentsEnabled;
+        Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowAttachments = AttachmentsEnabled;
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        AutosaveCompletedAction($"Microsoft Teams attachments {(AttachmentsEnabled ? "enabled" : "disabled")} and saved.");
         NotifyContentChanged();
     }
 
@@ -2390,6 +2462,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             ChannelsConfigScreen.TeamsChannelAccess => ChannelsConfigScreen.ChannelPermissions,
             ChannelsConfigScreen.AllowedUsers => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
             ChannelsConfigScreen.AllowedGroups => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
+            ChannelsConfigScreen.GroupChats => ChannelsConfigScreen.AdapterMenu,
+            ChannelsConfigScreen.Attachments => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.DirectoryStatus => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.DirectMessages => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.RotateCredentials => ChannelsConfigScreen.AdapterMenu,
@@ -3181,6 +3255,8 @@ internal enum ChannelsConfigScreen
     TeamsChannelAccess,
     AllowedUsers,
     AllowedGroups,
+    GroupChats,
+    Attachments,
     DirectoryStatus,
     DirectMessages,
     RotateCredentials,
@@ -3193,6 +3269,8 @@ internal enum ChannelsManagementAction
     AddChannel,
     ManageUsers,
     ManageGroups,
+    ManageGroupChats,
+    ManageAttachments,
     DirectoryStatus,
     DirectMessages,
     RotateCredentials,
@@ -3441,6 +3519,9 @@ internal sealed class ChannelsConfigPersistenceMapper
             TeamIds = GetStringArray(config, "Teams.AllowedTeamIds"),
             ChannelIds = GetStringArray(config, "Teams.AllowedChannelIds"),
             AllowDirectMessages = GetBool(config, "Teams.AllowDirectMessages", defaultValue: false),
+            AllowGroupChats = GetBool(config, "Teams.AllowGroupChats", defaultValue: false),
+            AllowAttachments = GetBool(config, "Teams.AllowAttachments", defaultValue: false),
+            AllowedGroupChatIds = GetStringArray(config, "Teams.AllowedGroupChatIds"),
             MentionOnly = GetBool(config, "Teams.MentionOnly", defaultValue: true),
             AllowedUserIds = GetStringArray(config, "Teams.AllowedUserIds"),
             AllowedGroupIds = GetStringArray(config, "Teams.AllowedGroupIds"),
@@ -3497,6 +3578,9 @@ internal sealed class ChannelsConfigPersistenceMapper
         vm.TeamIdsInput = ChannelCsv.JoinOrNull(draft.TeamIds);
         vm.ChannelIdsInput = ChannelCsv.JoinOrNull(draft.ChannelIds);
         vm.AllowDirectMessages = draft.AllowDirectMessages;
+        vm.AllowGroupChats = draft.AllowGroupChats;
+        vm.AllowAttachments = draft.AllowAttachments;
+        vm.AllowedGroupChatIdsInput = ChannelCsv.JoinOrNull(draft.AllowedGroupChatIds);
         vm.MentionOnly = draft.MentionOnly;
         vm.AllowedUserIdsInput = ChannelCsv.JoinOrNull(draft.AllowedUserIds);
         vm.AllowedGroupIdsInput = ChannelCsv.JoinOrNull(draft.AllowedGroupIds);
@@ -3621,11 +3705,14 @@ internal sealed class ChannelsConfigPersistenceMapper
         fields.Add(new SectionFieldAction("Teams.Enabled", SectionFieldActionKind.Set, true));
         fields.Add(new SectionFieldAction("Teams.MentionOnly", SectionFieldActionKind.Set, vm.MentionOnly));
         fields.Add(new SectionFieldAction("Teams.AllowDirectMessages", SectionFieldActionKind.Set, vm.AllowDirectMessages));
+        fields.Add(new SectionFieldAction("Teams.AllowGroupChats", SectionFieldActionKind.Set, vm.AllowGroupChats));
+        fields.Add(new SectionFieldAction("Teams.AllowAttachments", SectionFieldActionKind.Set, vm.AllowAttachments));
         SetStringOrDelete(fields, "Teams.TenantId", vm.TenantId);
         SetStringOrDelete(fields, "Teams.ClientId", vm.ClientId);
         SetStringOrDelete(fields, "Teams.BotId", vm.BotId);
         SetArrayOrDelete(fields, "Teams.AllowedTeamIds", ChannelCsv.ParseCsv(vm.TeamIdsInput, trimHash: false));
         SetArrayOrDelete(fields, "Teams.AllowedChannelIds", ChannelCsv.ParseCsv(vm.ChannelIdsInput, trimHash: false));
+        SetArrayOrDelete(fields, "Teams.AllowedGroupChatIds", ChannelCsv.ParseCsv(vm.AllowedGroupChatIdsInput, trimHash: false));
         SetArrayOrDelete(fields, "Teams.AllowedUserIds", ChannelCsv.ParseCsv(vm.AllowedUserIdsInput, trimHash: false));
         SetArrayOrDelete(fields, "Teams.AllowedGroupIds", ChannelCsv.ParseCsv(vm.AllowedGroupIdsInput, trimHash: false));
         SetTeamsChannelAudienceOverridesOrDelete(fields, vm.ChannelAudienceOverrides);
@@ -4041,6 +4128,9 @@ internal sealed class TeamsChannelDraft : ChannelProviderDraft
     public bool HasPersistedClientSecret { get; init; }
     public bool MentionOnly { get; init; } = true;
     public IReadOnlyList<string> TeamIds { get; init; } = [];
+    public bool AllowGroupChats { get; init; }
+    public bool AllowAttachments { get; init; }
+    public IReadOnlyList<string> AllowedGroupChatIds { get; init; } = [];
     public IReadOnlyList<string> AllowedGroupIds { get; init; } = [];
     public IReadOnlyList<TeamsChannelAudienceOverride> ChannelAudienceOverrides { get; init; } = [];
     public IReadOnlyList<TeamsChannelAccessOverride> ChannelAccessOverrides { get; init; } = [];

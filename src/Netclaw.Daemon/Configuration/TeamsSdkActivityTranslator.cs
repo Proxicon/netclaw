@@ -225,9 +225,6 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         if (string.IsNullOrWhiteSpace(activity.Id))
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "missing_activity_id");
 
-        if (string.IsNullOrWhiteSpace(activity.Text))
-            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "missing_message_text");
-
         if (string.IsNullOrWhiteSpace(activity.From?.Id))
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "missing_sender_id");
 
@@ -240,6 +237,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         var scope = activity.Conversation.ConversationType switch
         {
             var type when type == ConversationType.Personal => TeamsConversationScope.Personal,
+            var type when type == ConversationType.GroupChat => TeamsConversationScope.GroupChat,
             var type when type == ConversationType.Channel => TeamsConversationScope.Channel,
             _ => (TeamsConversationScope?)null
         };
@@ -254,20 +252,33 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "invalid_channel_root_identity");
         }
 
-        var attachmentFailure = RejectUnsupportedAttachments(activity.Attachments, activity.ChannelData is not null);
+        var attachmentFailure = TranslateInboundAttachments(
+            activity.Attachments,
+            activity.ChannelData is not null,
+            scope.Value,
+            out var inboundAttachments);
         if (attachmentFailure is not null)
             return attachmentFailure;
 
+        if (string.IsNullOrWhiteSpace(activity.Text) && inboundAttachments.IsEmpty)
+        {
+            return TeamsTranslationResult.Rejected(
+                TeamsTranslationDisposition.RejectedMalformed,
+                TeamsIngressActivityKind.Message,
+                "missing_message_text");
+        }
+
         var trust = CreateTrust(activity, authenticatedTenantId, scope.Value);
         var mentions = TranslateMentions(activity.Entities);
-        var text = scope == TeamsConversationScope.Channel
+        var messageText = activity.Text ?? string.Empty;
+        var text = scope is TeamsConversationScope.Channel or TeamsConversationScope.GroupChat
             ? TeamsTenantEvidenceMappings.RemoveQualifiedBotMentions(
-                activity.Text,
+                messageText,
                 mentions.Select(mention => new TeamsMentionEvidence(mention.Type, mention.MentionedId, mention.Text)),
                 activity.Recipient?.Id ?? string.Empty,
                 options.BotId ?? string.Empty)
-            : activity.Text;
-        var mentioned = scope == TeamsConversationScope.Channel
+            : messageText;
+        var mentioned = scope is TeamsConversationScope.Channel or TeamsConversationScope.GroupChat
             && mentions.Any(mention => IsQualifiedBotMention(mention, activity.Recipient?.Id, options.BotId));
 
         return TeamsTranslationResult.Accepted(new TeamsInboundActivity(
@@ -275,11 +286,14 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             text,
             new TeamsReplyMetadata(GetReplyToActivityId(activity), rootActivityId, activity.ServiceUrl?.ToString()),
             mentioned,
+            attachments: inboundAttachments,
             kind: TeamsIngressActivityKind.Message,
             teamId: activity.ChannelData?.Team?.Id,
             channelId: activity.ChannelData?.Channel?.Id,
             mentions: mentions),
-            activity.Attachments is { Count: > 0 }
+            inboundAttachments.Length > 0
+                ? "teams_attachment_received"
+                : activity.Attachments is { Count: > 0 }
                 ? "teams_text_rendering_wrapper_ignored"
                 : "plain_text_accepted");
     }
@@ -367,6 +381,11 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             scope = TeamsConversationScope.Channel;
             return true;
         }
+        if (activity.Conversation.ConversationType == ConversationType.GroupChat)
+        {
+            scope = TeamsConversationScope.GroupChat;
+            return true;
+        }
         if (activity.Conversation.ConversationType == ConversationType.Personal)
         {
             scope = TeamsConversationScope.Personal;
@@ -377,16 +396,23 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return false;
     }
 
-    private static TeamsTranslationResult? RejectUnsupportedAttachments(IList<TeamsAttachment>? attachments, bool hasChannelData)
+    private static TeamsTranslationResult? TranslateInboundAttachments(
+        IList<TeamsAttachment>? attachments,
+        bool hasChannelData,
+        TeamsConversationScope scope,
+        out ImmutableArray<TeamsAttachmentMetadata> inboundAttachments)
     {
+        inboundAttachments = [];
         if (attachments is null || attachments.Count == 0)
             return null;
 
+        var builder = ImmutableArray.CreateBuilder<TeamsAttachmentMetadata>();
         var reasonCode = "unsupported_attachment_shape";
         var hasUnsupportedAttachment = false;
         var hasMalformedAttachment = false;
-        foreach (var attachment in attachments)
+        for (var index = 0; index < attachments.Count; index++)
         {
+            var attachment = attachments[index];
             if (attachment is null)
             {
                 hasUnsupportedAttachment = true;
@@ -400,13 +426,43 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             if (classification.Classification == TeamsAttachmentClassification.InlineTextRendering)
                 continue;
 
+            if (TryGetSupportedAttachmentKind(evidence.ContentType, evidence.HasContentUrl, scope, out var kind))
+            {
+                builder.Add(new TeamsAttachmentMetadata(
+                    GetBoundedAttachmentMetadata(attachment.Name, 255) ?? $"attachment-{index + 1}",
+                    evidence.ContentType,
+                    declaredSizeBytes: null)
+                {
+                    Kind = kind,
+                    SourceIndex = index
+                });
+                continue;
+            }
+
+            if (classification.Classification == TeamsAttachmentClassification.GraphBackedUnsupported
+                && IsTeamsFileDownloadInfo(evidence.ContentType))
+            {
+                builder.Add(new TeamsAttachmentMetadata(
+                    GetBoundedAttachmentMetadata(attachment.Name, 255) ?? $"attachment-{index + 1}",
+                    evidence.ContentType,
+                    declaredSizeBytes: null)
+                {
+                    Kind = TeamsInboundAttachmentKind.Unknown,
+                    SourceIndex = index
+                });
+                continue;
+            }
+
             hasUnsupportedAttachment = true;
             if (classification.Classification == TeamsAttachmentClassification.GraphBackedUnsupported)
                 reasonCode = classification.ReasonCode!;
         }
 
         if (!hasUnsupportedAttachment)
+        {
+            inboundAttachments = builder.ToImmutable();
             return null;
+        }
 
         if (reasonCode == "unsupported_attachment_shape" && hasMalformedAttachment)
             reasonCode = "attachment_malformed_rejected";
@@ -416,6 +472,38 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             TeamsIngressActivityKind.Message,
             reasonCode);
     }
+
+    private static bool TryGetSupportedAttachmentKind(
+        string? contentType,
+        bool hasContentUrl,
+        TeamsConversationScope scope,
+        out TeamsInboundAttachmentKind kind)
+    {
+        kind = TeamsInboundAttachmentKind.Unknown;
+        if (!hasContentUrl)
+            return false;
+
+        if (IsInlineImageContentType(contentType))
+        {
+            kind = TeamsInboundAttachmentKind.InlineImage;
+            return true;
+        }
+
+        if (scope == TeamsConversationScope.Personal && IsTeamsFileDownloadInfo(contentType))
+        {
+            kind = TeamsInboundAttachmentKind.PersonalFile;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsInlineImageContentType(string? value)
+        => value?.Split(';', 2)[0].Trim().ToLowerInvariant() is "image/png" or "image/jpeg" or "image/gif" or "image/webp";
+
+    private static bool IsTeamsFileDownloadInfo(string? value)
+        => string.Equals(value, "application/vnd.microsoft.teams.file.download.info", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(value, "application/vnd.microsoft.teams.file.download.info+json", StringComparison.OrdinalIgnoreCase);
 
     private static string? GetBoundedAttachmentMetadata(string? value, int maximumLength)
         => value is { Length: > 0 } && value.Length <= maximumLength ? value : null;
@@ -440,6 +528,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
     private TeamsConversationScope? GetScope(TeamsActivity activity) => activity.Conversation?.ConversationType switch
     {
         var type when type == ConversationType.Channel => TeamsConversationScope.Channel,
+        var type when type == ConversationType.GroupChat => TeamsConversationScope.GroupChat,
         var type when type == ConversationType.Personal => TeamsConversationScope.Personal,
         _ => null
     };
@@ -459,6 +548,7 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
     private static string DescribeScope(TeamsConversationScope? scope) => scope switch
     {
         TeamsConversationScope.Channel => "channel",
+        TeamsConversationScope.GroupChat => "groupchat",
         TeamsConversationScope.Personal => "personal",
         _ => "unsupported"
     };

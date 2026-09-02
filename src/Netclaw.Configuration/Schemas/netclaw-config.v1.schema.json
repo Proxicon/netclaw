@@ -111,6 +111,8 @@
           "default": "ClientSecret"
         },
         "AllowDirectMessages": { "type": "boolean", "default": false },
+        "AllowGroupChats": { "type": "boolean", "default": false },
+        "AllowAttachments": { "type": "boolean", "default": false },
         "MentionOnly": { "type": "boolean", "default": true },
         "AllowedTeamIds": {
           "type": "array",
@@ -121,6 +123,16 @@
           "type": "array",
           "default": [],
           "items": { "type": "string" }
+        },
+        "AllowedGroupChatIds": {
+          "type": "array",
+          "description": "Canonical Teams group chat IDs. Names are not authorization values.",
+          "default": [],
+          "items": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^19:[^\\s]+@thread\\.v2$"
+          }
         },
         "AllowedUserIds": {
           "type": "array",

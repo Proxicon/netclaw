@@ -60,6 +60,66 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public void Group_chat_editor_rejects_a_display_name_in_place_of_a_canonical_id()
+    {
+        using var vm = CreateViewModel();
+
+        vm.BeginGroupChats();
+        vm.AllowedGroupChatsInput = "Operations chat";
+        vm.ApplyGroupChats();
+
+        Assert.Equal(ChannelsConfigScreen.GroupChats, vm.Screen.Value);
+        Assert.Equal("Each Group Chat ID must use the canonical 19:…@thread.v2 format.", vm.Status.Value.Text);
+        Assert.Null(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedGroupChatIdsInput);
+    }
+
+    [Fact]
+    public async Task Teams_attachments_toggle_autosaves_and_reloads()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+
+        using (var initial = CreateViewModel())
+        {
+            initial.OpenAdapterManagement(ChannelType.Teams);
+            initial.BeginAttachments();
+            Assert.False(initial.AttachmentsEnabled);
+
+            initial.ToggleAttachments();
+            await initial.PendingConfigWrite;
+        }
+
+        using (var enabled = CreateViewModel())
+        {
+            enabled.OpenAdapterManagement(ChannelType.Teams);
+            enabled.BeginAttachments();
+            Assert.True(enabled.AttachmentsEnabled);
+
+            enabled.ToggleAttachments();
+            await enabled.PendingConfigWrite;
+        }
+
+        using var disabled = CreateViewModel();
+        disabled.OpenAdapterManagement(ChannelType.Teams);
+        disabled.BeginAttachments();
+        Assert.False(disabled.AttachmentsEnabled);
+        disabled.GoBack();
+        Assert.Equal(ChannelsConfigScreen.AdapterMenu, disabled.Screen.Value);
+    }
+
+    [Fact]
     public async Task Teams_draft_persists_canonical_principals_without_writing_client_secret_to_normal_config()
     {
         File.WriteAllText(_paths.NetclawConfigPath,
@@ -73,6 +133,8 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
                 "BotId": "bot-a",
                 "AllowedTeamIds": ["team-a"],
                 "AllowedChannelIds": ["channel-a"],
+                "AllowGroupChats": true,
+                "AllowedGroupChatIds": ["19:group-a@thread.v2"],
               "AllowedUserIds": ["user-a"],
               "AllowedGroupIds": ["group-a"],
               "ChannelAccessOverrides": [
@@ -97,12 +159,16 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         Assert.True(vm.Step.IsAdapterEnabled(ChannelType.Teams));
         Assert.True(teams.HasPersistedClientSecret);
         Assert.Equal("group-a", teams.AllowedGroupIdsInput);
+        Assert.True(teams.AllowGroupChats);
+        Assert.Equal("19:group-a@thread.v2", teams.AllowedGroupChatIdsInput);
         var channelAccess = Assert.Single(teams.ChannelAccessOverrides);
         Assert.Equal("team-a", channelAccess.TeamId);
         Assert.Equal("channel-a", channelAccess.ChannelId);
 
         teams.AllowedGroupIdsInput = "group-b";
         teams.AllowedUserIdsInput = "user-b";
+        teams.AllowGroupChats = false;
+        teams.AllowedGroupChatIdsInput = "19:group-b@thread.v2";
         var saved = await vm.SaveAsync(TestContext.Current.CancellationToken);
 
         Assert.True(saved);
@@ -113,6 +179,10 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         Assert.Equal(["group-b"], ToStringArray(groups));
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var users));
         Assert.Equal(["user-b"], ToStringArray(users));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowGroupChats", out var allowGroupChats));
+        Assert.False(Assert.IsType<bool>(allowGroupChats));
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupChatIds", out var groupChats));
+        Assert.Equal(["19:group-b@thread.v2"], ToStringArray(groupChats));
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.ChannelAccessOverrides", out var overrides));
         var roundTripped = Assert.IsType<object[]>(overrides);
         var savedOverride = Assert.IsType<JsonElement>(Assert.Single(roundTripped));

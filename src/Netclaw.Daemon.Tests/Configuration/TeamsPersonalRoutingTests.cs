@@ -36,12 +36,14 @@ using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Serialization;
 using Netclaw.Actors.Sessions;
+using Netclaw.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Channels.Teams.Serialization;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
 using Netclaw.Daemon.Configuration;
 using Netclaw.Security;
+using Netclaw.Tests.Utilities;
 using Xunit;
 using static Netclaw.Actors.Reminders.ReminderProtocol;
 using static Netclaw.Actors.Sessions.SessionProtocol;
@@ -425,7 +427,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     [Fact]
     public async Task Allowed_personal_activity_dispatches_once_with_final_personal_trust_context()
     {
-        var pipeline = CreatePipeline(TestActor);
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
         var dependencies = CreateDependencies(pipeline);
         var sessionId = CreateSessionId("tenant-a", "conversation-a");
         var actor = Sys.ActorOf(TeamsSessionBindingActor.CreateProps(sessionId, dependencies));
@@ -713,6 +715,283 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var unknownDelete = CreateChannelActivity("unknown", "conversation-a;messageid=root-a", TeamsIngressActivityKind.MessageDelete);
         Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(update, TestContext.Current.CancellationToken));
         Assert.Equal(TeamsIngressSinkResult.Ignored, await sink.RouteAsync(unknownDelete, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Group_chat_routes_one_flat_session_with_each_authenticated_sender()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            AllowGroupChats = true,
+            MentionOnly = true,
+            AllowedGroupChatIds = ["19:group-chat@thread.v2"],
+            AllowedUserIds = ["user-a", "user-b"]
+        };
+        using var provider = CreateConversationServiceProvider(pipeline);
+        var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
+
+        var firstActivity = CreateGroupChatActivity("group-first", senderId: "user-a");
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(firstActivity, TestContext.Current.CancellationToken));
+        var first = ReceiveGroupChatMessage();
+
+        var secondActivity = CreateGroupChatActivity("group-second", senderId: "user-b");
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(secondActivity, TestContext.Current.CancellationToken));
+        var second = ReceiveGroupChatMessage();
+
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateGroupChat(
+            "tenant-a",
+            "19:group-chat@thread.v2",
+            out var expectedSessionId,
+            out _));
+        Assert.Equal(expectedSessionId, first.SessionId);
+        Assert.Equal(expectedSessionId, second.SessionId);
+        Assert.Equal(TrustAudience.Team, first.Source!.Audience);
+        Assert.Equal(new SenderId("user-a"), first.Source.SenderId);
+        Assert.Equal(new SenderId("user-b"), second.Source!.SenderId);
+
+        Assert.Equal(
+            TeamsIngressSinkResult.Ignored,
+            await sink.RouteAsync(
+                CreateGroupChatActivity("group-unmentioned", isMentioned: false),
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Group_chat_approval_recovers_after_sink_recreation_and_remains_single_use()
+    {
+        var pipeline = new ApprovalRecordingPipeline(CreatePipeline(TestActor));
+        var replyClient = new RecordingTeamsReplyClient();
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            AllowGroupChats = true,
+            MentionOnly = true,
+            AllowedGroupChatIds = ["19:group-chat@thread.v2"],
+            AllowedUserIds = ["user-a", "user-b"]
+        };
+        using var provider = CreateConversationServiceProvider(pipeline, replyClient: replyClient);
+        var firstSink = new TeamsActorConversationIngressSink(Sys, options, provider);
+        var activity = CreateGroupChatActivity("group-approval-input", senderId: "user-a");
+
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await firstSink.RouteAsync(activity, TestContext.Current.CancellationToken));
+        var subscriber = ReceiveGroupChatOutputSubscriber();
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateGroupChat(
+            "tenant-a",
+            "19:group-chat@thread.v2",
+            out var sessionId,
+            out _));
+        subscriber.Tell(CreateApprovalRequest(sessionId, "group-approval-call", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        var approve = Assert.Single(
+            Assert.IsType<TeamsApprovalCard>(replyClient.Messages[0].ApprovalCard).Actions,
+            action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        var conversation = await Sys.ActorSelection($"/user/{TeamsActorNames.Conversation(sessionId)}")
+            .ResolveOne(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        Watch(conversation);
+        conversation.Tell(PoisonPill.Instance);
+        ExpectTerminated(conversation, cancellationToken: TestContext.Current.CancellationToken);
+
+        var recoveredSink = new TeamsActorConversationIngressSink(Sys, options, provider);
+        var callback = CreateGroupChatApprovalAction(
+            "user-a",
+            approve.CorrelationId,
+            approve.Nonce,
+            approve.Action);
+        var accepted = await recoveredSink.RouteApprovalAsync(callback, TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Accepted, accepted.Disposition);
+        await AwaitAssertAsync(() => Assert.Single(pipeline.Feedback), cancellationToken: TestContext.Current.CancellationToken);
+        var feedback = Assert.IsType<ToolInteractionResponse>(pipeline.Feedback[0]);
+        Assert.Equal(ApprovalOptionKeys.ApproveOnceKey, feedback.SelectedKey);
+        Assert.Equal(new SenderId("user-a"), feedback.SenderId);
+
+        var replay = await recoveredSink.RouteApprovalAsync(callback, TestContext.Current.CancellationToken);
+        Assert.Equal(TeamsApprovalActionDisposition.AlreadyProcessed, replay.Disposition);
+        Assert.Single(pipeline.Feedback);
+
+        var wrongRequester = await recoveredSink.RouteApprovalAsync(
+            CreateGroupChatApprovalAction("user-b", approve.CorrelationId, approve.Nonce, approve.Action),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(TeamsApprovalActionDisposition.Rejected, wrongRequester.Disposition);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Group_chat_approval_rejects_a_sender_outside_the_global_principal_rules()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            AllowGroupChats = true,
+            AllowedGroupChatIds = ["19:group-chat@thread.v2"],
+            AllowedUserIds = ["user-a"]
+        };
+        using var provider = CreateConversationServiceProvider(pipeline);
+        var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
+
+        var result = await sink.RouteApprovalAsync(
+            CreateGroupChatApprovalAction("user-b", "group-denied", "group-denied-nonce", ApprovalOptionKeys.Deny),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsApprovalActionDisposition.Rejected, result.Disposition);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Attachment_only_rejection_has_no_empty_model_turn_and_stays_deduplicated()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "attachment-conversation");
+        var actor = CreateBindingActor(
+            sessionId,
+            CreateDependencies(CreatePipeline(TestActor), replyClient: replyClient),
+            "teams-attachment-only-rejected");
+        var activity = CreateAttachmentActivity(
+            "attachment-only-rejected",
+            string.Empty,
+            [CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+
+        var first = await RouteAsync(actor, activity);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, first.Disposition);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("Attachments are disabled for Microsoft Teams.", replyClient.Messages[0].Text);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+
+        var duplicate = await RouteAsync(actor, activity);
+        Assert.Equal(TeamsBindingRouteDisposition.Duplicate, duplicate.Disposition);
+        Assert.Single(replyClient.Messages);
+    }
+
+    [Fact]
+    public async Task Text_with_a_rejected_attachment_still_creates_one_model_turn()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "attachment-conversation");
+        var actor = CreateBindingActor(
+            sessionId,
+            CreateDependencies(CreatePipeline(TestActor), replyClient: replyClient),
+            "teams-attachment-text-rejected");
+        var activity = CreateAttachmentActivity(
+            "attachment-text-rejected",
+            "safe text",
+            [CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+
+        var result = await RouteAsync(actor, activity);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, result.Disposition);
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Equal("safe text", dispatched.Content);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("Attachments are disabled for Microsoft Teams.", replyClient.Messages[0].Text);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Accepted_attachment_only_creates_one_model_turn()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var sessionId = CreateSessionId("tenant-a", "attachment-conversation");
+        var actor = CreateBindingActor(
+            sessionId,
+            CreateAttachmentDependencies(CreatePipeline(TestActor), paths),
+            "teams-attachment-only-accepted");
+        var activity = CreateAttachmentActivity(
+            "attachment-only-accepted",
+            string.Empty,
+            [CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+
+        var result = await RouteAsync(actor, activity);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, result.Disposition);
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+        Assert.Contains("image.png", dispatched.Content, StringComparison.Ordinal);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Attachment_pipeline_failure_after_async_ingress_releases_the_activity_reservation()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var pipeline = new FailThenDelegatePipeline(CreatePipeline(TestActor));
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateAttachmentDependencies(pipeline, paths),
+            "teams-attachment-pipeline-failure");
+        var activity = CreateAttachmentActivity(
+            "attachment-pipeline-failure",
+            string.Empty,
+            [CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Failed, (await RouteAsync(actor, activity)).Disposition);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        ReceiveDispatchedMessage();
+    }
+
+    [Fact]
+    public async Task Attachment_pipeline_cancellation_after_async_ingress_releases_the_activity_reservation()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        using var cancellation = new CancellationTokenSource();
+        var pipeline = new CancelThenDelegatePipeline(CreatePipeline(TestActor), cancellation);
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateAttachmentDependencies(pipeline, paths),
+            "teams-attachment-pipeline-cancelled");
+        var activity = CreateAttachmentActivity(
+            "attachment-pipeline-cancelled",
+            string.Empty,
+            [CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+
+        var cancelled = await actor.Ask<TeamsBindingRouteResult>(
+            new TeamsBindingIngress(activity, cancellation.Token),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Cancelled, cancelled.Disposition);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        ReceiveDispatchedMessage();
+    }
+
+    [Fact]
+    public async Task Safe_text_and_rejected_attachment_create_one_safe_model_turn_and_one_rejection()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var replyClient = new RecordingTeamsReplyClient();
+        var sessionId = CreateSessionId("tenant-a", "attachment-conversation");
+        var actor = CreateBindingActor(
+            sessionId,
+            CreateAttachmentDependencies(CreatePipeline(TestActor), paths, replyClient),
+            "teams-attachment-safe-and-rejected");
+        var activity = CreateAttachmentActivity(
+            "attachment-safe-and-rejected",
+            "safe text",
+            [
+                CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, 0),
+                CreateInboundAttachment("unsupported.bin", TeamsInboundAttachmentKind.Unknown, 1)
+            ]);
+
+        var result = await RouteAsync(actor, activity);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, result.Disposition);
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Contains("safe text", dispatched.Content, StringComparison.Ordinal);
+        Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("not supported", replyClient.Messages[0].Text, StringComparison.Ordinal);
+
+        var duplicate = await RouteAsync(actor, activity);
+        Assert.Equal(TeamsBindingRouteDisposition.Duplicate, duplicate.Disposition);
+        Assert.Single(replyClient.Messages);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -3585,13 +3864,19 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         bool enabled = false,
         ITeamsReplyClient? replyClient = null,
         IPromptInjectionDetector? detector = null,
-        Func<string, string?>? cachedOperatorLabel = null) => new(
+        Func<string, string?>? cachedOperatorLabel = null,
+        bool allowAttachments = false,
+        ITeamsAttachmentDownloader? attachmentDownloader = null,
+        IContentScanner? contentScanner = null,
+        ToolAudienceProfiles? audienceProfiles = null,
+        NetclawPaths? paths = null) => new(
         new TeamsChannelOptions
         {
             Enabled = enabled,
             TenantId = tenantId,
             AllowDirectMessages = allowDirectMessages,
-            AllowedUserIds = allowedUserIds ?? ["user-a"]
+            AllowedUserIds = allowedUserIds ?? ["user-a"],
+            AllowAttachments = allowAttachments
         },
         pipeline,
         replyClient ?? new TestTeamsReplyClient(),
@@ -3599,20 +3884,40 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         TimeProvider.System)
     {
         PromptInjectionDetector = detector ?? SafeTeamsPromptInjectionDetector.Instance,
-        CachedOperatorLabel = cachedOperatorLabel
+        CachedOperatorLabel = cachedOperatorLabel,
+        AttachmentDownloader = attachmentDownloader,
+        ContentScanner = contentScanner,
+        AudienceProfiles = audienceProfiles,
+        Paths = paths
     };
+
+    private static TeamsConversationDependencies CreateAttachmentDependencies(
+        ISessionPipeline pipeline,
+        NetclawPaths paths,
+        ITeamsReplyClient? replyClient = null) => CreateDependencies(
+        pipeline,
+        replyClient: replyClient,
+        allowAttachments: true,
+        attachmentDownloader: new TestTeamsAttachmentDownloader(),
+        contentScanner: new NullContentScanner(),
+        audienceProfiles: ToolAudienceProfileDefaults.CreateProfiles(),
+        paths: paths);
 
     private static ServiceProvider CreateConversationServiceProvider(
         ISessionPipeline pipeline,
-        bool includeDetector = true)
+        bool includeDetector = true,
+        ITeamsReplyClient? replyClient = null,
+        TeamsPrincipalAuthorizer? principalAuthorizer = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton(pipeline);
-        services.AddSingleton<ITeamsReplyClient, TestTeamsReplyClient>();
+        services.AddSingleton<ITeamsReplyClient>(replyClient ?? new TestTeamsReplyClient());
         services.AddSingleton<TeamsOutputRenderer>();
         services.AddSingleton<TimeProvider>(TimeProvider.System);
         if (includeDetector)
             services.AddSingleton<IPromptInjectionDetector>(SafeTeamsPromptInjectionDetector.Instance);
+        if (principalAuthorizer is not null)
+            services.AddSingleton(principalAuthorizer);
 
         return services.BuildServiceProvider();
     }
@@ -3624,6 +3929,21 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
 
         public Task<TeamsDeliveryResult> SendTypingAsync(TeamsOutboundDestination destination, CancellationToken cancellationToken = default) =>
             Task.FromResult(new TeamsDeliveryResult(TeamsDeliveryStatus.Delivered));
+    }
+
+    private sealed class TestTeamsAttachmentDownloader : ITeamsAttachmentDownloader
+    {
+        public async Task<AttachmentDownloadResult> DownloadAsync(
+            TeamsInboundActivity activity,
+            TeamsAttachmentMetadata attachment,
+            string stagingDirectory,
+            long maximumBytes,
+            CancellationToken cancellationToken)
+        {
+            var path = Path.Combine(stagingDirectory, ".teams-test-download.tmp");
+            await File.WriteAllBytesAsync(path, [1, 2, 3, 4], cancellationToken);
+            return new AttachmentDownloadResult(path, 4);
+        }
     }
 
     private sealed class SafeTeamsPromptInjectionDetector : IPromptInjectionDetector
@@ -3741,6 +4061,25 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         return sessionId;
     }
 
+    private static TeamsInboundActivity CreateGroupChatActivity(
+        string activityId,
+        bool isMentioned = true,
+        string senderId = "user-a") => new(
+        new TeamsIngressTrustContext(
+            TrustAudience.Public,
+            PrincipalClassification.UntrustedExternal,
+            TrustBoundary.Public,
+            new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+            senderId,
+            "tenant-a",
+            "19:group-chat@thread.v2",
+            TeamsConversationScope.GroupChat,
+            activityId,
+            TimeProvider.System.GetUtcNow()),
+        "hello",
+        new TeamsReplyMetadata(null, null, "https://service.invalid/"),
+        isMentioned: isMentioned);
+
     private static TeamsInboundActivity CreateActivity(
         string activityId,
         string tenantId,
@@ -3759,6 +4098,34 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             TimeProvider.System.GetUtcNow()),
         "hello",
         new TeamsReplyMetadata(null, null, serviceUrl));
+
+    private static TeamsInboundActivity CreateAttachmentActivity(
+        string activityId,
+        string text,
+        ImmutableArray<TeamsAttachmentMetadata> attachments) => new(
+        new TeamsIngressTrustContext(
+            TrustAudience.Personal,
+            PrincipalClassification.TrustedInternal,
+            TrustBoundary.Personal,
+            new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+            "user-a",
+            "tenant-a",
+            "attachment-conversation",
+            TeamsConversationScope.Personal,
+            activityId,
+            TimeProvider.System.GetUtcNow()),
+        text,
+        new TeamsReplyMetadata(null, null, "https://service.invalid/"),
+        attachments: attachments);
+
+    private static TeamsAttachmentMetadata CreateInboundAttachment(
+        string name,
+        TeamsInboundAttachmentKind kind,
+        int sourceIndex) => new(name, "image/png", 4)
+    {
+        Kind = kind,
+        SourceIndex = sourceIndex
+    };
 
     private static TeamsInboundActivity CreateChannelActivity(
         string activityId,
@@ -3813,6 +4180,31 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         promptActivityId,
         "https://service.invalid/",
         operatorDisplayName);
+
+    private static TeamsApprovalAction CreateGroupChatApprovalAction(
+        string senderId,
+        string correlationId,
+        string nonce,
+        string action) => new(
+        new TeamsIngressTrustContext(
+            TrustAudience.Team,
+            PrincipalClassification.UntrustedExternal,
+            TrustBoundary.Team,
+            new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+            senderId,
+            "tenant-a",
+            "19:group-chat@thread.v2",
+            TeamsConversationScope.GroupChat,
+            "group-invoke-approval",
+            TimeProvider.System.GetUtcNow()),
+        correlationId,
+        nonce,
+        action,
+        null,
+        null,
+        null,
+        "synthetic-activity",
+        "https://service.invalid/");
 
     private static ToolInteractionRequest CreateApprovalRequest(
         SessionId sessionId,
@@ -3877,6 +4269,30 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
         ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
         return ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    private SendUserMessage ReceiveGroupChatMessage()
+    {
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var message = ExpectMsg<object>(cancellationToken: TestContext.Current.CancellationToken);
+            if (message is SendUserMessage dispatched)
+            {
+                return dispatched;
+            }
+
+            Assert.IsType<JoinSession>(message);
+        }
+
+        throw new Xunit.Sdk.XunitException("Expected a group chat message after session initialization.");
+    }
+
+    private IActorRef ReceiveGroupChatOutputSubscriber()
+    {
+        var subscriber = ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken).Subscriber;
+        ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        return subscriber;
     }
 
     private IActorRef ReceiveOutputSubscriber()

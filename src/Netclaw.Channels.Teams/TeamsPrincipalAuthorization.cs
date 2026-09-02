@@ -183,6 +183,15 @@ public static class TeamsActorAclEvaluator
             return ResolveStampedAcl(activity, structural);
         }
 
+        if (activity.Trust.Scope == TeamsConversationScope.GroupChat)
+        {
+            var structural = TeamsGroupChatAclPolicy.EvaluateStructuralAccess(activity, options);
+            if (!structural.IsAllowed)
+                return null;
+
+            return ResolveStampedAcl(activity, structural);
+        }
+
         var channel = TeamsChannelAclPolicy.EvaluateStructuralAccess(activity, options);
         if (channel.Disposition != TeamsChannelPolicyDisposition.Allowed || channel.Acl is null)
             return null;
@@ -198,6 +207,9 @@ public static class TeamsActorAclEvaluator
 
     private static bool RequiresStampedDecision(TeamsInboundActivity activity, TeamsChannelOptions options)
     {
+        if (activity.Trust.Scope == TeamsConversationScope.GroupChat)
+            return true;
+
         if (options.AllowedGroupIds.Length > 0)
             return true;
 

@@ -31,6 +31,9 @@ public sealed class TeamsStepViewModel : IWizardStepViewModel, IChannelAdapterVi
     public string? TeamIdsInput { get; set; }
     public string? ChannelIdsInput { get; set; }
     public bool AllowDirectMessages { get; set; }
+    public bool AllowGroupChats { get; set; }
+    public bool AllowAttachments { get; set; }
+    public string? AllowedGroupChatIdsInput { get; set; }
     public string? AllowedUserIdsInput { get; set; }
     public string? AllowedGroupIdsInput { get; set; }
     public List<TeamsChannelAudienceOverride> ChannelAudienceOverrides { get; set; } = [];
@@ -124,9 +127,12 @@ public sealed class TeamsStepViewModel : IWizardStepViewModel, IChannelAdapterVi
             ClientId = Normalize(ClientId),
             BotId = Normalize(BotId),
             AllowDirectMessages = AllowDirectMessages,
+            AllowGroupChats = AllowGroupChats,
+            AllowAttachments = AllowAttachments,
             MentionOnly = MentionOnly,
             AllowedTeamIds = ToList(TeamIdsInput),
             AllowedChannelIds = ToList(ChannelIdsInput),
+            AllowedGroupChatIds = ToList(AllowedGroupChatIdsInput),
             AllowedUserIds = ToList(AllowedUserIdsInput),
             AllowedGroupIds = ToList(AllowedGroupIdsInput),
             ChannelAudienceOverrides = ChannelAudienceOverrides.Count == 0 ? null : [.. ChannelAudienceOverrides],
@@ -163,6 +169,9 @@ public sealed class TeamsStepViewModel : IWizardStepViewModel, IChannelAdapterVi
         TeamIdsInput = null;
         ChannelIdsInput = null;
         AllowDirectMessages = false;
+        AllowGroupChats = false;
+        AllowAttachments = false;
+        AllowedGroupChatIdsInput = null;
         AllowedUserIdsInput = null;
         AllowedGroupIdsInput = null;
         ChannelAudienceOverrides = [];
