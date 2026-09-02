@@ -4,7 +4,13 @@
 ## Tool Discovery
 
 
-MCP tools are not loaded by default. Use `search_tools` to discover them:
+Deferred tools are not loaded by default. Load a known exact name directly:
+
+```
+load_tool(name: "notion/search")
+```
+
+Use `search_tools` when the exact name is unknown:
 
 ```
 search_tools(query: "servers")                  # list all MCP servers
@@ -12,7 +18,8 @@ search_tools(query: "all", server: "notion")    # browse a server's tools
 search_tools(query: "email")                    # keyword search
 ```
 
-After discovery, matched tools become callable for the session.
+After discovery, call `load_tool` with the selected exact name. Loading exposes
+the schema for the current actor. Normal authorization still runs at dispatch.
 
 ### MCP server state and concurrent callers
 
@@ -43,8 +50,9 @@ Other categories (`web`, `file`, `shell`, `scheduling`) depend on ACL
 config. If a tool is missing, it may not be granted for this session.
 
 Built-in tool grants follow the audience and are monotonic (Public ⊆ Team ⊆
-Personal). **Public** sessions get read-only file tools only — `file_read`,
-`file_list`, `attach_file` — and no outbound web access. **Team** adds
+Personal). **Public parent sessions** get read-only file tools only — `file_read`,
+`file_list`, and file delivery — with no outbound web access. Subagents return
+authorized file paths to their parent instead of delivering files. **Team** adds
 `file_write`, `file_edit`, `web_search`, `web_fetch`, the scheduling tools,
 `skill_manage`, and `set_working_directory`. **Personal** gets everything.
 Team excludes `shell_execute` by default. An interactive Team session can use it

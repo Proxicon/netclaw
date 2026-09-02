@@ -3,7 +3,7 @@ name: netclaw-operations
 description: "REQUIRED when the user asks about scheduling, reminders, cron jobs, timers, background jobs, diagnostics, troubleshooting, MCP tools, daemon health, identity updates, or Netclaw capabilities and self-maintenance."
 metadata:
   author: netclaw
-  version: "2.63.0"
+  version: "2.65.3"
 ---
 
 # Netclaw Operations
@@ -42,9 +42,8 @@ a reference file — load the one matching the user's intent with
 When available, use `file_read` for a known local file read.
 When available, use `file_list` for a known local directory listing.
 Use `file_search` for bounded recursive name or literal text search.
-Use `file_read_many` when the paths to read are already known.
-Use `json_read` for bounded JSON pointer selection.
 Use `file_read` for image metadata.
+Issue independent `file_read` calls in parallel when several paths are known.
 Use `tool_output_read` to continue a spilled result by call id.
 When available, use `file_write` or `file_edit` for a known local file change.
 When available, use `web_search` for external discovery and `web_fetch` for a known external page.
@@ -53,7 +52,8 @@ Do not substitute shell commands when a listed first-party tool satisfies the ta
 Do not delegate a known file operation that an available file tool can complete.
 After a successful file tool result, do not use shell only to verify it unless the user requests shell behavior.
 For disposable text, use `file_write` then `file_read`; do not attempt a shell redirect first.
-Use `search_tools`, then `load_tool`, before reporting that a specialty tool is unavailable.
+Use `load_tool` directly for a known exact tool name.
+Use `search_tools` when the capability is known but its exact tool name is not.
 
 Keep shell approval friction bounded:
 
@@ -159,13 +159,14 @@ view inline plus a pointer to the full output — not the whole thing:
   `check_background_job` returns a tail, and you can `file_read`/`grep` the log for the rest.
   Netclaw deletes a terminal job's definition and logs 24 hours after completion.
 
-Reading a targeted range or grepping is always cheaper than re-running a command or
-re-reading a whole file. Secret-bearing values are redacted from all tool output.
+Use bounded continuation before re-running a command or re-reading a whole file.
+Secret-bearing values are redacted from all tool output.
 
 ## Tool Discovery
 
-Only a core toolset is always loaded. Use `search_tools(query)` to find additional
-or MCP tools by capability before concluding a tool doesn't exist. Full guidance:
+Only a core toolset is always loaded. Use `load_tool(name)` when an exact deferred
+tool name is known. Use `search_tools(query)` to find tools by capability when the
+name is unknown. Full guidance:
 `skill_read_resource('netclaw-operations', 'references/tools.md')`.
 
 MCP servers can also supply workflow skills. These skills use names such as
@@ -489,7 +490,9 @@ Add or switch model providers (including OAuth login) and configure search backe
 ## Diagnostics, Kill Switches & Self-Maintenance
 
 When something is broken, start with `netclaw status`, then `netclaw doctor`. Feature
-kill switches and self-update/health are covered in the reference. Full guidance:
+kill switches and self-update/health are covered in the reference. Memory embeddings
+can be backfilled with `netclaw memory backfill-embeddings [--force]`; doctor checks
+memory embedding availability. Full guidance:
 `skill_read_resource('netclaw-operations', 'references/diagnostics.md')`.
 
 ## Identity

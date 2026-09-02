@@ -173,7 +173,7 @@ public sealed class WebhooksCommandTests : IDisposable
 }
 """);
 
-        var result = await WebhooksCommand.RunAsync(["webhooks", "list"], _paths);
+        var result = await WebhooksCommand.RunAsync(["webhooks", "list"], _paths, TextWriter.Null);
         Assert.Equal(0, result);
     }
 
@@ -777,6 +777,36 @@ public sealed class WebhooksCommandTests : IDisposable
     {
         var result = await WebhooksCommand.RunAsync(["webhooks", "--help"], _paths);
         Assert.Equal(0, result);
+    }
+
+    [Theory]
+    [InlineData("--help")]
+    [InlineData("-h")]
+    public async Task List_TrailingHelpFlag_PrintsHelp_AndDoesNotList(string helpToken)
+    {
+        // A configured route WOULD show up in `webhooks list`'s output if the command ran for
+        // real, so its absence from stdout proves the help check pre-empted execution rather
+        // than just happening to print a route table that also mentions "Usage".
+        CreateValidRoute("test-route");
+
+        using var stdout = new StringWriter();
+        var result = await WebhooksCommand.RunAsync(["webhooks", "list", helpToken], _paths, stdout);
+
+        Assert.Equal(0, result);
+        Assert.Contains("Usage: netclaw webhooks <subcommand>", stdout.ToString());
+        Assert.DoesNotContain("test-route", stdout.ToString());
+    }
+
+    [Fact]
+    public async Task Set_TrailingHelpFlag_PrintsMoreSpecificSetHelp_NotGenericHelp()
+    {
+        // `set` has its own more specific WriteSetHelp() and must not be shadowed by the
+        // generic trailing-help check added for list/show/delete/validate.
+        using var stdout = new StringWriter();
+        var result = await WebhooksCommand.RunAsync(["webhooks", "set", "test-route", "--help"], _paths, stdout);
+
+        Assert.Equal(0, result);
+        Assert.Contains("Usage: netclaw webhooks set <route> [options]", stdout.ToString());
     }
 
     private void CreateValidRoute(string routeName, string secret = "test-secret", string prompt = "Test prompt")

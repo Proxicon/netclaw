@@ -3,10 +3,10 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
     <!-- Nuget package versions -->
-    <AkkaHostingVersion>1.5.70</AkkaHostingVersion>
+    <AkkaHostingVersion>1.5.71</AkkaHostingVersion>
     <AkkaPersistenceSqlHostingVersion>1.5.70</AkkaPersistenceSqlHostingVersion>
     <AkkaRemindersVersion>0.7.0</AkkaRemindersVersion>
-    <OpenTelemetryVersion>1.17.0</OpenTelemetryVersion>
+    <OpenTelemetryVersion>1.18.0</OpenTelemetryVersion>
     <SlackNetVersion>0.17.11</SlackNetVersion>
     <DiscordNetVersion>3.20.1</DiscordNetVersion>
     <MattermostNetVersion>5.0.7</MattermostNetVersion>
@@ -15,7 +15,7 @@
     <!-- Microsoft.Extensions.TimeProvider.Testing ships on the dotnet/extensions minor
          cadence and has no 10.8.x patch, so it cannot share MicrosoftExtensionsAIVersion
          once the AI packages move to a patch release. -->
-    <MicrosoftExtensionsTimeProviderTestingVersion>10.8.0</MicrosoftExtensionsTimeProviderTestingVersion>
+    <MicrosoftExtensionsTimeProviderTestingVersion>10.9.0</MicrosoftExtensionsTimeProviderTestingVersion>
     <OpenAIVersion>2.12.0</OpenAIVersion>
     <MicrosoftAspNetCoreVersion>10.0.11</MicrosoftAspNetCoreVersion>
     <SkiaSharpVersion>4.151.1</SkiaSharpVersion>
@@ -36,7 +36,7 @@
     <PackageVersion Include="Akka.Persistence.Sql.Hosting" Version="$(AkkaPersistenceSqlHostingVersion)" />
     <PackageVersion Include="Aaron.Akka.Reminders" Version="$(AkkaRemindersVersion)" />
     <PackageVersion Include="Aaron.Akka.Reminders.Sqlite" Version="$(AkkaRemindersVersion)" />
-    <PackageVersion Include="Anthropic" Version="12.40.0" />
+    <PackageVersion Include="Anthropic" Version="12.44.0" />
     <PackageVersion Include="Azure.Core" Version="1.53.0" />
     <PackageVersion Include="Azure.Identity" Version="1.21.0" />
     <PackageVersion Include="HtmlAgilityPack" Version="1.12.4" />
@@ -129,6 +129,19 @@
   <!-- Benchmarks (benchmarks/Netclaw.Benchmarks only) -->
   <ItemGroup>
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
+  </ItemGroup>
+  <!-- Memory embeddings (Netclaw.Embeddings + Netclaw.Embeddings.Tests). CPU-only ONNX
+       inference + a pure-managed WordPiece tokenizer, per memory-core-redesign D1: no
+       sidecar process, no native dependency beyond the ONNX Runtime CPU EP that already
+       ships linux-x64 + linux-arm64 native assets. -->
+  <ItemGroup>
+    <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.27.0" />
+    <PackageVersion Include="FastBertTokenizer" Version="1.0.28" />
+    <!-- Pinned to 10.0.10 (matches $(MicrosoftAspNetCoreVersion)), not the lowest version that
+         compiles: Microsoft.Extensions.AI 10.8.0 already pulls System.Numerics.Tensors
+         >= 10.0.10 transitively, and CentralPackageTransitivePinningEnabled requires the
+         central pin to be at least as high as every transitive floor in the graph. -->
+    <PackageVersion Include="System.Numerics.Tensors" Version="10.0.10" />
   </ItemGroup>
   <!-- Source generators -->
   <ItemGroup>

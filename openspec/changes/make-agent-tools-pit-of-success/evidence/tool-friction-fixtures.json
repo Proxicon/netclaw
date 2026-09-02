@@ -29,23 +29,13 @@
     },
     {
       "id": "TF02",
-      "scenario": "BatchRead",
+      "scenario": "ComposedRead",
       "observedFriction": "ApprovalGatedShellBatch",
-      "expectedToolSequence": ["file_read_many"],
+      "expectedToolSequence": ["file_read", "file_read"],
       "expectedOutcome": "success",
       "expectedApprovalRequired": false,
       "fallbackApprovalRequired": true,
       "expectedContextEffect": "RecordTwoCanonicalFiles"
-    },
-    {
-      "id": "TF03",
-      "scenario": "JsonProjection",
-      "observedFriction": "ApprovalGatedInterpreterProjection",
-      "expectedToolSequence": ["json_read"],
-      "expectedOutcome": "success",
-      "expectedApprovalRequired": false,
-      "fallbackApprovalRequired": true,
-      "expectedContextEffect": "RecordOneCanonicalFile"
     },
     {
       "id": "TF04",
@@ -86,6 +76,16 @@
       "expectedApprovalRequired": false,
       "fallbackApprovalRequired": false,
       "expectedContextEffect": "CoreOnlyChildCatalog"
+    },
+    {
+      "id": "TF08",
+      "scenario": "DirectAttachment",
+      "observedFriction": "PreparatoryShellCopyBeforeAttachment",
+      "expectedToolSequence": ["attach_file"],
+      "expectedOutcome": "success",
+      "expectedApprovalRequired": false,
+      "fallbackApprovalRequired": true,
+      "expectedContextEffect": "RecordOneCanonicalFile"
     }
   ]
 }

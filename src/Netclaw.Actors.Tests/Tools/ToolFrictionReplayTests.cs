@@ -12,7 +12,9 @@ using Microsoft.Extensions.AI;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Sessions;
+using Netclaw.Actors.SubAgents;
 using Netclaw.Actors.Tests.Sessions.Pipelines;
+using Netclaw.Actors.Tests.SubAgents;
 using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
 using Netclaw.Security;
@@ -21,6 +23,7 @@ using Netclaw.Tests.Utilities;
 using Netclaw.Tools;
 using ShellSyntaxTree;
 using Xunit;
+using RecordingChatClient = Netclaw.Actors.Tests.Sessions.FakeChatClient;
 using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Actors.Tests.Tools;
@@ -36,11 +39,11 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
     [Theory]
     [InlineData("TF01")]
     [InlineData("TF02")]
-    [InlineData("TF03")]
     [InlineData("TF04")]
     [InlineData("TF05")]
     [InlineData("TF06")]
     [InlineData("TF07")]
+    [InlineData("TF08")]
     public async Task Sanitized_friction_case_replays_through_real_tool_boundaries(string caseId)
     {
         var policyCase = LoadCase(caseId);
@@ -57,6 +60,13 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
             ProjectDirectory = setup.ProjectDirectory,
             RecentFiles = ImmutableList.Create(setup.SeedRecentFile)
         };
+
+        if (policyCase.ExpectedContextEffect == "CoreOnlyChildCatalog")
+        {
+            await AssertChildCatalogAsync(runtime, setup);
+            AssertContextEffect(policyCase.ExpectedContextEffect, setup, current);
+            return;
+        }
 
         for (var index = 0; index < setup.Calls.Count; index++)
         {
@@ -82,6 +92,17 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
                 $"{caseId.ToLowerInvariant()}-{index}");
             var receipt = Assert.Single(completed.ToolReceipts).Value;
             Assert.Equal(ParseOutcome(policyCase.ExpectedOutcome), receipt.Category);
+            if (caseId == "TF08")
+            {
+                var attachment = Assert.Single(completed.FileAttachments);
+                Assert.StartsWith(
+                    Path.Join(setup.SessionDirectory, "attachments"),
+                    attachment.FilePath,
+                    StringComparison.Ordinal);
+                Assert.Equal("synthetic report", await File.ReadAllTextAsync(
+                    attachment.FilePath,
+                    TestContext.Current.CancellationToken));
+            }
             current = WorkingContextUpdater.UpdateFromToolReceipts(
                 current,
                 completed.ToolResults,
@@ -105,12 +126,6 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
         }
 
         AssertContextEffect(policyCase.ExpectedContextEffect, setup, current);
-        if (policyCase.ExpectedContextEffect == "CoreOnlyChildCatalog")
-        {
-            Assert.True(runtime.Registry.IsCoreTool("search_tools"));
-            Assert.True(runtime.Registry.IsCoreTool("load_tool"));
-            Assert.False(runtime.Registry.IsCoreTool("attach_file"));
-        }
     }
 
     [Fact]
@@ -122,7 +137,7 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
         var runtime = CreateRuntime(setup.DeniedPath);
         var current = new WorkingContext { ProjectDirectory = setup.ProjectDirectory };
 
-        await EventFilter.Info(message: "Tool outcome category=Success").ExpectAsync(1, async () =>
+        await EventFilter.Info(contains: "outcomeCategory=Success").ExpectAsync(1, async () =>
         {
             _ = await ExecuteAsync(runtime.Executor, setup, current, setup.Calls[0], "outcome-log");
         }, cancellationToken: TestContext.Current.CancellationToken);
@@ -206,7 +221,74 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
             toolPathPolicy,
             commandPolicy,
             toolAccessPolicy: accessPolicy);
-        return new RuntimeSetup(registry, new DispatchingToolExecutor(registry, accessPolicy));
+        return new RuntimeSetup(registry, new DispatchingToolExecutor(registry, accessPolicy), accessPolicy);
+    }
+
+    private async Task AssertChildCatalogAsync(RuntimeSetup runtime, ScenarioSetup setup)
+    {
+        const string deferredToolName = "web_fetch";
+        var client = new RecordingChatClient();
+        client.PlannedResponses.Enqueue([setup.Calls[0]]);
+        client.PlannedResponses.Enqueue([setup.Calls[1]]);
+        client.PlannedResponses.Enqueue([new TextContent("Catalog replay complete.")]);
+
+        var registrations = runtime.Registry.GetAllRegistrations();
+        var coreNames = runtime.Registry.GetCoreRegistrations()
+            .Select(static registration => registration.Tool.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        var definition = new SubAgentDefinition
+        {
+            Name = new AgentName("fixture-agent"),
+            SystemPrompt = "Replay one sanitized catalog case.",
+            Tools = registrations.Select(static registration => registration.Tool).ToList()
+        };
+        var actor = Sys.ActorOf(SubAgentActor.CreatePropsWithProjectInstructionProvider(
+            definition,
+            client,
+            runtime.AccessPolicy,
+            NullSystemPromptProvider.Instance,
+            coreToolNames: coreNames));
+
+        var result = await actor.Ask<SubAgentProtocol.SubAgentResult>(
+            new SubAgentProtocol.RunSubAgent
+            {
+                Scope = SubAgentTestScope.Create(
+                    scopeId: "signalr/tool-friction/subagent/fixture-agent/run",
+                    sessionDirectory: setup.SessionDirectory,
+                    projectDirectory: setup.ProjectDirectory),
+                Task = "Find and load the deferred page retrieval tool.",
+                Timeout = TimeSpan.FromSeconds(5)
+            },
+            TimeSpan.FromSeconds(10),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Success);
+        Assert.Equal(3, client.ReceivedToolNames.Count);
+        var expectedCore = coreNames
+            .Where(SubAgentToolPolicy.IsAllowedForSubAgent)
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .ToList();
+        Assert.Equal(expectedCore, client.ReceivedToolNames[0].OrderBy(static name => name, StringComparer.Ordinal));
+        Assert.Equal(expectedCore, client.ReceivedToolNames[1].OrderBy(static name => name, StringComparer.Ordinal));
+        Assert.DoesNotContain(deferredToolName, client.ReceivedToolNames[0]);
+        Assert.DoesNotContain(deferredToolName, client.ReceivedToolNames[1]);
+        Assert.Contains(deferredToolName, client.ReceivedToolNames[2]);
+        Assert.Contains(
+            deferredToolName,
+            GetToolResult(client.ReceivedMessages[1], setup.Calls[0].CallId),
+            StringComparison.Ordinal);
+        Assert.Equal(
+            deferredToolName,
+            GetToolResult(client.ReceivedMessages[2], setup.Calls[1].CallId));
+    }
+
+    private static string GetToolResult(IReadOnlyList<ChatMessage> messages, string callId)
+    {
+        var result = messages
+            .SelectMany(static message => message.Contents.OfType<FunctionResultContent>())
+            .Single(content => content.CallId == callId)
+            .Result;
+        return Assert.IsType<string>(result);
     }
 
     private static async Task<ScenarioSetup> CreateScenarioAsync(
@@ -225,12 +307,12 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
         return policyCase.Id switch
         {
             "TF01" => await RecursiveSearchAsync(project, session, seed, denied, cancellationToken),
-            "TF02" => await BatchReadAsync(project, session, seed, denied, cancellationToken),
-            "TF03" => await JsonProjectionAsync(project, session, seed, denied, cancellationToken),
+            "TF02" => await ComposedReadAsync(project, session, seed, denied, cancellationToken),
             "TF04" => await ImageMetadataAsync(project, session, seed, denied, cancellationToken),
             "TF05" => await SpillContinuationAsync(project, session, seed, denied, cancellationToken),
             "TF06" => FailedFileActivity(project, session, seed, denied),
             "TF07" => SubagentCatalogExposure(project, session, seed, denied),
+            "TF08" => await DirectAttachmentAsync(project, session, seed, denied, cancellationToken),
             _ => throw new InvalidOperationException($"Unsupported fixture case: {policyCase.Id}")
         };
     }
@@ -255,7 +337,7 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
             PythonFallback("search-fallback", project, "print('recursive search')"));
     }
 
-    private static async Task<ScenarioSetup> BatchReadAsync(
+    private static async Task<ScenarioSetup> ComposedReadAsync(
         string project,
         string session,
         string seed,
@@ -271,28 +353,12 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
             session,
             seed,
             denied,
-            [Call("batch", FileReadManyTool.ToolName, "Paths", new[] { "first.txt", "second.txt" })],
+            [
+                Call("read-first", FileReadTool.ToolName, "Path", "first.txt"),
+                Call("read-second", FileReadTool.ToolName, "Path", "second.txt")
+            ],
             PythonFallback("batch-fallback", project, "print(open('first.txt').read()); print(open('second.txt').read())"),
             [first, second]);
-    }
-
-    private static async Task<ScenarioSetup> JsonProjectionAsync(
-        string project,
-        string session,
-        string seed,
-        string denied,
-        CancellationToken cancellationToken)
-    {
-        var path = Path.Join(project, "data.json");
-        await File.WriteAllTextAsync(path, "{\"status\":\"ready\"}", cancellationToken);
-        return Setup(
-            project,
-            session,
-            seed,
-            denied,
-            [Call("json", JsonReadTool.ToolName, "Path", "data.json", "Pointers", new[] { "/status" })],
-            PythonFallback("json-fallback", project, "import json; print(json.load(open('data.json'))['status'])"),
-            [path]);
     }
 
     private static async Task<ScenarioSetup> ImageMetadataAsync(
@@ -358,10 +424,35 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
             seed,
             denied,
             [
-                Call("search-tools", "search_tools", "Query", "attach local file"),
-                Call("load-tool", "load_tool", "Name", "attach_file")
+                Call("search-tools", "search_tools", "Query", "retrieve page content"),
+                Call("load-tool", "load_tool", "Name", "web_fetch")
             ],
             fallback: null);
+
+    private static async Task<ScenarioSetup> DirectAttachmentAsync(
+        string project,
+        string session,
+        string seed,
+        string denied,
+        CancellationToken cancellationToken)
+    {
+        var report = Path.Join(project, "report.txt");
+        await File.WriteAllTextAsync(report, "synthetic report", cancellationToken);
+        return Setup(
+            project,
+            session,
+            seed,
+            denied,
+            [Call("attach-report", "attach_file", "Path", "report.txt")],
+            Call(
+                "copy-before-attach",
+                ShellTool.ToolName,
+                "Command",
+                "cp report.txt ../sessions/current/report.txt",
+                "WorkingDirectory",
+                project),
+            [report]);
+    }
 
     private static ScenarioSetup Setup(
         string project,
@@ -450,7 +541,10 @@ public sealed class ToolFrictionReplayTests(ITestOutputHelper output) : TestKit(
         (byte)(height >> 24), (byte)(height >> 16), (byte)(height >> 8), (byte)height
     ];
 
-    private sealed record RuntimeSetup(ToolRegistry Registry, DispatchingToolExecutor Executor);
+    private sealed record RuntimeSetup(
+        ToolRegistry Registry,
+        DispatchingToolExecutor Executor,
+        ToolAccessPolicy AccessPolicy);
 
     private sealed record ScenarioSetup(
         string ProjectDirectory,

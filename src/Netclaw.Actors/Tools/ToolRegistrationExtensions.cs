@@ -41,12 +41,10 @@ public static class ToolRegistrationExtensions
         registry.RegisterCore(new FileReadTool(config, paths, pathPolicy));
         registry.RegisterCore(new FileListTool(config, paths, pathPolicy));
         registry.RegisterCore(new FileSearchTool(config, paths, pathPolicy));
-        registry.RegisterCore(new FileReadManyTool(config, paths, pathPolicy));
-        registry.RegisterCore(new JsonReadTool(config, paths, pathPolicy));
         registry.RegisterCore(new ToolOutputReadTool());
         registry.RegisterCore(new FileWriteTool(config, paths, pathPolicy));
         registry.RegisterCore(new FileEditTool(config, paths, pathPolicy));
-        registry.Register(new AttachFileTool(config, paths, pathPolicy));
+        registry.RegisterCore(new AttachFileTool(config, paths, pathPolicy));
         if (webhookRouteStore is not null)
             registry.Register(new ListWebhooksTool(webhookRouteStore));
         if (searchBackend is not null)

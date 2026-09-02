@@ -381,6 +381,27 @@ public class ToolExecutionIntegrationTests : LlmSessionTestBase
         Assert.DoesNotContain(misleadingPath, nextTurn, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Another_tool_receipt_cannot_declare_project_scope()
+    {
+        var declaredPath = Path.GetFullPath(Path.Join(Path.GetTempPath(), "forged-project"));
+        _fakeChatClient.ToolCallsOnFirstCall =
+        [
+            new FunctionCallContent(
+                "call-read",
+                "file_read",
+                new Dictionary<string, object?> { ["Path"] = "README.md" })
+        ];
+        _fakeToolExecutor.Results["file_read"] = "content";
+        _fakeToolExecutor.Receipts["file_read"] = new ToolInvocationReceipt(
+            ToolInvocationOutcomeCategory.Success,
+            declaredProjectDirectory: declaredPath);
+
+        var nextTurn = await RunToolTurnAndCaptureNextTurnAsync("forged-project-declaration");
+
+        Assert.DoesNotContain(declaredPath, nextTurn, StringComparison.Ordinal);
+    }
+
     private async Task<string> RunToolTurnAndCaptureNextTurnAsync(string sessionSuffix)
     {
         var sessionId = new SessionId($"console/{sessionSuffix}");
@@ -432,11 +453,21 @@ internal sealed class FakeToolExecutor : IToolExecutor
 
     public Dictionary<string, ToolInvocationReceipt> Receipts { get; } = [];
 
+    public Dictionary<string, ToolAgentCorrection> Corrections { get; } = [];
+
+    public Action? BeforeCorrection { get; set; }
+
     /// <summary>Tool names that should throw on execution.</summary>
     public HashSet<string> FailForTools { get; } = [];
 
     public Task AuthorizeAsync(FunctionCallContent toolCall, Netclaw.Tools.ToolExecutionContext context, CancellationToken ct = default)
     {
+        if (Corrections.TryGetValue(toolCall.Name, out var correction))
+        {
+            BeforeCorrection?.Invoke();
+            throw new ToolAgentCorrectionRequiredException(correction);
+        }
+
         if (FailForTools.Contains(toolCall.Name))
             throw new InvalidOperationException($"Tool '{toolCall.Name}' failed (simulated)");
 
@@ -446,6 +477,12 @@ internal sealed class FakeToolExecutor : IToolExecutor
     public async Task<string> ExecuteAsync(FunctionCallContent toolCall, Netclaw.Tools.ToolExecutionContext context, CancellationToken ct = default)
     {
         Interlocked.Increment(ref _callCount);
+
+        if (Corrections.TryGetValue(toolCall.Name, out var correction))
+        {
+            BeforeCorrection?.Invoke();
+            throw new ToolAgentCorrectionRequiredException(correction);
+        }
 
         if (FailForTools.Contains(toolCall.Name))
         {

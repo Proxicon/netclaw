@@ -8,6 +8,8 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Netclaw.Actors/Netclaw.Actors.csproj" />
+    <Project Path="src/Netclaw.Embeddings/Netclaw.Embeddings.csproj" />
+    <Project Path="src/Netclaw.Embeddings.Tests/Netclaw.Embeddings.Tests.csproj" />
     <Project Path="src/Netclaw.Channels/Netclaw.Channels.csproj" />
     <Project Path="src/Netclaw.Channels.Discord/Netclaw.Channels.Discord.csproj" />
     <Project Path="src/Netclaw.Channels.Mattermost/Netclaw.Channels.Mattermost.csproj" />
@@ -40,6 +42,8 @@
     <Project Path="samples/Netclaw.Demo.AppHost.IntegrationTests/Netclaw.Demo.AppHost.IntegrationTests.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Netclaw.SmokeLlmServer.Tests/Netclaw.SmokeLlmServer.Tests.csproj" />
+    <Project Path="tests/Netclaw.SmokeLlmServer/Netclaw.SmokeLlmServer.csproj" />
     <Project Path="tests/Netclaw.SmokeMcpServer/Netclaw.SmokeMcpServer.csproj" />
   </Folder>
   <Folder Name="/benchmarks/">

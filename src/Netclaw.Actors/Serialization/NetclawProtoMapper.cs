@@ -289,6 +289,8 @@ internal static class NetclawProtoMapper
             proto.TurnContext = ToProto(evt.TurnContext);
         if (evt.SessionScratchDirectory is not null)
             proto.SessionScratchDirectory = evt.SessionScratchDirectory;
+        if (evt.AuthorizationAttemptId is not null)
+            proto.AuthorizationAttemptId = evt.AuthorizationAttemptId;
         return proto;
     }
 
@@ -316,22 +318,34 @@ internal static class NetclawProtoMapper
         SessionScratchDirectory = proto.HasSessionScratchDirectory
             ? proto.SessionScratchDirectory
             : null,
+        AuthorizationAttemptId = proto.HasAuthorizationAttemptId
+            ? proto.AuthorizationAttemptId
+            : null,
         RequestedAtMs = proto.RequestedAtMs
     };
 
-    internal static Proto.ToolApprovalResolvedProto ToProto(ToolApprovalResolved evt) => new()
+    internal static Proto.ToolApprovalResolvedProto ToProto(ToolApprovalResolved evt)
     {
-        SessionId = ToProto(evt.SessionId),
-        CallId = evt.CallId,
-        Decision = evt.Decision,
-        ResolvedAtMs = evt.ResolvedAtMs
-    };
+        var proto = new Proto.ToolApprovalResolvedProto
+        {
+            SessionId = ToProto(evt.SessionId),
+            CallId = evt.CallId,
+            Decision = evt.Decision,
+            ResolvedAtMs = evt.ResolvedAtMs
+        };
+        if (evt.AuthorizationAttemptId is not null)
+            proto.AuthorizationAttemptId = evt.AuthorizationAttemptId;
+        return proto;
+    }
 
     internal static ToolApprovalResolved FromProto(Proto.ToolApprovalResolvedProto proto) => new()
     {
         SessionId = FromProto(proto.SessionId),
         CallId = proto.CallId,
         Decision = proto.Decision,
+        AuthorizationAttemptId = proto.HasAuthorizationAttemptId
+            ? proto.AuthorizationAttemptId
+            : null,
         ResolvedAtMs = proto.ResolvedAtMs
     };
 

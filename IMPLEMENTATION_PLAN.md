@@ -1,6 +1,6 @@
 # Netclaw Implementation Plan
 
-Last updated: 2026-08-14
+Last updated: 2026-08-21
 
 This is the execution plan for Netclaw. Autonomous agents and RALPH-style loops
 SHALL work from `NOW` by default. `NEXT` and `LATER` work belongs in
@@ -145,6 +145,35 @@ Done when:
 - [x] Absolute path normalization does not read the process working directory.
 - [x] Focused tests and the full repository quality gates pass.
 - [ ] An installed daemon restart confirms the live process uses the durable directory.
+
+### Priority: Complete Tool Remediation
+
+**PRD:** `docs/prd/PRD-006-mcp-tool-integration.md`
+**Spec:** `openspec/changes/complete-tool-remediation/`
+**Surface area:** internal tool receipts and model-facing tool results
+**Verification:** L2
+
+The receipt must drive the next action. The model must not depend on duplicated
+handwritten guidance or an unchecked string code.
+
+Done when:
+
+- [x] Every `RecoverableCorrection` receipt carries one defined internal code.
+- [x] Parent and child paths use one presenter before result delivery.
+- [x] Hidden tools are not named by remediation.
+- [x] Approval authority, scratch retry state, durable messages, and public APIs remain unchanged.
+- [ ] The stacked follow-up handles `attach_file` exposure and native-tool shell mistakes separately.
+
+### Priority: Prevent Native-Tool Shell Mistakes
+
+**Stack parent:** PR #2046 (`fix/repair-tool-rollout-contracts`).
+
+- [x] Specify `attach_file` as a policy-filtered Core tool that accepts the authorized source path directly.
+- [x] Specify parser-owned exact executable matching without executable-private argument parsing.
+- [x] Return a typed correction before shell approval or execution and expose one deferred schema actor-locally.
+- [x] Prove parent/child, hard-deny, hidden-tool, and eventual-authorization boundaries.
+- [x] Refresh deterministic and hosted PII-free behavioral evidence.
+- [x] Complete Release, OpenSpec, header, formatting, Slopwatch, and adversarial-review gates before opening the stacked PR.
 
 ### Priority: Reduce Shell Approval Fatigue
 
@@ -1091,6 +1120,10 @@ Done when:
   still produce terminal failed `spawn_agent` results.
 - [ ] No turn loop can report success while a tool result is still pending.
 - [ ] Logs/traces correlate model call, tool call, approval, and session turn.
+  `openspec/changes/correlate-tool-authorization-attempts/` implements the
+  call-local authorization-attempt link across policy, correction, prompt,
+  decision, retry, recovery, and result. Model-call and session-turn links
+  remain part of the broader observability item.
 
 ### Phase 5: Memory, Identity, Scheduling, And Persistence Contracts
 

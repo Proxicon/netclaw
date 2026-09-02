@@ -22,6 +22,7 @@ using Netclaw.Cli.Json;
 using Netclaw.Cli.Doctor;
 using Netclaw.Cli.Mcp;
 using Netclaw.Cli.Mattermost;
+using Netclaw.Cli.Memory;
 using Netclaw.Cli.Reminder;
 using Netclaw.Cli.Secrets;
 using Netclaw.Cli.Model;
@@ -75,7 +76,11 @@ static async Task RunAsync(string[] args)
             WriteGeneralHelp();
             return;
         case CliParseKind.Version:
-            Console.WriteLine($"netclaw {BuildInfo.Version} (commit {BuildInfo.CommitHash}, built {BuildInfo.BuildTimestamp})");
+            // FullVersion (not Version) — Version is the numeric AssemblyVersion prefix and
+            // silently drops any prerelease suffix, so a beta build (e.g. "0.25.0-alpha.onnx.2")
+            // printed as plain "0.25.0" here, indistinguishable from a stable release
+            // (alpha.onnx.2 production canary finding).
+            Console.WriteLine($"netclaw {BuildInfo.FullVersion} (commit {BuildInfo.CommitHash}, built {BuildInfo.BuildTimestamp})");
             return;
         case CliParseKind.Unknown:
             Console.Error.WriteLine($"netclaw: '{parseResult.Mode}' is not a netclaw command. See 'netclaw --help'.");
@@ -481,6 +486,15 @@ static async Task RunAsync(string[] args)
         if (IsHelpToken(subcommand))
             subcommand = "help";
 
+        // See DaemonCommandDispatch remarks: `pair`/`devices` guard their own trailing --help
+        // below; the remaining lifecycle verbs previously executed for real on a trailing help
+        // token (canary finding). Fail toward help, not execution.
+        if (DaemonCommandDispatch.ShouldShowHelpInsteadOfExecuting(subcommand, args))
+        {
+            WriteDaemonHelp();
+            return;
+        }
+
         var paths = new NetclawPaths();
         paths.EnsureDirectoriesExist();
         var manager = new DaemonManager(paths, TimeProvider.System);
@@ -807,13 +821,17 @@ static async Task RunAsync(string[] args)
         var reminderSub = args.Length > 1 ? args[1] : "help";
         if (reminderSub is "help" or "-h" or "--help" or "validate" || args.Length == 1)
         {
-            Environment.ExitCode = await ReminderCommand.RunAsync(args, daemonApi: null);
+            Environment.ExitCode = await ReminderCommand.RunAsync(args, null, Console.Out, Console.Error);
         }
         else
         {
             var builder = CreateQuietHostBuilder(args);
             using var host = builder.Build();
-            Environment.ExitCode = await ReminderCommand.RunAsync(args, host.Services.GetRequiredService<DaemonApi>());
+            Environment.ExitCode = await ReminderCommand.RunAsync(
+                args,
+                host.Services.GetRequiredService<DaemonApi>(),
+                Console.Out,
+                Console.Error);
         }
         return;
     }
@@ -857,6 +875,16 @@ static async Task RunAsync(string[] args)
         return;
     }
 
+    // ── Memory management (memory-core-redesign Slice 2) ──
+    if (mode is "memory")
+    {
+        var paths = new NetclawPaths();
+        paths.EnsureDirectoriesExist();
+        // All memory subcommands are offline — direct SQLite/model-file access, no daemon needed
+        Environment.ExitCode = await MemoryCommand.RunAsync(args, paths, BuildCliConfig(), Console.Out, Console.Error);
+        return;
+    }
+
     // ── Webhook management ──
     if (mode is "webhooks")
     {
@@ -878,8 +906,9 @@ static async Task RunAsync(string[] args)
                 Environment.ExitCode = await WebhooksCommand.RunAsync(
                     args,
                     webhooksPaths,
-                    output: null,
-                    webhooksHost.Services.GetRequiredService<DaemonApi>());
+                    Console.Out,
+                    webhooksHost.Services.GetRequiredService<DaemonApi>(),
+                    Console.Error);
             }
             catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException or FormatException)
             {
@@ -893,7 +922,7 @@ static async Task RunAsync(string[] args)
 
         var paths = new NetclawPaths();
         paths.EnsureDirectoriesExist();
-        Environment.ExitCode = await WebhooksCommand.RunAsync(args, paths);
+        Environment.ExitCode = await WebhooksCommand.RunAsync(args, paths, Console.Out, null, Console.Error);
         return;
     }
 
@@ -940,7 +969,14 @@ static async Task RunAsync(string[] args)
         using var host = builder.Build();
         var paths = host.Services.GetRequiredService<NetclawPaths>();
         var daemonConfig = host.Services.GetRequiredService<DaemonConfig>();
-        Environment.ExitCode = await UpdateCommand.RunAsync(args, paths, daemonConfig.DisableSelfUpdate, daemonConfig.UpdateChannel);
+        Environment.ExitCode = await UpdateCommand.RunAsync(
+            args,
+            paths,
+            daemonConfig.DisableSelfUpdate,
+            daemonConfig.UpdateChannel,
+            Console.In,
+            Console.Out,
+            Console.Error);
         return;
     }
 
@@ -1268,6 +1304,7 @@ static void WriteGeneralHelp()
     Console.WriteLine("  provider                 Manage LLM providers (TUI) or use subcommands");
     Console.WriteLine("  model                    Manage model assignments (TUI) or use subcommands");
     Console.WriteLine("  reminder                 Manage scheduled reminders (daemon-required)");
+    Console.WriteLine("  memory                   Manage cross-session memory (embeddings backfill, offline)");
     Console.WriteLine("  skill                    Manage skills and skill sources");
     Console.WriteLine("  webhooks                 Manage inbound webhook routes");
     Console.WriteLine("  secrets                  Manage encrypted secrets (set key/value pairs)");
