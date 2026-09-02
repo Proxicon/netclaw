@@ -130,7 +130,7 @@ internal sealed class TeamsSdkAttachmentDownloader(
     private static bool IsTrustedAttachmentHost(string host)
         => host.EndsWith(".teams.microsoft.com", StringComparison.OrdinalIgnoreCase)
            || host.EndsWith(".botframework.com", StringComparison.OrdinalIgnoreCase)
-           || host.EndsWith(".trafficmanager.net", StringComparison.OrdinalIgnoreCase)
+           || host.Equals("smba.trafficmanager.net", StringComparison.OrdinalIgnoreCase)
            || host.EndsWith(".sharepoint.com", StringComparison.OrdinalIgnoreCase)
            || host.EndsWith(".sharepoint.us", StringComparison.OrdinalIgnoreCase)
            || host.EndsWith(".onedrive.com", StringComparison.OrdinalIgnoreCase)

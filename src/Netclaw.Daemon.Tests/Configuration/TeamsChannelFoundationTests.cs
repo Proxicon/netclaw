@@ -1735,6 +1735,26 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_accepts_an_attachment_only_message()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Text = " ";
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = new AttachmentContentType("image/png"),
+            ContentUrl = new Uri("https://smba.trafficmanager.net/amer/v3/attachments/image"),
+            Name = "diagram.png"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.True(string.IsNullOrWhiteSpace(result.Activity!.Text));
+        Assert.Equal(TeamsInboundAttachmentKind.InlineImage, Assert.Single(result.Activity.Attachments).Kind);
+    }
+
+    [Fact]
     public void Translator_maps_a_personal_file_download_notice_to_safe_metadata()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);

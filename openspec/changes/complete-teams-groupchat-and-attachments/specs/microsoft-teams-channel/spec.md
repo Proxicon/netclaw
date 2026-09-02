@@ -89,9 +89,9 @@ The package SHALL not request tenant-wide chat message or file permissions for t
 
 ### Requirement: GroupChat metadata uses canonical authority
 The system SHALL persist canonical group-chat IDs only.
-The system SHALL use a friendly chat label only as display metadata.
-The system SHALL permit an operator to enter a canonical group-chat ID when safe metadata discovery is unavailable.
-The system SHALL cache known group-chat metadata for at most 30 minutes.
+The system SHALL use an abbreviated canonical ID as the safe display fallback.
+The system SHALL permit an operator to enter a canonical group-chat ID.
+Metadata discovery and metadata caching are deferred.
 The system SHALL not add a broad directory or chat-read permission only for group-chat discovery.
 
 #### Scenario: Metadata lookup cannot resolve a friendly label
@@ -106,10 +106,17 @@ When attachments are disabled, the system SHALL retain the current fail-closed r
 The system SHALL ignore the Teams HTML text-rendering wrapper.
 The system SHALL use the shared attachment count, byte, scanner, MIME, signature, image-normalization, and workspace controls.
 
-#### Scenario: Disabled attachment ingress receives a file
+#### Scenario: Disabled attachment ingress receives an attachment-only message
 - **GIVEN** Teams attachment ingress is disabled
-- **WHEN** a Personal message contains a file attachment
+- **WHEN** a Personal message contains a file attachment and no safe text
 - **THEN** the system rejects the attachment before a model turn
+- **AND** it retains durable activity ownership to prevent repeated rejection work
+
+#### Scenario: Text accompanies a rejected attachment
+- **GIVEN** a Teams message has nonempty safe text and a rejected attachment
+- **WHEN** the binding processes the message
+- **THEN** it sends the safe text through one normal model turn
+- **AND** it never sends rejected attachment bytes to the model
 
 #### Scenario: A Teams text wrapper is present
 - **WHEN** a Teams message contains only the known HTML text-rendering wrapper
@@ -119,9 +126,9 @@ The system SHALL use the shared attachment count, byte, scanner, MIME, signature
 ### Requirement: Inline images use authenticated bounded retrieval
 The system SHALL accept authenticated inline PNG, JPEG, GIF, and WebP images where the Teams SDK provides a supported attachment shape.
 The system SHALL support that image behavior in Personal, Channel, and GroupChat scopes.
-The system SHALL use only the authenticated Teams attachment retrieval path.
+The system SHALL keep a captured raw URL only at the authenticated daemon boundary and expose only SDK-free metadata to actors.
 The system SHALL not fetch a URL from user text or persist an attachment download URL.
-The system SHALL enforce HTTPS, bounded redirects, streaming byte limits, cancellation, MIME and signature validation, image decode validation, normalization, and safe temporary-file cleanup.
+The system SHALL enforce HTTPS, an allowlisted host, no redirects, streaming byte limits, cancellation, MIME and signature validation, image decode validation, normalization, and safe temporary-file cleanup.
 
 #### Scenario: A valid inline image reaches a capable model
 - **GIVEN** attachment ingress is enabled and a Teams message contains a valid inline PNG
@@ -133,6 +140,11 @@ The system SHALL enforce HTTPS, bounded redirects, streaming byte limits, cancel
 - **GIVEN** a Teams attachment declares an image MIME type
 - **WHEN** signature or image decoding fails
 - **THEN** the system rejects the attachment without a model turn
+
+#### Scenario: A valid attachment is the only input
+- **GIVEN** a valid supported attachment and no message text
+- **WHEN** the binding accepts the attachment
+- **THEN** it creates exactly one model turn from safe attachment content
 
 ### Requirement: Personal files use managed shared attachment staging
 The system SHALL accept a Personal attachment with the Teams file-download information shape only after safe bounded download and shared validation.

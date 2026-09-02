@@ -74,6 +74,52 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Teams_attachments_toggle_autosaves_and_reloads()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+
+        using (var initial = CreateViewModel())
+        {
+            initial.OpenAdapterManagement(ChannelType.Teams);
+            initial.BeginAttachments();
+            Assert.False(initial.AttachmentsEnabled);
+
+            initial.ToggleAttachments();
+            await initial.PendingConfigWrite;
+        }
+
+        using (var enabled = CreateViewModel())
+        {
+            enabled.OpenAdapterManagement(ChannelType.Teams);
+            enabled.BeginAttachments();
+            Assert.True(enabled.AttachmentsEnabled);
+
+            enabled.ToggleAttachments();
+            await enabled.PendingConfigWrite;
+        }
+
+        using var disabled = CreateViewModel();
+        disabled.OpenAdapterManagement(ChannelType.Teams);
+        disabled.BeginAttachments();
+        Assert.False(disabled.AttachmentsEnabled);
+        disabled.GoBack();
+        Assert.Equal(ChannelsConfigScreen.AdapterMenu, disabled.Screen.Value);
+    }
+
+    [Fact]
     public async Task Teams_draft_persists_canonical_principals_without_writing_client_secret_to_normal_config()
     {
         File.WriteAllText(_paths.NetclawConfigPath,

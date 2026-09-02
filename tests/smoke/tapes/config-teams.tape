@@ -75,13 +75,14 @@ Wait+Screen@10s /Manage channels and permissions/
 Wait+Screen@10s /Manage allowed users/
 Wait+Screen@10s /Manage allowed groups/
 Wait+Screen@10s /Manage Group Chats/
+Wait+Screen@10s /Attachments/
 Wait+Screen@10s /Directory \/ Graph status/
 Wait+Screen@10s /Connection & credentials/
 
 # Exercise the configured connection form through the actual Termina input
 # path. Tab must wrap from the secret to tenant, and Shift+Tab must return to
 # the secret. These values replace the first-connect values above.
-Down 7
+Down 8
 Enter
 Wait+Screen@10s /Microsoft Teams > Connection & credentials/
 Wait+Screen@10s /Entra tenant ID/
@@ -111,7 +112,7 @@ Up 3
 Down 3
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/
-Down 7
+Down 8
 Enter
 Wait+Screen@10s /aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/
 Wait+Screen@10s /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/
@@ -183,7 +184,18 @@ Enter
 Wait+Screen@10s /Microsoft Teams is configured/
 Wait+Screen@10s /Group Chat settings saved/
 
-# Use the picker-level semantic Done key, not an adapter count, to return.
+# Enable supported Teams attachments through the dedicated management control.
+Down
+Enter
+Wait+Screen@10s /Microsoft Teams > Attachments/
+Wait+Screen@10s /Allow supported Teams attachments/
+Space
+Wait+Screen@10s /Microsoft Teams attachments enabled and saved/
+
+# Return through the Teams adapter menu, then use the picker-level semantic
+# Done key rather than an adapter count.
+Escape
+Wait+Screen@10s /Microsoft Teams is configured/
 Escape
 Wait+Screen@10s /Which channels would you like to connect/
 Wait+Screen@10s /Done adding channels/

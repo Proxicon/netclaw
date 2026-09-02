@@ -37,9 +37,10 @@ assert_field '(.Teams.AllowedGroupIds | index("88888888-8888-8888-8888-888888888
 assert_field '(.Teams.AllowedGroupIds | index("99999999-9999-9999-9999-999999999999") != null)' 'true' "$config_json" || :
 assert_field '.Teams.AllowGroupChats' 'true' "$config_json" || :
 assert_field '(.Teams.AllowedGroupChatIds | index("19:smoke-group-chat@thread.v2") != null)' 'true' "$config_json" || :
+assert_field '.Teams.AllowAttachments' 'true' "$config_json" || :
 assert_field '(.Teams | has("ClientSecret"))' 'false' "$config_json" || :
 
-if printf '%s' "$config_json" | rg -q 'teams-smoke-(client|replacement)-secret'; then
+if printf '%s' "$config_json" | grep -Fq -e 'teams-smoke-client-secret' -e 'teams-smoke-replacement-secret'; then
   echo "FAIL: normal config contains the Teams client secret." >&2
   assert_fail=1
 fi

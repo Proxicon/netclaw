@@ -147,6 +147,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal string? AllowedGroupsInput { get; set; }
     internal string? AllowedGroupChatsInput { get; set; }
     internal bool GroupChatsEnabled { get; set; }
+    internal bool AttachmentsEnabled { get; private set; }
     internal string? DirectorySearchInput { get; set; }
     internal bool DirectMessagesEnabled { get; set; }
     internal string? BotTokenInput { get; set; }
@@ -564,6 +565,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         {
             items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageGroups, "Manage allowed groups", "Restrict messages to verified Entra group members."));
             items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageGroupChats, "Manage Group Chats", "Use canonical chat IDs and strict mention policy."));
+            items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageAttachments, "Attachments", "Enable supported inbound Teams attachments."));
             items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.DirectoryStatus, "Directory / Graph status", "Review safe directory capability and consent guidance."));
         }
 
@@ -615,6 +617,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 break;
             case ChannelsManagementAction.ManageGroupChats:
                 BeginGroupChats();
+                break;
+            case ChannelsManagementAction.ManageAttachments:
+                BeginAttachments();
                 break;
             case ChannelsManagementAction.DirectoryStatus:
                 Screen.Value = ChannelsConfigScreen.DirectoryStatus;
@@ -1252,6 +1257,24 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         UpdateAdapterPickerSummary(ChannelType.Teams);
         Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction("Microsoft Teams Group Chat settings saved.");
+        NotifyContentChanged();
+    }
+
+    internal void BeginAttachments()
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        AttachmentsEnabled = teams.AllowAttachments;
+        Screen.Value = ChannelsConfigScreen.Attachments;
+        Status.Value = new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void ToggleAttachments()
+    {
+        AttachmentsEnabled = !AttachmentsEnabled;
+        Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowAttachments = AttachmentsEnabled;
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        AutosaveCompletedAction($"Microsoft Teams attachments {(AttachmentsEnabled ? "enabled" : "disabled")} and saved.");
         NotifyContentChanged();
     }
 
@@ -2440,6 +2463,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             ChannelsConfigScreen.AllowedUsers => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
             ChannelsConfigScreen.AllowedGroups => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
             ChannelsConfigScreen.GroupChats => ChannelsConfigScreen.AdapterMenu,
+            ChannelsConfigScreen.Attachments => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.DirectoryStatus => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.DirectMessages => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.RotateCredentials => ChannelsConfigScreen.AdapterMenu,
@@ -3232,6 +3256,7 @@ internal enum ChannelsConfigScreen
     AllowedUsers,
     AllowedGroups,
     GroupChats,
+    Attachments,
     DirectoryStatus,
     DirectMessages,
     RotateCredentials,
@@ -3245,6 +3270,7 @@ internal enum ChannelsManagementAction
     ManageUsers,
     ManageGroups,
     ManageGroupChats,
+    ManageAttachments,
     DirectoryStatus,
     DirectMessages,
     RotateCredentials,

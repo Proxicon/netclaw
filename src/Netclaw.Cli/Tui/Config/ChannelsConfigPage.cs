@@ -91,6 +91,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AllowedUsers => BuildAllowedUsers(),
                     ChannelsConfigScreen.AllowedGroups => BuildAllowedGroups(),
                     ChannelsConfigScreen.GroupChats => BuildGroupChats(),
+                    ChannelsConfigScreen.Attachments => BuildAttachments(),
                     ChannelsConfigScreen.DirectoryStatus => BuildDirectoryStatus(),
                     ChannelsConfigScreen.DirectMessages => BuildDirectMessages(),
                     ChannelsConfigScreen.RotateCredentials => BuildRotateCredentials(),
@@ -381,6 +382,15 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Hint("  Each Group Chat message needs a structured bot mention when mention-only is enabled."));
     }
 
+    private ILayoutNode BuildAttachments() => Layouts.Vertical()
+        .WithChild(Header("  Microsoft Teams > Attachments"))
+        .WithChild(Hint("  Supports inline images and personal file-download cards. Channel and Group Chat files are deferred."))
+        .WithChild(Layouts.Empty().Height(1))
+        .WithChild(Row(
+            $"   [{Check(ViewModel.AttachmentsEnabled)}] Allow supported Teams attachments",
+            focused: ViewModel.AttachmentsEnabled,
+            enabled: ViewModel.AttachmentsEnabled));
+
     private ILayoutNode BuildDirectoryStatus()
     {
         var layout = Layouts.Vertical()
@@ -477,6 +487,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AllowedUsers => "  Use comma-separated user IDs. Blank means unrestricted users in allowed channels.",
                     ChannelsConfigScreen.AllowedGroups => "  Use comma-separated canonical Entra group IDs. Blank removes group-derived access.",
                     ChannelsConfigScreen.GroupChats => "  Space toggles Group Chat ingress. Enter saves canonical IDs.",
+                    ChannelsConfigScreen.Attachments => "  Space saves supported inbound Teams attachment access.",
                     ChannelsConfigScreen.DirectoryStatus => "  Run netclaw doctor for offline configuration diagnostics. Esc returns to the menu.",
                     ChannelsConfigScreen.DirectMessages => "  Space toggles DMs. Left/right changes the DM audience.",
                     ChannelsConfigScreen.RotateCredentials => "  Blank secret fields preserve existing secrets. Tab and Shift+Tab switch fields.",
@@ -517,6 +528,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AllowedUsers => " [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.AllowedGroups => " [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.GroupChats => " [Type] IDs  [Space] Toggle  [Enter] Apply  [Esc] Menu",
+                    ChannelsConfigScreen.Attachments => " [Space] Toggle & Save  [Esc] Menu",
                     ChannelsConfigScreen.DirectoryStatus => " [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.DirectMessages => " [↑/↓] Navigate  [Space] Toggle  [←/→] Audience  [Enter] Apply  [Esc] Menu",
                     ChannelsConfigScreen.RotateCredentials => " [Tab/Shift+Tab] Field  [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
@@ -666,6 +678,9 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 break;
             case ChannelsConfigScreen.GroupChats:
                 HandleGroupChatsKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.Attachments:
+                HandleAttachmentsKey(keyInfo);
                 break;
             case ChannelsConfigScreen.DirectoryStatus:
                 break;
@@ -931,6 +946,12 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
         _singleInput?.HandleInput(keyInfo);
         StageSingleInput();
+    }
+
+    private void HandleAttachmentsKey(ConsoleKeyInfo keyInfo)
+    {
+        if (keyInfo.Key == ConsoleKey.Spacebar)
+            ViewModel.ToggleAttachments();
     }
 
     private void HandleDirectMessagesKey(ConsoleKeyInfo keyInfo)

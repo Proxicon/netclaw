@@ -225,9 +225,6 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         if (string.IsNullOrWhiteSpace(activity.Id))
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "missing_activity_id");
 
-        if (string.IsNullOrWhiteSpace(activity.Text))
-            return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "missing_message_text");
-
         if (string.IsNullOrWhiteSpace(activity.From?.Id))
             return TeamsTranslationResult.Rejected(TeamsTranslationDisposition.RejectedMalformed, TeamsIngressActivityKind.Message, "missing_sender_id");
 
@@ -263,15 +260,24 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         if (attachmentFailure is not null)
             return attachmentFailure;
 
+        if (string.IsNullOrWhiteSpace(activity.Text) && inboundAttachments.IsEmpty)
+        {
+            return TeamsTranslationResult.Rejected(
+                TeamsTranslationDisposition.RejectedMalformed,
+                TeamsIngressActivityKind.Message,
+                "missing_message_text");
+        }
+
         var trust = CreateTrust(activity, authenticatedTenantId, scope.Value);
         var mentions = TranslateMentions(activity.Entities);
+        var messageText = activity.Text ?? string.Empty;
         var text = scope is TeamsConversationScope.Channel or TeamsConversationScope.GroupChat
             ? TeamsTenantEvidenceMappings.RemoveQualifiedBotMentions(
-                activity.Text,
+                messageText,
                 mentions.Select(mention => new TeamsMentionEvidence(mention.Type, mention.MentionedId, mention.Text)),
                 activity.Recipient?.Id ?? string.Empty,
                 options.BotId ?? string.Empty)
-            : activity.Text;
+            : messageText;
         var mentioned = scope is TeamsConversationScope.Channel or TeamsConversationScope.GroupChat
             && mentions.Any(mention => IsQualifiedBotMention(mention, activity.Recipient?.Id, options.BotId));
 

@@ -68,45 +68,48 @@ The binding persistence records only the minimum non-secret values that recovery
 The current approval callback checks remain the authority for correlation, nonce, requester, action, expiry, and replay.
 GroupChat adds routing support. It does not alter shared approval authority.
 
-### Stage attachments before SDK-free ingress with durable duplicate ownership
+### Keep attachment URLs at the daemon boundary
 
-The daemon owns a Teams attachment stager. It receives an already-authenticated SDK activity and an accepted attachment shape.
-It downloads only that shape by an SDK-supported authenticated route.
-It yields a bounded local staging result to the SDK-free Teams ingress contract.
+The daemon receives an authenticated Teams SDK activity and translates only its safe shape into SDK-free metadata.
+It captures a short-lived raw download URL in a daemon-only downloader capability.
+No attachment bytes are downloaded before the actor admits the activity.
 
 ```
 authenticated Teams SDK activity
-    -> Teams attachment stager
+    -> translator and daemon-only URL capture
+    -> SDK-free attachment metadata
+    -> ACL and durable activity reservation
+    -> binding asks the daemon downloader
     -> shared scanner and managed attachment storage
-    -> SDK-free staged-attachment record
-    -> Teams ingress and durable conversation binding
     -> ChannelInput with executable text and untrusted attachment content
 ```
 
-The durable activity-idempotency path selects one accepted activity owner before another retry can stage or enqueue a duplicate.
-A download failure before admission remains retryable.
-A completed or recovered accepted activity reuses its durable staging result and never starts another model turn.
+The durable activity-idempotency path selects one accepted activity owner before another retry can enqueue a duplicate.
+A pre-dispatch failure that escapes the binding can release its reservation where retry is supported.
+Handled attachment rejections are terminal: an attachment-only rejection retains the reservation and creates no model turn.
+Raw URLs are not durable, so recovery cannot use a stale captured URL after a crash.
 Partial files are removed on cancellation, timeout, validation failure, or failed admission.
 
 ### Reuse shared media policy for images and Personal files
 
-The stager checks the existing count, per-file, and aggregate limits before and during streaming.
+The binding checks the existing maximum file count and per-file byte limit before and during streaming.
+There is no configured aggregate byte limit.
 It uses the existing MIME catalog, signature validation, scanner, image decode, image normalization, safe internal name, and workspace storage.
 It sends model-native images through existing image-inline decisions.
 It sends all other approved files as existing staged file references.
 It never appends attachment bytes to executable text.
+Nonempty safe text still creates one normal turn when another attachment is rejected.
+An accepted attachment-only message creates one turn; a rejected attachment-only message creates none.
 
 The stager ignores the existing Teams HTML text wrapper.
 It accepts inline image shapes in Personal, Channel, and GroupChat.
 It accepts the Teams file-download information shape only in Personal scope.
-It rejects executables, unsafe archives, malformed payloads, unknown URL routes, redirect escapes, MIME mismatch, and size-limit breach.
+It rejects executables, unsafe archives, malformed payloads, unknown URL routes, redirects, MIME mismatch, and size-limit breach.
 
 ### Keep GroupChat metadata optional and least privileged
 
-The Graph boundary resolves metadata only for known allowed chat IDs unless a documented, app-installed chat enumeration path proves safe.
-It caches resolved chat metadata for 30 minutes.
-The TUI always provides canonical-ID entry.
-If the selected Graph method requires `Chat.ReadBasic.WhereInstalled`, the implementation documents that app-scoped reason.
+Group-chat metadata discovery is deferred.
+The TUI always provides canonical-ID entry and an abbreviated canonical display fallback.
 It never adds `Chat.ReadBasic.All`, `Chat.Read.All`, `Files.Read.All`, or `Sites.Read.All` for display convenience.
 
 ### Separate package RSC from Entra application permissions

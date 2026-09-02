@@ -24,15 +24,15 @@
 - [x] 3.1 Add additive `AllowGroupChats` and `AllowedGroupChatIds` configuration with disabled defaults, then verify old configurations bind with GroupChat disabled.
 - [x] 3.2 Update schema, editor model, persistence mapper, doctor, and runtime policy together, then verify invalid canonical IDs block persistence and persisted IDs reach runtime ACL evaluation.
 - [x] 3.3 Investigate SDK and Graph support for bounded app-installed chat metadata, then verify the selected path adds no broad chat or directory permission.
-- [ ] 3.4 Add known-chat metadata cache behavior with a 30-minute expiry, then verify canonical IDs remain authority when metadata is unavailable.
+- [x] 3.4 Defer metadata discovery and caching, then verify canonical IDs remain authority with a safe abbreviated display fallback.
 - [x] 3.5 Add Teams TUI GroupChat management, canonical-ID entry, safe display labels, enable control, and summary count, then verify typed-input, reopen, and runtime-consumer coverage.
 - [x] 3.6 Update the Teams manifest with `groupchat`, `ChatMessage.Read.Chat`, and `supportsFiles`, then verify deterministic package tests reject broad chat or file permissions.
 
-## 4. Bounded Teams attachment staging
+## 4. Bounded Teams attachment ingress
 
 - [x] 4.1 Add additive `AllowAttachments` configuration with a disabled default, then verify the legacy attachment rejection path remains active when disabled.
 - [x] 4.2 Inspect the SDK 2.1 attachment download APIs and sanitized evidence, then document the exact authenticated inline-image and Personal-file retrieval routes at the daemon boundary.
-- [x] 4.3 Implement a Teams-specific bounded downloader and SDK-free staged-attachment record, then verify no SDK attachment, raw URL, OAuth token, or download URL crosses into actors or persistence.
+- [x] 4.3 Implement a Teams-specific bounded downloader and SDK-free metadata, then verify no SDK attachment, raw URL, OAuth token, or download URL crosses into actors or persistence.
 - [x] 4.4 Reuse shared attachment count, byte, MIME, signature, scanner, image-normalization, safe-name, and managed-storage controls, then verify an invalid name cannot construct a workspace path.
 - [x] 4.5 Implement streaming limits, cancellation, safe redirect policy, and partial-file cleanup, then verify missing or false content length, timeout, HTTP failure, redirect escape, and cancellation reject safely.
 - [x] 4.6 Implement authenticated inline PNG, JPEG, GIF, and WebP support for Personal, Channel, and GroupChat, then verify valid images use the existing inline or path-only provider decision.
@@ -54,4 +54,4 @@
 - [x] 6.2 Run `dotnet restore Netclaw.slnx`, `dotnet build Netclaw.slnx`, and `dotnet test Netclaw.slnx`, then record exact results.
 - [x] 6.3 Run the vulnerability, Slopwatch, header, whitespace, strict OpenSpec, and smoke gates from the feature brief, then record exact results.
 - [x] 6.4 Prepare the owner GroupChat, image, and Personal-file live smoke steps, then verify the plan requires package upgrade and does not require a live tenant in CI.
-- [ ] 6.5 Prepare one focused PR from `feature/teams-groupchat-attachments` to `dev` without merge, deploy, or final upstream pull request, then verify its description states limits and owner gates.
+- [x] 6.5 Prepare one focused PR from `feature/teams-groupchat-attachments` to `dev` without merge, deploy, or final upstream pull request, then verify its description states limits and owner gates.

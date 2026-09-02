@@ -280,7 +280,12 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
 
         if (action.Trust.Scope == TeamsConversationScope.GroupChat)
         {
-            if (!HasApprovalAuthorizationEvidence(activity))
+            var structural = TeamsGroupChatAclPolicy.EvaluateStructuralAccess(activity, _options);
+            if (!structural.IsAllowed)
+                return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
+
+            var authorization = await CreateAuthorizationAsync(activity, structural, cancellationToken).ConfigureAwait(false);
+            if (authorization is null)
                 return new TeamsApprovalActionResult(TeamsApprovalActionDisposition.Rejected);
 
             return await RoutePersonalApprovalAsync(action, conversationId, cancellationToken);
@@ -433,7 +438,8 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
 
     private void RememberApprovalAuthorization(TeamsInboundActivity activity, TeamsIngressSinkResult result)
     {
-        if (result is not (TeamsIngressSinkResult.Accepted or TeamsIngressSinkResult.Duplicate)
+        if (activity.Trust.Scope == TeamsConversationScope.GroupChat
+            || result is not (TeamsIngressSinkResult.Accepted or TeamsIngressSinkResult.Duplicate)
             || !RequiresApprovalAuthorizationEvidence(activity))
         {
             return;
@@ -1185,10 +1191,16 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
     {
         try
         {
+            var input = await BuildChannelInputAsync(dispatch.Activity, dispatch.CancellationToken).ConfigureAwait(false);
+            if (input is null)
+            {
+                ChannelTelemetry.For(ChannelType.Teams).RecordExtra("attachment_only_rejected");
+                dispatch.ReplyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Accepted));
+                return;
+            }
+
             var writer = await EnsurePipelineAsync(dispatch.CancellationToken);
-            await writer.WriteAsync(
-                await BuildChannelInputAsync(dispatch.Activity, dispatch.CancellationToken),
-                dispatch.CancellationToken);
+            await writer.WriteAsync(input, dispatch.CancellationToken);
             ChannelTelemetry.For(ChannelType.Teams).RecordMessageEnqueued();
             ChannelTelemetry.For(ChannelType.Teams).RecordEventRouted(
                 _isChannelBinding
@@ -1371,7 +1383,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             cancellationToken);
     }
 
-    private async Task<ChannelInput> BuildChannelInputAsync(
+    private async Task<ChannelInput?> BuildChannelInputAsync(
         TeamsInboundActivity activity,
         CancellationToken cancellationToken)
     {
@@ -1390,8 +1402,19 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             TeamsConversationScope.Channel => TrustBoundary.Public,
             _ => throw new InvalidOperationException("The Teams activity has an unsupported scope.")
         };
-        var contents = new List<AIContent> { new TextContent(activity.Text) };
-        await ProcessInboundAttachmentsAsync(activity, acl.Audience, contents, cancellationToken).ConfigureAwait(false);
+        var hasText = !string.IsNullOrWhiteSpace(activity.Text);
+        var contents = new List<AIContent>();
+        if (hasText)
+            contents.Add(new TextContent(activity.Text));
+
+        var hasAcceptedAttachment = await ProcessInboundAttachmentsAsync(
+            activity,
+            acl.Audience,
+            contents,
+            cancellationToken).ConfigureAwait(false);
+        if (!hasText && !hasAcceptedAttachment)
+            return null;
+
         return new ChannelInput
         {
         SenderId = new SenderId(activity.Trust.SenderId),
@@ -1407,19 +1430,19 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         };
     }
 
-    private async Task ProcessInboundAttachmentsAsync(
+    private async Task<bool> ProcessInboundAttachmentsAsync(
         TeamsInboundActivity activity,
         TrustAudience audience,
         List<AIContent> contents,
         CancellationToken cancellationToken)
     {
         if (activity.Attachments.Length == 0)
-            return;
+            return false;
 
         if (!_dependencies.Options.AllowAttachments)
         {
             await SendAttachmentRejectionAsync("Attachments are disabled for Microsoft Teams.").ConfigureAwait(false);
-            return;
+            return false;
         }
 
         if (_dependencies.AttachmentDownloader is null
@@ -1428,7 +1451,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             || _dependencies.Paths is null)
         {
             await SendAttachmentRejectionAsync("Attachments are temporarily unavailable. Please try again later.").ConfigureAwait(false);
-            return;
+            return false;
         }
 
         var profile = ToolAudienceProfileDefaults.GetResolvedProfile(_dependencies.AudienceProfiles, audience);
@@ -1438,7 +1461,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
             await SendAttachmentRejectionAsync(
                 $"I can only accept up to {policy.MaxFilesPerMessage} attachments per message. Please split your upload and try again.")
                 .ConfigureAwait(false);
-            return;
+            return false;
         }
 
         var inlineImages = _dependencies.ModelCapabilities?.InputModalities.HasFlag(ModelModality.Image) == true;
@@ -1503,6 +1526,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 : "Some attachments were not accepted:\n- " + string.Join("\n- ", rejections);
             await SendAttachmentRejectionAsync(message).ConfigureAwait(false);
         }
+
+        return acceptedLines.Count > 0;
     }
 
     private async Task SendAttachmentRejectionAsync(string message)
