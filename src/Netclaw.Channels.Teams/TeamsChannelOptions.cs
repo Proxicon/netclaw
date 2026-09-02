@@ -70,11 +70,25 @@ public sealed class TeamsChannelOptions : IRemoteChatChannelOptions
 
     public bool AllowDirectMessages { get; init; }
 
+    /// <summary>
+    /// Enables explicit GroupChat ingress. A configured chat and authorized
+    /// global principal remain required after this switch is enabled.
+    /// </summary>
+    public bool AllowGroupChats { get; init; }
+
+    public bool AllowAttachments { get; init; }
+
     public bool MentionOnly { get; init; } = true;
 
     public string[] AllowedTeamIds { get; init; } = [];
 
     public string[] AllowedChannelIds { get; init; } = [];
+
+    /// <summary>
+    /// Canonical Teams chat IDs that can send GroupChat ingress. Display names
+    /// remain TUI metadata and never enter this authorization check.
+    /// </summary>
+    public string[] AllowedGroupChatIds { get; init; } = [];
 
     public string[] AllowedUserIds { get; init; } = [];
 

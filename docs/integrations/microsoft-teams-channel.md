@@ -12,10 +12,12 @@ The app package grants only these bot scopes:
 
 - `personal`
 - `team`
+- `groupchat`
 
-The package requests one team-scoped RSC permission:
+The package requests these app-scoped RSC permissions:
 
 - `ChannelMessage.Read.Group`
+- `ChatMessage.Read.Chat`
 
 This permission is required for Teams to deliver an unmentioned channel reply
 to the bot. The team owner consents to it during app installation or upgrade.
@@ -25,12 +27,16 @@ admits an unmentioned message only when its canonical root was established by a
 genuine bot mention from the same approved human. New roots, unknown roots, and
 other senders are ignored before a session or model turn.
 
-The package does not request `ChatMessage.Read.Chat`, message-write, group
-chat, meeting, tab, calling, video, or file capabilities. It supports personal
-chats and standard team channels. It does not enable private or shared channels.
+The package supports personal chats, standard team channels, and approved group
+chats. It enables Teams file support for a bounded attachment pipeline.
 
-Netclaw rejects every Teams file attachment before model dispatch. Send the
-required content as message text.
+`AllowAttachments` defaults to `false`. When enabled, Netclaw accepts PNG,
+JPEG, GIF, and WebP images from supported conversations. It accepts personal
+file cards. It defers normal channel and group-chat files.
+
+The package does not request message-write, `Chat.Read.All`,
+`ChatMessage.Read.All`, `Files.Read.All`, or `Sites.Read.All`. It does not
+enable private or shared channels, meetings, tabs, calling, or video.
 
 ## Prerequisites
 
@@ -69,9 +75,8 @@ package version for every manifest update, then upgrade or reinstall that
 package in the exact target Team so its owner can grant the requested RSC
 permission. Copy the client secret value, not the secret ID.
 
-Do not add permissions beyond the package's required
-`ChannelMessage.Read.Group` RSC entry. Do not enable calling or meeting
-features.
+Do not add permissions beyond the package's required RSC entries. Do not
+enable calling or meeting features.
 
 ## Build the Teams package
 
@@ -111,9 +116,12 @@ Put non-secret settings in `~/.netclaw/config/netclaw.json`:
     "BotId": "<entra-application-id>",
     "AuthenticationMode": "ClientSecret",
     "AllowDirectMessages": false,
+    "AllowGroupChats": false,
+    "AllowAttachments": false,
     "MentionOnly": true,
     "AllowedTeamIds": ["<canonical-team-id>"],
     "AllowedChannelIds": ["<canonical-channel-id>"],
+    "AllowedGroupChatIds": ["<canonical-group-chat-id>"],
     "AllowedUserIds": ["<canonical-user-id>"],
     "ChannelAudienceOverrides": [
       {
@@ -140,6 +148,21 @@ issues, chat messages, or source control.
 
 An empty team or channel allow-list rejects channel traffic. An empty user
 allow-list accepts any sender in an allowed channel.
+
+Group chats require `AllowGroupChats: true`, an exact tenant match, and an
+exact canonical group-chat ID. They require a global allowed user or verified
+global allowed-group member. Channel overrides never authorize group chats.
+An empty global principal list rejects group-chat traffic.
+
+With `MentionOnly: true`, every group-chat message needs a structured bot
+mention. A prior group-chat message does not create a broad continuation rule.
+
+Use the Manage Group Chats screen in `netclaw config` to paste canonical IDs.
+Display names are labels only. Copy each ID from an authenticated source.
+
+Attachments remain disabled until `AllowAttachments` is true. Netclaw stages
+each accepted file, checks its size and content, then removes unsafe input.
+It never accepts a normal channel or group-chat file without safe access.
 
 Personal chats require `AllowDirectMessages: true` and an exact
 `AllowedUserIds` match. Production configurations must list approved user IDs.
@@ -173,6 +196,10 @@ Graph **application** permissions:
 Do not add `Directory.Read.All` for this feature. The Teams package RSC
 permission described above is separate from these Graph application
 permissions.
+
+Netclaw does not request `Chat.ReadBasic.WhereInstalled` by default. Group-chat
+authorization uses configured canonical IDs. Enable chat discovery only after
+Microsoft Graph support is proven and bounded to a 30-minute cache.
 
 `netclaw config` now lists **Microsoft Teams** after Mattermost. The secure
 connection flow captures Tenant ID, application/client ID, Bot ID, and a
@@ -285,7 +312,7 @@ Never publish a tunnel URL in a log, document, commit, or test fixture.
 4. Select **Upload a custom app**.
 5. Upload the generated ZIP file.
 6. Upgrade or reinstall the app in the approved team.
-7. Have the team owner approve the `ChannelMessage.Read.Group` request.
+7. Have the team owner approve both required RSC requests.
 
 Your tenant policy can disable custom app upload. Ask a Teams administrator to
 approve or upload the package when required.
@@ -294,8 +321,8 @@ approve or upload the package when required.
 
 1. Complete the privacy, legal, security, and ownership review.
 2. Build a package with the production app ID and policy URLs.
-3. Confirm that the manifest requests only `personal` and `team` bot scopes and
-   the single `ChannelMessage.Read.Group` RSC permission.
+3. Confirm that the manifest requests `personal`, `team`, and `groupchat` bot
+   scopes with both required RSC permissions.
 4. Submit the package through the Teams admin center.
 5. Ask a Teams administrator to approve and publish the app.
 6. Install the app only in approved teams and accounts.
@@ -425,6 +452,25 @@ message bodies, activity payloads, identifiers, URLs, headers, tokens, or
 secrets. See [live validation evidence](../teams/live-validation-evidence.md)
 for the current standard Posts and Threads root results and open follow-ups.
 
+## Group Chat and attachment owner smoke
+
+This change is not live validated. Upgrade the Teams package before this smoke.
+The package upgrade must include both RSC permissions and the `groupchat` scope.
+
+1. Enable one canonical Group Chat ID and one approved global user.
+2. Send a genuine structured bot mention in that group chat.
+3. Confirm one Team-audience session and one scoped reply.
+4. Send an unmentioned group-chat message and confirm no model turn occurs.
+5. Send a mention from another approved user and confirm the same session uses their sender identity.
+6. With attachments enabled, send one PNG, JPEG, GIF, or WebP image.
+7. Confirm the image reaches the configured attachment policy without URL logging.
+8. In a personal chat, send one approved file-download card.
+9. Confirm it stages through the scanner and uses only a safe attachment projection.
+10. Send an ordinary channel or Group Chat file.
+11. Confirm Netclaw reports a safe deferral and creates no model turn for that file.
+
+Stop at the first failed gate. Record only counters, scopes, and pass or fail.
+
 ## Rotate the client secret
 
 1. Create a new Entra client secret.
@@ -448,7 +494,8 @@ either secret during diagnosis.
 - A user outside `AllowedUserIds` is rejected before dispatch.
 - An unmapped channel uses the `public` audience and cannot use restricted
   tools.
-- A Graph-backed attachment is rejected without a download fallback.
+- An ordinary channel or Group Chat file is deferred without a broad Graph
+  permission fallback.
 - A client secret in `netclaw.json` fails the supported configuration model.
 
 ## Rollback

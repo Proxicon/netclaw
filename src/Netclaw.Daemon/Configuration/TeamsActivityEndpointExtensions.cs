@@ -49,6 +49,14 @@ internal static class TeamsActivityEndpointExtensions
                 policy.RequireAuthenticatedUser();
             });
         builder.Services.AddSingleton<TeamsSdkActivityTranslator>();
+        builder.Services.AddHttpClient("teams-attachments")
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                AllowAutoRedirect = false
+            });
+        builder.Services.AddSingleton<TeamsSdkAttachmentDownloader>();
+        builder.Services.AddSingleton<ITeamsAttachmentDownloader>(serviceProvider =>
+            serviceProvider.GetRequiredService<TeamsSdkAttachmentDownloader>());
         builder.Services.AddSingleton<ITeamsSdkReplyOperations, TeamsSdkReplyOperations>();
         builder.Services.AddSingleton<ITeamsReplyClient, TeamsSdkReplyClient>();
         builder.Services.AddSingleton<TeamsOutputRenderer>();
@@ -81,6 +89,8 @@ internal static class TeamsActivityEndpointExtensions
 
         var teamsApp = app.Services.GetRequiredService<TeamsBotApplication>();
         var translator = app.Services.GetRequiredService<TeamsSdkActivityTranslator>();
+        var attachmentDownloader = app.Services.GetRequiredService<TeamsSdkAttachmentDownloader>();
+        var options = app.Services.GetRequiredService<TeamsChannelOptions>();
         var ingress = app.Services.GetRequiredService<TeamsIngressActorHost>();
         var httpContextAccessor = app.Services.GetRequiredService<IHttpContextAccessor>();
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(TeamsActivityEndpointExtensions));
@@ -170,6 +180,9 @@ internal static class TeamsActivityEndpointExtensions
                 }
                 else
                 {
+                    if (options.AllowAttachments && activity is MessageActivity message)
+                        attachmentDownloader.Capture(message, result.Activity!);
+
                     var routeResult = await ingress.SubmitAsync(result.Activity!, cancellationToken);
                     if (routeResult.Disposition != TeamsIngressRouteDisposition.Routed)
                         ChannelTelemetry.For(ChannelType.Teams).RecordEventDropped($"ingress_{routeResult.Disposition.ToString().ToLowerInvariant()}");
@@ -229,6 +242,7 @@ internal static class TeamsActivityEndpointExtensions
         {
             "plain_text_accepted" => "plain_text_accepted",
             "teams_text_rendering_wrapper_ignored" => "teams_text_rendering_wrapper_ignored",
+            "teams_attachment_received" => "attachment_received",
             "graph_backed_attachment_unsupported" => "attachment_graph_backed_rejected",
             "unsupported_attachment_shape" => "attachment_shape_rejected",
             "attachment_malformed_rejected" => "attachment_malformed_rejected",

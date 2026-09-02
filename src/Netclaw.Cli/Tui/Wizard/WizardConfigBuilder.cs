@@ -651,9 +651,12 @@ public sealed class TeamsConfigSection
     public string? ClientId { get; init; }
     public string? BotId { get; init; }
     public bool AllowDirectMessages { get; init; }
+    public bool AllowGroupChats { get; init; }
+    public bool AllowAttachments { get; init; }
     public bool MentionOnly { get; init; } = true;
     public List<string>? AllowedTeamIds { get; init; }
     public List<string>? AllowedChannelIds { get; init; }
+    public List<string>? AllowedGroupChatIds { get; init; }
     public List<string>? AllowedUserIds { get; init; }
     public List<string>? AllowedGroupIds { get; init; }
     public List<TeamsChannelAudienceOverride>? ChannelAudienceOverrides { get; init; }

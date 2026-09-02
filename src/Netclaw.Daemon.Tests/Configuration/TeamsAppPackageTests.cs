@@ -20,7 +20,7 @@ public sealed class TeamsAppPackageTests
         "teams");
 
     [Fact]
-    public void ManifestTemplateUsesOnlyApprovedTeamsCapabilitiesAndChannelMessageRsc()
+    public void Manifest_template_uses_only_approved_Teams_capabilities_and_RSC()
     {
         using var document = JsonDocument.Parse(
             File.ReadAllText(Path.Combine(PackageDirectory, "manifest.template.json")));
@@ -35,10 +35,10 @@ public sealed class TeamsAppPackageTests
         var bot = Assert.Single(bots.EnumerateArray());
         Assert.Equal("${{TEAMS_APP_ID}}", bot.GetProperty("botId").GetString());
         Assert.Equal(
-            ["personal", "team"],
+            ["personal", "team", "groupchat"],
             bot.GetProperty("scopes").EnumerateArray().Select(scope => scope.GetString()!).ToArray());
         Assert.False(bot.GetProperty("supportsCalling").GetBoolean());
-        Assert.False(bot.GetProperty("supportsFiles").GetBoolean());
+        Assert.True(bot.GetProperty("supportsFiles").GetBoolean());
         Assert.False(bot.GetProperty("supportsVideo").GetBoolean());
         Assert.False(bot.TryGetProperty("supportsChannelFeatures", out _));
 
@@ -46,9 +46,21 @@ public sealed class TeamsAppPackageTests
         Assert.Equal("${{TEAMS_APP_ID}}", webApplication.GetProperty("id").GetString());
         Assert.Equal("https://netclaw", webApplication.GetProperty("resource").GetString());
         var rsc = root.GetProperty("authorization").GetProperty("permissions").GetProperty("resourceSpecific");
-        var permission = Assert.Single(rsc.EnumerateArray());
-        Assert.Equal("Application", permission.GetProperty("type").GetString());
-        Assert.Equal("ChannelMessage.Read.Group", permission.GetProperty("name").GetString());
+        Assert.Equal(
+            ["ChannelMessage.Read.Group", "ChatMessage.Read.Chat"],
+            rsc.EnumerateArray().Select(permission => permission.GetProperty("name").GetString()!).ToArray());
+        Assert.All(rsc.EnumerateArray(), permission =>
+            Assert.Equal("Application", permission.GetProperty("type").GetString()));
+        foreach (var forbiddenPermission in new[]
+                 {
+                     "Chat.Read.All",
+                     "ChatMessage.Read.All",
+                     "Files.Read.All",
+                     "Sites.Read.All"
+                 })
+        {
+            Assert.DoesNotContain(forbiddenPermission, root.GetRawText(), StringComparison.Ordinal);
+        }
 
         foreach (var forbiddenProperty in new[]
                  {
@@ -117,9 +129,11 @@ public sealed class TeamsAppPackageTests
             Assert.Equal(appId.ToString(), root.GetProperty("webApplicationInfo").GetProperty("id").GetString());
             Assert.Equal("https://netclaw", root.GetProperty("webApplicationInfo").GetProperty("resource").GetString());
             var rsc = root.GetProperty("authorization").GetProperty("permissions").GetProperty("resourceSpecific");
-            var permission = Assert.Single(rsc.EnumerateArray());
-            Assert.Equal("Application", permission.GetProperty("type").GetString());
-            Assert.Equal("ChannelMessage.Read.Group", permission.GetProperty("name").GetString());
+            Assert.Equal(
+                ["ChannelMessage.Read.Group", "ChatMessage.Read.Chat"],
+                rsc.EnumerateArray().Select(permission => permission.GetProperty("name").GetString()!).ToArray());
+            Assert.All(rsc.EnumerateArray(), permission =>
+                Assert.Equal("Application", permission.GetProperty("type").GetString()));
             Assert.Equal("Netclaw Test Operator", root.GetProperty("developer").GetProperty("name").GetString());
             Assert.Equal("https://example.test/privacy", root.GetProperty("developer").GetProperty("privacyUrl").GetString());
             Assert.Equal("https://example.test/terms", root.GetProperty("developer").GetProperty("termsOfUseUrl").GetString());

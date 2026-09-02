@@ -114,6 +114,47 @@ public sealed class TeamsPrincipalAuthorizationTests
         Assert.True(allowed.IsAllowed);
     }
 
+    [Fact]
+    public async Task Group_chats_require_a_global_user_or_verified_group_member()
+    {
+        var deniedAuthorizer = new TeamsPrincipalAuthorizer(new TeamsChannelOptions(), new FakeTeamsDirectory());
+        var memberAuthorizer = new TeamsPrincipalAuthorizer(
+            new TeamsChannelOptions { AllowedGroupIds = ["group-a"] },
+            new FakeTeamsDirectory(new HashSet<string>(["group-a"], StringComparer.Ordinal)));
+
+        var denied = await deniedAuthorizer.AuthorizeAsync(CreateGroupChatActivity(), TestContext.Current.CancellationToken);
+        var allowed = await memberAuthorizer.AuthorizeAsync(CreateGroupChatActivity(), TestContext.Current.CancellationToken);
+
+        Assert.False(denied.IsAllowed);
+        Assert.Equal("teams_group_membership_not_allowed", denied.ReasonCode);
+        Assert.True(allowed.IsAllowed);
+        Assert.Equal(PrincipalClassification.TrustedInternal, allowed.Principal);
+    }
+
+    [Fact]
+    public async Task Group_chats_ignore_channel_specific_principals()
+    {
+        var directory = new FakeTeamsDirectory(new HashSet<string>(["channel-group"], StringComparer.Ordinal));
+        var authorizer = new TeamsPrincipalAuthorizer(new TeamsChannelOptions
+        {
+            ChannelAccessOverrides =
+            [
+                new TeamsChannelAccessOverride
+                {
+                    TeamId = "team-a",
+                    ChannelId = "channel-a",
+                    AllowedGroupIds = ["channel-group"]
+                }
+            ]
+        }, directory);
+
+        var result = await authorizer.AuthorizeAsync(CreateGroupChatActivity(), TestContext.Current.CancellationToken);
+
+        Assert.False(result.IsAllowed);
+        Assert.Equal("teams_group_membership_not_allowed", result.ReasonCode);
+        Assert.Equal(0, directory.MembershipCalls);
+    }
+
     private static TeamsInboundActivity CreateChannelActivity() => new(
         CreateTrust(TeamsConversationScope.Channel),
         "prompt",
@@ -126,14 +167,29 @@ public sealed class TeamsPrincipalAuthorizationTests
         CreateTrust(TeamsConversationScope.Personal),
         "prompt");
 
+    private static TeamsInboundActivity CreateGroupChatActivity() => new(
+        CreateTrust(TeamsConversationScope.GroupChat),
+        "prompt",
+        isMentioned: true);
+
     private static TeamsIngressTrustContext CreateTrust(TeamsConversationScope scope) => new(
         TrustAudience.Public,
         PrincipalClassification.UntrustedExternal,
-        scope == TeamsConversationScope.Personal ? TrustBoundary.Personal : TrustBoundary.Public,
+        scope switch
+        {
+            TeamsConversationScope.Personal => TrustBoundary.Personal,
+            TeamsConversationScope.GroupChat => TrustBoundary.Team,
+            _ => TrustBoundary.Public
+        },
         new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
         "user-a",
         "tenant-a",
-        scope == TeamsConversationScope.Personal ? "conversation-a" : "conversation-a;messageid=root-a",
+        scope switch
+        {
+            TeamsConversationScope.Personal => "conversation-a",
+            TeamsConversationScope.GroupChat => "19:group-chat@thread.v2",
+            _ => "conversation-a;messageid=root-a"
+        },
         scope,
         "activity-a",
         DateTimeOffset.UnixEpoch);

@@ -716,6 +716,47 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Group_chat_routes_one_flat_session_with_each_authenticated_sender()
+    {
+        var pipeline = CreatePipeline(TestActor);
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            AllowGroupChats = true,
+            MentionOnly = true,
+            AllowedGroupChatIds = ["19:group-chat@thread.v2"],
+            AllowedUserIds = ["user-a", "user-b"]
+        };
+        using var provider = CreateConversationServiceProvider(pipeline);
+        var sink = new TeamsActorConversationIngressSink(Sys, options, provider);
+
+        var firstActivity = CreateGroupChatActivity("group-first", senderId: "user-a");
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(firstActivity, TestContext.Current.CancellationToken));
+        var first = ReceiveGroupChatMessage();
+
+        var secondActivity = CreateGroupChatActivity("group-second", senderId: "user-b");
+        Assert.Equal(TeamsIngressSinkResult.Accepted, await sink.RouteAsync(secondActivity, TestContext.Current.CancellationToken));
+        var second = ReceiveGroupChatMessage();
+
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateGroupChat(
+            "tenant-a",
+            "19:group-chat@thread.v2",
+            out var expectedSessionId,
+            out _));
+        Assert.Equal(expectedSessionId, first.SessionId);
+        Assert.Equal(expectedSessionId, second.SessionId);
+        Assert.Equal(TrustAudience.Team, first.Source!.Audience);
+        Assert.Equal(new SenderId("user-a"), first.Source.SenderId);
+        Assert.Equal(new SenderId("user-b"), second.Source!.SenderId);
+
+        Assert.Equal(
+            TeamsIngressSinkResult.Ignored,
+            await sink.RouteAsync(
+                CreateGroupChatActivity("group-unmentioned", isMentioned: false),
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task Approval_first_cold_spawn_preserves_the_detector_for_later_personal_ingress()
     {
         var options = new TeamsChannelOptions
@@ -3741,6 +3782,25 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         return sessionId;
     }
 
+    private static TeamsInboundActivity CreateGroupChatActivity(
+        string activityId,
+        bool isMentioned = true,
+        string senderId = "user-a") => new(
+        new TeamsIngressTrustContext(
+            TrustAudience.Public,
+            PrincipalClassification.UntrustedExternal,
+            TrustBoundary.Public,
+            new SourceProvenance(TransportAuthenticity.Verified, PayloadTaint.Community),
+            senderId,
+            "tenant-a",
+            "19:group-chat@thread.v2",
+            TeamsConversationScope.GroupChat,
+            activityId,
+            TimeProvider.System.GetUtcNow()),
+        "hello",
+        new TeamsReplyMetadata(null, null, "https://service.invalid/"),
+        isMentioned: isMentioned);
+
     private static TeamsInboundActivity CreateActivity(
         string activityId,
         string tenantId,
@@ -3877,6 +3937,22 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
         ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
         return ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+    }
+
+    private SendUserMessage ReceiveGroupChatMessage()
+    {
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            var message = ExpectMsg<object>(cancellationToken: TestContext.Current.CancellationToken);
+            if (message is SendUserMessage dispatched)
+            {
+                return dispatched;
+            }
+
+            Assert.IsType<JoinSession>(message);
+        }
+
+        throw new Xunit.Sdk.XunitException("Expected a group chat message after session initialization.");
     }
 
     private IActorRef ReceiveOutputSubscriber()

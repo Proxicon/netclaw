@@ -33,6 +33,10 @@
         {
           "type": "Application",
           "name": "ChannelMessage.Read.Group"
+        },
+        {
+          "type": "Application",
+          "name": "ChatMessage.Read.Chat"
         }
       ]
     }
@@ -42,12 +46,13 @@
       "botId": "${{TEAMS_APP_ID}}",
       "scopes": [
         "personal",
-        "team"
+        "team",
+        "groupchat"
       ],
       "isNotificationOnly": false,
       "needsChannelSelector": false,
       "supportsCalling": false,
-      "supportsFiles": false,
+      "supportsFiles": true,
       "supportsVideo": false
     }
   ]

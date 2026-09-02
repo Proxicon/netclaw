@@ -90,6 +90,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsChannelAccess => BuildTeamsChannelAccess(),
                     ChannelsConfigScreen.AllowedUsers => BuildAllowedUsers(),
                     ChannelsConfigScreen.AllowedGroups => BuildAllowedGroups(),
+                    ChannelsConfigScreen.GroupChats => BuildGroupChats(),
                     ChannelsConfigScreen.DirectoryStatus => BuildDirectoryStatus(),
                     ChannelsConfigScreen.DirectMessages => BuildDirectMessages(),
                     ChannelsConfigScreen.RotateCredentials => BuildRotateCredentials(),
@@ -356,6 +357,30 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(WizardStepHelpers.BuildTextInputPanel(input, "Group IDs"));
     }
 
+    private ILayoutNode BuildGroupChats()
+    {
+        var input = EnsureSingleInput(
+            ChannelsConfigScreen.GroupChats,
+            "group-chats",
+            ViewModel.AllowedGroupChatsInput,
+            "19:chat-id@thread.v2");
+        input.OnFocused();
+
+        return Layouts.Vertical()
+            .WithChild(Header("  Microsoft Teams > Group Chats"))
+            .WithChild(Hint("  Save canonical chat IDs. Display names never grant access."))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(Row(
+                $"   [{Check(ViewModel.GroupChatsEnabled)}] Enable Group Chat ingress",
+                focused: ViewModel.GroupChatsEnabled,
+                enabled: ViewModel.GroupChatsEnabled))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(new TextNode("  Canonical Group Chat IDs:").WithForeground(Color.White))
+            .WithChild(WizardStepHelpers.BuildTextInputPanel(input, "Group Chat IDs"))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(Hint("  Each Group Chat message needs a structured bot mention when mention-only is enabled."));
+    }
+
     private ILayoutNode BuildDirectoryStatus()
     {
         var layout = Layouts.Vertical()
@@ -451,6 +476,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsChannelAccess => "  Enter edits a principal list. Channel rules only restrict this exact Team and channel.",
                     ChannelsConfigScreen.AllowedUsers => "  Use comma-separated user IDs. Blank means unrestricted users in allowed channels.",
                     ChannelsConfigScreen.AllowedGroups => "  Use comma-separated canonical Entra group IDs. Blank removes group-derived access.",
+                    ChannelsConfigScreen.GroupChats => "  Space toggles Group Chat ingress. Enter saves canonical IDs.",
                     ChannelsConfigScreen.DirectoryStatus => "  Run netclaw doctor for offline configuration diagnostics. Esc returns to the menu.",
                     ChannelsConfigScreen.DirectMessages => "  Space toggles DMs. Left/right changes the DM audience.",
                     ChannelsConfigScreen.RotateCredentials => "  Blank secret fields preserve existing secrets. Tab and Shift+Tab switch fields.",
@@ -490,6 +516,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsChannelAccess => " [↑/↓] Select  [Enter] Edit  [Esc] Channels",
                     ChannelsConfigScreen.AllowedUsers => " [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.AllowedGroups => " [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
+                    ChannelsConfigScreen.GroupChats => " [Type] IDs  [Space] Toggle  [Enter] Apply  [Esc] Menu",
                     ChannelsConfigScreen.DirectoryStatus => " [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.DirectMessages => " [↑/↓] Navigate  [Space] Toggle  [←/→] Audience  [Enter] Apply  [Esc] Menu",
                     ChannelsConfigScreen.RotateCredentials => " [Tab/Shift+Tab] Field  [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
@@ -562,7 +589,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
     private void HandlePaste(PasteEvent paste)
     {
-        if (ViewModel.Screen.Value is ChannelsConfigScreen.AddChannel or ChannelsConfigScreen.TeamsTeamSearch or ChannelsConfigScreen.TeamsUserSearch or ChannelsConfigScreen.TeamsGroupSearch or ChannelsConfigScreen.AllowedUsers or ChannelsConfigScreen.AllowedGroups)
+        if (ViewModel.Screen.Value is ChannelsConfigScreen.AddChannel or ChannelsConfigScreen.TeamsTeamSearch or ChannelsConfigScreen.TeamsUserSearch or ChannelsConfigScreen.TeamsGroupSearch or ChannelsConfigScreen.AllowedUsers or ChannelsConfigScreen.AllowedGroups or ChannelsConfigScreen.GroupChats)
         {
             _singleInput?.HandlePaste(paste);
             StageSingleInput();
@@ -636,6 +663,9 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 break;
             case ChannelsConfigScreen.AllowedGroups:
                 HandleAllowedGroupsKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.GroupChats:
+                HandleGroupChatsKey(keyInfo);
                 break;
             case ChannelsConfigScreen.DirectoryStatus:
                 break;
@@ -884,6 +914,25 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         StageSingleInput();
     }
 
+    private void HandleGroupChatsKey(ConsoleKeyInfo keyInfo)
+    {
+        if (keyInfo.Key == ConsoleKey.Spacebar)
+        {
+            ViewModel.ToggleGroupChats();
+            return;
+        }
+
+        if (keyInfo.Key == ConsoleKey.Enter)
+        {
+            StageSingleInput();
+            ViewModel.ApplyGroupChats();
+            return;
+        }
+
+        _singleInput?.HandleInput(keyInfo);
+        StageSingleInput();
+    }
+
     private void HandleDirectMessagesKey(ConsoleKeyInfo keyInfo)
     {
         switch (keyInfo.Key)
@@ -1024,6 +1073,8 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             ViewModel.AllowedUsersInput = _singleInput?.Text;
         else if (_singleInputScreen == ChannelsConfigScreen.AllowedGroups)
             ViewModel.AllowedGroupsInput = _singleInput?.Text;
+        else if (_singleInputScreen == ChannelsConfigScreen.GroupChats)
+            ViewModel.AllowedGroupChatsInput = _singleInput?.Text;
     }
 
     private void StageCredentialInput(CredentialFieldSpec field)

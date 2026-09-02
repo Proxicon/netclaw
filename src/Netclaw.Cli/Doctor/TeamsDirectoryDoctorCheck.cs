@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Text.Json.Nodes;
+using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
 
 namespace Netclaw.Cli.Doctor;
@@ -34,7 +35,25 @@ public sealed class TeamsDirectoryDoctorCheck(NetclawPaths paths) : IDoctorCheck
 
         var teamIds = DoctorJsonConfigReader.ReadStringArray(teams, "AllowedTeamIds");
         var channelIds = DoctorJsonConfigReader.ReadStringArray(teams, "AllowedChannelIds");
-        if (teamIds.Count == 0 && channelIds.Count == 0)
+        var groupChatIds = DoctorJsonConfigReader.ReadStringArray(teams, "AllowedGroupChatIds");
+        var groupChatsEnabled = DoctorJsonConfigReader.ReadBool(teams, "AllowGroupChats");
+        if (groupChatIds.Any(id => !TeamsSessionIdentifierCodec.IsCanonicalGroupChatConversationId(id)))
+        {
+            return Task.FromResult(DoctorCheckResult.Warning(
+                "Teams directory",
+                "Teams Group Chats contain a noncanonical chat ID; Group Chat traffic will be denied.",
+                "Use canonical 19:…@thread.v2 values in Teams:AllowedGroupChatIds."));
+        }
+
+        if (groupChatsEnabled && groupChatIds.Count == 0)
+        {
+            return Task.FromResult(DoctorCheckResult.Warning(
+                "Teams directory",
+                "Teams Group Chats are enabled with no allowed chat IDs; Group Chat traffic will be denied.",
+                "Add canonical Teams:AllowedGroupChatIds or disable Teams:AllowGroupChats."));
+        }
+
+        if (teamIds.Count == 0 && channelIds.Count == 0 && !groupChatsEnabled)
         {
             return Task.FromResult(DoctorCheckResult.Warning(
                 "Teams directory",
@@ -44,6 +63,14 @@ public sealed class TeamsDirectoryDoctorCheck(NetclawPaths paths) : IDoctorCheck
 
         var userIds = DoctorJsonConfigReader.ReadStringArray(teams, "AllowedUserIds");
         var groupIds = DoctorJsonConfigReader.ReadStringArray(teams, "AllowedGroupIds");
+        if (groupChatsEnabled && userIds.Count == 0 && groupIds.Count == 0)
+        {
+            return Task.FromResult(DoctorCheckResult.Warning(
+                "Teams directory",
+                "Teams Group Chats have no global user or group allow-list; Group Chat traffic will be denied.",
+                "Add Teams:AllowedUserIds or Teams:AllowedGroupIds before relying on Group Chats."));
+        }
+
         if (DoctorJsonConfigReader.ReadBool(teams, "AllowDirectMessages") && userIds.Count == 0 && groupIds.Count == 0)
         {
             return Task.FromResult(DoctorCheckResult.Warning(
@@ -56,12 +83,14 @@ public sealed class TeamsDirectoryDoctorCheck(NetclawPaths paths) : IDoctorCheck
         {
             return Task.FromResult(DoctorCheckResult.Pass(
                 "Teams directory",
-                "Teams group authorization is configured. Verify admin consent for Team.ReadBasic.All, Channel.ReadBasic.All, User.Read.All, and GroupMember.Read.All."));
+                "Teams group authorization is configured. Verify Graph consent for Teams, users, and group membership."));
         }
 
         return Task.FromResult(DoctorCheckResult.Pass(
             "Teams directory",
-            "Teams has explicit canonical channel scope. Directory discovery remains optional for manual-ID configuration."));
+            groupChatsEnabled
+                ? "Teams has explicit canonical Group Chat scope and global user authorization."
+                : "Teams has explicit canonical channel scope. Directory discovery remains optional for manual-ID configuration."));
     }
 
     private static bool Missing(JsonObject source, string property)

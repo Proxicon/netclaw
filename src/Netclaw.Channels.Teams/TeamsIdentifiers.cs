@@ -11,8 +11,9 @@ namespace Netclaw.Channels.Teams;
 
 public enum TeamsConversationScope
 {
-    Personal,
-    Channel
+    Personal = 0,
+    Channel = 1,
+    GroupChat = 2
 }
 
 public enum TeamsIdentifierValidationError
@@ -66,6 +67,23 @@ public static class TeamsSessionIdentifierCodec
         out TeamsIdentifierValidationError error)
         => TryCreate(tenantId, TeamsConversationScope.Channel, conversationId, rootActivityId, out sessionId, out error);
 
+    public static bool TryCreateGroupChat(
+        string tenantId,
+        string conversationId,
+        out SessionId sessionId,
+        out TeamsIdentifierValidationError error)
+        => TryCreate(tenantId, TeamsConversationScope.GroupChat, conversationId, null, out sessionId, out error);
+
+    /// <summary>
+    /// Checks the canonical Microsoft Teams GroupChat conversation form. This
+    /// protects configuration and actor identities from display names.
+    /// </summary>
+    public static bool IsCanonicalGroupChatConversationId(string? conversationId)
+        => conversationId is { } value
+           && TryValidateRaw(value, TeamsIdentifierValidationError.MissingConversationId, out _)
+           && value.StartsWith("19:", StringComparison.Ordinal)
+           && value.EndsWith("@thread.v2", StringComparison.Ordinal);
+
     /// <summary>
     /// Validates an opaque activity ID before it is used for durable
     /// idempotency. This applies the same resource limit as session IDs.
@@ -98,7 +116,14 @@ public static class TeamsSessionIdentifierCodec
             return false;
         }
 
-        if (scope == TeamsConversationScope.Personal)
+        if (scope == TeamsConversationScope.GroupChat
+            && !IsCanonicalGroupChatConversationId(conversationId))
+        {
+            error = TeamsIdentifierValidationError.InvalidSessionId;
+            return false;
+        }
+
+        if (scope is TeamsConversationScope.Personal or TeamsConversationScope.GroupChat)
         {
             if (!string.Equals(threadKey, PersonalThreadKey, StringComparison.Ordinal))
                 return false;
@@ -130,6 +155,13 @@ public static class TeamsSessionIdentifierCodec
             || !TryValidateRaw(conversationId, TeamsIdentifierValidationError.MissingConversationId, out error))
             return false;
 
+        if (scope == TeamsConversationScope.GroupChat
+            && !IsCanonicalGroupChatConversationId(conversationId))
+        {
+            error = TeamsIdentifierValidationError.InvalidSessionId;
+            return false;
+        }
+
         var threadKey = PersonalThreadKey;
         if (scope == TeamsConversationScope.Channel)
         {
@@ -138,7 +170,7 @@ public static class TeamsSessionIdentifierCodec
 
             threadKey = Encode(rootActivityId!);
         }
-        else if (scope != TeamsConversationScope.Personal)
+        else if (scope is not (TeamsConversationScope.Personal or TeamsConversationScope.GroupChat))
         {
             error = TeamsIdentifierValidationError.UnsupportedScope;
             return false;
@@ -201,6 +233,12 @@ public static class TeamsSessionIdentifierCodec
         if (string.Equals(value, "channel", StringComparison.Ordinal))
         {
             scope = TeamsConversationScope.Channel;
+            return true;
+        }
+
+        if (string.Equals(value, "groupchat", StringComparison.Ordinal))
+        {
+            scope = TeamsConversationScope.GroupChat;
             return true;
         }
 

@@ -3,7 +3,7 @@
 #
 # Exercises:
 #   netclaw config -> Channels -> Microsoft Teams first-connect -> configured
-#   management -> manual Team/channel, user, and group paths -> safe return.
+#   management -> manual Team/channel, user, group, and Group Chat paths -> safe return.
 # All identifiers are synthetic. The tape never submits a directory search, so
 # it does not acquire a Graph token or contact a Teams tenant.
 
@@ -74,13 +74,14 @@ Wait+Screen@10s /Microsoft Teams is configured/
 Wait+Screen@10s /Manage channels and permissions/
 Wait+Screen@10s /Manage allowed users/
 Wait+Screen@10s /Manage allowed groups/
+Wait+Screen@10s /Manage Group Chats/
 Wait+Screen@10s /Directory \/ Graph status/
 Wait+Screen@10s /Connection & credentials/
 
 # Exercise the configured connection form through the actual Termina input
 # path. Tab must wrap from the secret to tenant, and Shift+Tab must return to
 # the secret. These values replace the first-connect values above.
-Down 6
+Down 7
 Enter
 Wait+Screen@10s /Microsoft Teams > Connection & credentials/
 Wait+Screen@10s /Entra tenant ID/
@@ -110,7 +111,7 @@ Up 3
 Down 3
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/
-Down 6
+Down 7
 Enter
 Wait+Screen@10s /aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/
 Wait+Screen@10s /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/
@@ -169,6 +170,18 @@ Type ",99999999-9999-9999-9999-999999999999"
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/
 Wait+Screen@10s /Allowed group settings saved/
+
+# Enable Group Chat ingress and save a canonical chat ID through the focused
+# text input. The display name never becomes an authorization value.
+Down
+Enter
+Wait+Screen@10s /Microsoft Teams > Group Chats/
+Wait+Screen@10s /Canonical Group Chat IDs/
+Type "19:smoke-group-chat@thread.v2"
+Space
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+Wait+Screen@10s /Group Chat settings saved/
 
 # Use the picker-level semantic Done key, not an adapter count, to return.
 Escape

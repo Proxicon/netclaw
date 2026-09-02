@@ -133,7 +133,7 @@ public sealed record TeamsIngressTrustContext
             : throw new ArgumentOutOfRangeException(parameterName, value, "Unsupported value.");
 
     private static TeamsConversationScope ValidateScope(TeamsConversationScope scope)
-        => scope is TeamsConversationScope.Personal or TeamsConversationScope.Channel
+        => scope is TeamsConversationScope.Personal or TeamsConversationScope.Channel or TeamsConversationScope.GroupChat
             ? scope
             : throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unsupported Teams conversation scope.");
 
@@ -143,10 +143,16 @@ public sealed record TeamsIngressTrustContext
             : value;
 }
 
+public enum TeamsInboundAttachmentKind
+{
+    Unknown,
+    InlineImage,
+    PersonalFile
+}
+
 /// <summary>
-/// Sanitized metadata only. Download URLs, authorization data, and SDK objects
-/// deliberately remain outside this contract until the attachment spike proves
-/// a supported authenticated retrieval shape.
+/// Sanitized attachment metadata. URLs, authorization data, and SDK objects
+/// never enter this contract, actor state, telemetry, or persistence.
 /// </summary>
 public sealed record TeamsAttachmentMetadata
 {
@@ -166,6 +172,24 @@ public sealed record TeamsAttachmentMetadata
     public string? ContentType { get; }
 
     public long? DeclaredSizeBytes { get; }
+
+    public TeamsInboundAttachmentKind Kind { get; init; }
+
+    public int SourceIndex { get; init; } = -1;
+}
+
+/// <summary>
+/// Downloads a previously captured authenticated SDK attachment. The raw URL
+/// and any SDK token remain private to the daemon hosting boundary.
+/// </summary>
+public interface ITeamsAttachmentDownloader
+{
+    Task<AttachmentDownloadResult> DownloadAsync(
+        TeamsInboundActivity activity,
+        TeamsAttachmentMetadata attachment,
+        string stagingDirectory,
+        long maximumBytes,
+        CancellationToken cancellationToken);
 }
 
 public sealed record TeamsReplyMetadata(
@@ -406,9 +430,14 @@ public sealed record TeamsOutboundDestination
     {
         TenantId = RequireIdentifier(tenantId, nameof(tenantId));
         ConversationId = RequireIdentifier(conversationId, nameof(conversationId));
-        Scope = scope is TeamsConversationScope.Personal or TeamsConversationScope.Channel
+        Scope = scope is TeamsConversationScope.Personal or TeamsConversationScope.Channel or TeamsConversationScope.GroupChat
             ? scope
             : throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unsupported Teams conversation scope.");
+        if (scope == TeamsConversationScope.GroupChat
+            && (rootActivityId is not null || teamId is not null || channelId is not null || userId is not null))
+        {
+            throw new ArgumentException("A group chat destination cannot contain channel or personal routing values.", nameof(rootActivityId));
+        }
         ServiceUrl = RequireServiceUrl(serviceUrl);
         RootActivityId = scope == TeamsConversationScope.Channel
             ? RequireIdentifier(rootActivityId!, nameof(rootActivityId))

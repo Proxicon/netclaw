@@ -66,10 +66,12 @@ public sealed class TeamsChannelFoundationTests
 
         Assert.False(options.Enabled);
         Assert.False(options.AllowDirectMessages);
+        Assert.False(options.AllowGroupChats);
         Assert.True(options.MentionOnly);
         Assert.Equal(TeamsAuthenticationMode.ClientSecret, options.AuthenticationMode);
         Assert.Empty(options.AllowedTeamIds);
         Assert.Empty(options.AllowedChannelIds);
+        Assert.Empty(options.AllowedGroupChatIds);
         Assert.Empty(options.AllowedUserIds);
         Assert.Empty(options.ChannelAudiences);
         Assert.Empty(options.ChannelAudienceOverrides);
@@ -255,6 +257,48 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal(first, repeat);
     }
 
+    [Fact]
+    public void Group_chat_identifier_round_trips_as_a_flat_conversation()
+    {
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateGroupChat(
+            "tenant-a",
+            "19:group-chat@thread.v2",
+            out var sessionId,
+            out var createError));
+        Assert.Equal(TeamsIdentifierValidationError.None, createError);
+        Assert.True(TeamsSessionIdentifierCodec.TryParse(sessionId, out var parsed, out var parseError));
+
+        Assert.Equal(TeamsIdentifierValidationError.None, parseError);
+        Assert.Equal(TeamsConversationScope.GroupChat, parsed.Scope);
+        Assert.Equal("19:group-chat@thread.v2", parsed.ConversationId);
+        Assert.Equal("conversation", parsed.ThreadKey);
+        Assert.Null(parsed.RootActivityId);
+    }
+
+    [Fact]
+    public void Group_chat_identifier_rejects_an_oversized_conversation()
+    {
+        Assert.False(TeamsSessionIdentifierCodec.TryCreateGroupChat(
+            "tenant-a",
+            new string('g', TeamsSessionIdentifierCodec.MaxRawIdentifierBytes + 1),
+            out _,
+            out var error));
+
+        Assert.Equal(TeamsIdentifierValidationError.OversizedIdentifier, error);
+    }
+
+    [Fact]
+    public void Group_chat_identifier_rejects_a_noncanonical_conversation()
+    {
+        Assert.False(TeamsSessionIdentifierCodec.TryCreateGroupChat(
+            "tenant-a",
+            "group-chat-name",
+            out _,
+            out var error));
+
+        Assert.Equal(TeamsIdentifierValidationError.InvalidSessionId, error);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
@@ -426,7 +470,35 @@ public sealed class TeamsChannelFoundationTests
             "https://service.invalid/",
             "root",
             "team"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
+            TeamsConversationScope.GroupChat,
+            "https://service.invalid/",
+            rootActivityId: "root"));
+        Assert.Throws<ArgumentException>(() => new TeamsOutboundDestination(
+            "tenant",
+            "conversation",
+            TeamsConversationScope.GroupChat,
+            "https://service.invalid/",
+            userId: "user"));
         Assert.Throws<ArgumentOutOfRangeException>(() => new TeamsAttachmentMetadata("file.txt", null, -1));
+    }
+
+    [Fact]
+    public void Group_chat_destination_requires_only_its_flat_routing_values()
+    {
+        var destination = new TeamsOutboundDestination(
+            "tenant",
+            "19:group-chat@thread.v2",
+            TeamsConversationScope.GroupChat,
+            "https://service.invalid/");
+
+        Assert.Equal(TeamsConversationScope.GroupChat, destination.Scope);
+        Assert.Null(destination.RootActivityId);
+        Assert.Null(destination.TeamId);
+        Assert.Null(destination.ChannelId);
+        Assert.Null(destination.UserId);
     }
 
     [Fact]
@@ -640,7 +712,7 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
-    public void Translator_accepts_only_complete_personal_messages()
+    public void Translator_accepts_complete_personal_and_group_chat_messages()
     {
         var translator = new TeamsSdkActivityTranslator(
             new TeamsChannelOptions { TenantId = "tenant" },
@@ -656,7 +728,38 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal("tenant", accepted.Activity!.Trust.TenantId);
         Assert.Equal(TeamsConversationScope.Personal, accepted.Activity.Trust.Scope);
         Assert.Equal(TeamsTranslationDisposition.RejectedPendingTenantEvidence, missingTenant.Disposition);
-        Assert.Equal(TeamsTranslationDisposition.RejectedUnsupportedScope, groupChat.Disposition);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, groupChat.Disposition);
+        Assert.Equal(TeamsConversationScope.GroupChat, groupChat.Activity!.Trust.Scope);
+        Assert.Null(groupChat.Activity.Reply!.RootActivityId);
+    }
+
+    [Fact]
+    public void Translator_recognizes_only_a_structured_bot_mention_in_group_chat()
+    {
+        var translator = new TeamsSdkActivityTranslator(
+            new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" },
+            TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.GroupChat);
+        activity.Text = "<at>Netclaw</at> review this";
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "<at>Netclaw</at>"
+        }];
+
+        var mentioned = translator.Translate(activity, "tenant");
+        activity.Text = "@Netclaw review this";
+        activity.Entities = [];
+        var literal = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, mentioned.Disposition);
+        Assert.Equal(TeamsConversationScope.GroupChat, mentioned.Activity!.Trust.Scope);
+        Assert.True(mentioned.Activity.IsMentioned);
+        Assert.Equal(" review this", mentioned.Activity.Text);
+        Assert.False(literal.Activity!.IsMentioned);
+        Assert.Equal("@Netclaw review this", literal.Activity.Text);
     }
 
     [Theory]
@@ -1609,6 +1712,68 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal("<at>synthetic user</at> hello", result.Activity.Text);
     }
 
+    [Fact]
+    public void Translator_maps_a_group_chat_inline_image_to_safe_metadata()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.GroupChat);
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = new AttachmentContentType("image/png"),
+            ContentUrl = new Uri("https://smba.trafficmanager.net/emea/attachments/image"),
+            Name = "diagram.png"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        var attachment = Assert.Single(result.Activity!.Attachments);
+        Assert.Equal(TeamsInboundAttachmentKind.InlineImage, attachment.Kind);
+        Assert.Equal("diagram.png", attachment.Name);
+        Assert.Equal("image/png", attachment.ContentType);
+        Assert.Equal(0, attachment.SourceIndex);
+        Assert.DoesNotContain("Url", string.Join(',', attachment.GetType().GetProperties().Select(property => property.Name)));
+    }
+
+    [Fact]
+    public void Translator_maps_a_personal_file_download_notice_to_safe_metadata()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Personal);
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = new AttachmentContentType("application/vnd.microsoft.teams.file.download.info"),
+            ContentUrl = new Uri("https://contoso.sharepoint.com/personal/user/Documents/report.pdf"),
+            Name = "report.pdf",
+            Content = JsonDocument.Parse("{\"downloadUrl\":\"https://contoso.sharepoint.com/download?token=opaque\"}").RootElement.Clone()
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        var attachment = Assert.Single(result.Activity!.Attachments);
+        Assert.Equal(TeamsInboundAttachmentKind.PersonalFile, attachment.Kind);
+        Assert.Equal("report.pdf", attachment.Name);
+        Assert.Equal(0, attachment.SourceIndex);
+    }
+
+    [Fact]
+    public void Translator_defers_non_image_group_chat_files_without_exposing_their_url()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.GroupChat);
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = new AttachmentContentType("application/vnd.microsoft.teams.file.download.info"),
+            ContentUrl = new Uri("https://contoso.sharepoint.com/personal/user/Documents/report.pdf"),
+            Name = "report.pdf"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        var attachment = Assert.Single(result.Activity!.Attachments);
+        Assert.Equal(TeamsInboundAttachmentKind.Unknown, attachment.Kind);
+        Assert.Equal("report.pdf", attachment.Name);
+    }
+
     [Theory]
     [InlineData("text/html; charset=utf-16")]
     [InlineData("text/html; profile=untrusted")]
@@ -2026,6 +2191,8 @@ public sealed class TeamsChannelFoundationTests
 
         TeamsActivityEndpointExtensions.RecordTranslationTelemetry(TeamsTranslationResult.Accepted(
             CreateInboundActivity(), "teams_text_rendering_wrapper_ignored"));
+        TeamsActivityEndpointExtensions.RecordTranslationTelemetry(TeamsTranslationResult.Accepted(
+            CreateInboundActivity(), "teams_attachment_received"));
         TeamsActivityEndpointExtensions.RecordTranslationTelemetry(TeamsTranslationResult.Rejected(
             TeamsTranslationDisposition.RejectedMalformed,
             TeamsIngressActivityKind.Message,
@@ -2038,6 +2205,8 @@ public sealed class TeamsChannelFoundationTests
         var extras = telemetry.GetSnapshot().Extras;
         Assert.Equal((initial.Extras.TryGetValue("teams_text_rendering_wrapper_ignored", out var wrapper) ? wrapper : 0) + 1,
             extras["teams_text_rendering_wrapper_ignored"]);
+        Assert.Equal((initial.Extras.TryGetValue("attachment_received", out var attachment) ? attachment : 0) + 1,
+            extras["attachment_received"]);
         Assert.Equal((initial.Extras.TryGetValue("attachment_graph_backed_rejected", out var graph) ? graph : 0) + 1,
             extras["attachment_graph_backed_rejected"]);
         Assert.Equal((initial.Extras.TryGetValue("attachment_malformed_rejected", out var malformed) ? malformed : 0) + 1,
