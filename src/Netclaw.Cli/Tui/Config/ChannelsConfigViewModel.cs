@@ -3,10 +3,13 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 using Netclaw.Actors.Channels;
 using Netclaw.Channels.Slack;
+using Netclaw.Channels.Teams;
+using Netclaw.Channels.Teams.Graph;
 using Netclaw.Cli.Config;
 using Netclaw.Cli.Discord;
 using Netclaw.Cli.Mattermost;
@@ -26,13 +29,19 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     private readonly ISlackProbe _slackProbe;
     private readonly IDiscordProbe _discordProbe;
     private readonly IMattermostProbe _mattermostProbe;
+    private readonly TimeProvider _timeProvider;
     private readonly TuiNavigation? _navigation;
+    private readonly Func<TeamsChannelOptions, ITeamsDirectory>? _teamsDirectoryFactory;
+    private readonly Func<string, string?> _environmentVariableReader;
     private readonly ChannelsConfigPersistenceMapper _mapper = new();
     private readonly ChannelsEditorValidationAdapter _validator = new();
     private readonly WizardContext _context;
     private readonly HashSet<ChannelType> _knownProviders;
     private readonly Dictionary<ChannelType, Dictionary<string, TrustAudience>> _channelAudiences = [];
     private readonly Dictionary<ChannelType, Dictionary<string, bool>> _channelMentionRequired = [];
+    private readonly Dictionary<string, TeamsDirectoryTeam> _teamsById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TeamsDirectoryChannel> _teamsChannelsByIdentity = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _teamsChannelTeamIds = new(StringComparer.Ordinal);
     private ChannelType _activeAdapterType = ChannelType.Slack;
     private int _managementMenuIndex;
     private int _channelRowIndex;
@@ -41,6 +50,18 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     private int _resetConfirmIndex;
     private CancellationTokenSource? _labelResolutionCts;
     private Task? _labelRefreshTask;
+    private TeamsDirectorySearchController? _teamsDirectorySearch;
+    private ITeamsDirectory? _teamsDirectory;
+    private IDisposable? _teamsDirectoryLifetime;
+    private bool? _teamsDirectoryLabelsAvailable;
+    private IReadOnlyList<TeamsDirectoryTeam> _teamSearchResults = [];
+    private IReadOnlyList<TeamsDirectoryChannel> _channelSearchResults = [];
+    private IReadOnlyList<TeamsDirectoryUser> _userSearchResults = [];
+    private IReadOnlyList<TeamsDirectoryGroup> _groupSearchResults = [];
+    private TeamsDirectoryTeam? _selectedTeam;
+    private int _directoryResultIndex;
+    private TeamsChannelAccessOverride? _editingChannelAccess;
+    private int _channelAccessRowIndex;
 
     // Cancels every input-triggered config write (and its channel-access probe) when the editor is
     // torn down. Fire-and-forget writes resume on thread-pool continuations (the loop has no
@@ -54,13 +75,19 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         ISlackProbe slackProbe,
         IDiscordProbe discordProbe,
         IMattermostProbe mattermostProbe,
-        TuiNavigation? navigation = null)
+        TimeProvider timeProvider,
+        TuiNavigation? navigation = null,
+        Func<TeamsChannelOptions, ITeamsDirectory>? teamsDirectoryFactory = null,
+        Func<string, string?>? environmentVariableReader = null)
     {
         _paths = paths;
         _slackProbe = slackProbe;
         _discordProbe = discordProbe;
         _mattermostProbe = mattermostProbe;
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _navigation = navigation;
+        _teamsDirectoryFactory = teamsDirectoryFactory;
+        _environmentVariableReader = environmentVariableReader ?? Environment.GetEnvironmentVariable;
         Status = new ReactiveProperty<ConfigStatusMessage>(new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral));
         Step = new ChannelPickerStepViewModel(slackProbe, discordProbe, mattermostProbe)
         {
@@ -94,6 +121,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     public ReactiveProperty<bool> IsSaved { get; } = new(false);
     internal ReactiveProperty<ChannelsConfigScreen> Screen { get; } = new(ChannelsConfigScreen.Picker);
     internal ReactiveProperty<ConfigStatusMessage> Status { get; }
+    internal bool IsCredentialSaveInProgress { get; private set; }
     public Action? OnStepContentChanged { get; set; }
 
     internal bool ShutdownRequestedForTest { get; private set; }
@@ -106,6 +134,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal string AddChannelPlaceholder => _activeAdapterType switch
     {
         ChannelType.Slack => "channel names or IDs, comma-separated",
+        ChannelType.Teams => "Advanced: canonical Teams channel IDs, comma-separated",
         _ => "channel IDs, comma-separated"
     };
     internal int ManagementMenuIndex => _managementMenuIndex;
@@ -115,12 +144,29 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal int ResetConfirmIndex => _resetConfirmIndex;
     internal string? AddChannelInput { get; set; }
     internal string? AllowedUsersInput { get; set; }
+    internal string? AllowedGroupsInput { get; set; }
+    internal string? AllowedGroupChatsInput { get; set; }
+    internal bool GroupChatsEnabled { get; set; }
+    internal bool AttachmentsEnabled { get; private set; }
+    internal string? DirectorySearchInput { get; set; }
     internal bool DirectMessagesEnabled { get; set; }
     internal string? BotTokenInput { get; set; }
     internal string? AppTokenInput { get; set; }
     internal string? ServerUrlInput { get; set; }
     internal string? CallbackUrlInput { get; set; }
+    internal string? TenantIdInput { get; set; }
+    internal string? ClientIdInput { get; set; }
+    internal string? BotIdInput { get; set; }
+    internal string? ClientSecretInput { get; set; }
     internal int CredentialFieldIndex { get; set; }
+    internal int DirectoryResultIndex => _directoryResultIndex;
+    internal int ChannelAccessRowIndex => _channelAccessRowIndex;
+    internal TeamsChannelAccessOverride? EditingChannelAccess => _editingChannelAccess;
+    internal IReadOnlyList<TeamsDirectoryTeam> TeamSearchResults => _teamSearchResults;
+    internal IReadOnlyList<TeamsDirectoryChannel> ChannelSearchResults => _channelSearchResults;
+    internal IReadOnlyList<TeamsDirectoryUser> UserSearchResults => _userSearchResults;
+    internal IReadOnlyList<TeamsDirectoryGroup> GroupSearchResults => _groupSearchResults;
+    internal TeamsDirectoryTeam? SelectedTeam => _selectedTeam;
 
     internal static IReadOnlyList<TrustAudience> AudienceOptions { get; } =
     [
@@ -222,6 +268,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         LoadAudienceDrafts(savedDraft);
         Step.OnEnter(_context, NavigationDirection.Forward);
         _mapper.ApplyToStep(Step, savedDraft);
+        if (_activeAdapterType == ChannelType.Teams)
+            StartChannelLabelResolution(ChannelType.Teams);
         IsSaved.Value = true;
         Status.Value = BuildSaveStatus(successMessage, unresolved);
         NotifyContentChanged();
@@ -506,23 +554,46 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal IReadOnlyList<ChannelsManagementMenuItem> GetManagementMenuItems()
     {
         var enabled = Step.IsAdapterEnabled(_activeAdapterType);
-        return
+        List<ChannelsManagementMenuItem> items =
         [
             new ChannelsManagementMenuItem(ChannelsManagementAction.ManageChannels, "Manage channels and permissions", "Edit allowed channels and audience levels."),
             new ChannelsManagementMenuItem(ChannelsManagementAction.AddChannel, $"Add a {ActiveAdapterName} channel", "Add channel ingress without touching credentials."),
             new ChannelsManagementMenuItem(ChannelsManagementAction.ManageUsers, "Manage allowed users", "Restrict messages to specific user IDs."),
+        ];
+
+        if (_activeAdapterType == ChannelType.Teams)
+        {
+            items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageGroups, "Manage allowed groups", "Restrict messages to verified Entra group members."));
+            items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageGroupChats, "Manage Group Chats", "Use canonical chat IDs and strict mention policy."));
+            items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.ManageAttachments, "Attachments", "Enable supported inbound Teams attachments."));
+            items.Add(new ChannelsManagementMenuItem(ChannelsManagementAction.DirectoryStatus, "Directory / Graph status", "Review safe directory capability and consent guidance."));
+        }
+
+        items.AddRange(
+        [
             new ChannelsManagementMenuItem(ChannelsManagementAction.DirectMessages, "Direct messages", "Enable or disable DM ingress and audience."),
-            new ChannelsManagementMenuItem(ChannelsManagementAction.RotateCredentials, "Rotate credentials", "Replace tokens only when explicitly entered."),
+            CreateCredentialsMenuItem(),
             new ChannelsManagementMenuItem(ChannelsManagementAction.ToggleEnabled, enabled ? $"Disable {ActiveAdapterName}" : $"Enable {ActiveAdapterName}", "Preserve saved setup while changing runtime state."),
             new ChannelsManagementMenuItem(ChannelsManagementAction.ResetConnection, $"Reset {ActiveAdapterName} connection", "Remove saved config and credentials."),
             new ChannelsManagementMenuItem(ChannelsManagementAction.Done, "Done", "Return to Channels.")
-        ];
+        ]);
+        return items;
     }
 
     internal void MoveManagementMenu(int delta)
     {
         _managementMenuIndex = Clamp(_managementMenuIndex + delta, GetManagementMenuItems().Count);
         NotifyContentChanged();
+    }
+
+    private ChannelsManagementMenuItem CreateCredentialsMenuItem()
+    {
+        if (_activeAdapterType != ChannelType.Teams)
+            return new ChannelsManagementMenuItem(ChannelsManagementAction.RotateCredentials, "Rotate credentials", "Replace tokens only when explicitly entered.");
+
+        return HasCompleteTeamsConnection()
+            ? new ChannelsManagementMenuItem(ChannelsManagementAction.RotateCredentials, "Connection & credentials", "Review connection IDs or replace the client secret.")
+            : new ChannelsManagementMenuItem(ChannelsManagementAction.RotateCredentials, "Configure Teams connection", "Set tenant, application, bot ID and client secret.");
     }
 
     internal void ActivateManagementMenuItem()
@@ -540,6 +611,18 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 break;
             case ChannelsManagementAction.ManageUsers:
                 BeginAllowedUsers();
+                break;
+            case ChannelsManagementAction.ManageGroups:
+                BeginAllowedGroups();
+                break;
+            case ChannelsManagementAction.ManageGroupChats:
+                BeginGroupChats();
+                break;
+            case ChannelsManagementAction.ManageAttachments:
+                BeginAttachments();
+                break;
+            case ChannelsManagementAction.DirectoryStatus:
+                Screen.Value = ChannelsConfigScreen.DirectoryStatus;
                 break;
             case ChannelsManagementAction.DirectMessages:
                 BeginDirectMessages();
@@ -568,10 +651,16 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     {
         var channelCount = GetChannelIds(_activeAdapterType).Count;
         var userCount = GetAllowedUserIds(_activeAdapterType).Count;
+        var groupCount = GetAllowedGroupIds(_activeAdapterType).Count;
+        var groupChatCount = _activeAdapterType == ChannelType.Teams
+            ? ChannelCsv.ParseCsv(Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedGroupChatIdsInput, trimHash: false).Count
+            : 0;
         var credentials = GetCredentialSummary(_activeAdapterType);
         var dm = GetAllowDirectMessages(_activeAdapterType) ? "enabled" : "disabled";
         var enabled = Step.IsAdapterEnabled(_activeAdapterType) ? "enabled" : "disabled";
-        return $"{enabled} · {credentials} · {Pluralize(channelCount, "channel", "channels")} · {Pluralize(userCount, "user", "users")} · DMs {dm}";
+        var groups = _activeAdapterType == ChannelType.Teams
+            ? $" · {Pluralize(groupCount, "group", "groups")} · {Pluralize(groupChatCount, "Group Chat", "Group Chats")}" : string.Empty;
+        return $"{enabled} · {credentials} · {Pluralize(channelCount, "channel", "channels")} · {Pluralize(userCount, "user", "users")}{groups} · DMs {dm}";
     }
 
     internal IReadOnlyList<ChannelPermissionRow> GetChannelRows(bool includeAddAction = true)
@@ -643,6 +732,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             BeginAddChannel();
         else if (row.IsDoneAction)
             FinishChannelPermissions();
+        else if (_activeAdapterType == ChannelType.Teams && !row.IsDirectMessage)
+            BeginTeamsChannelAccess(row.Id);
 
         // A channel or DM row has no detail page: audience is set inline with
         // left/right and the thread mention rule with Space.
@@ -659,6 +750,15 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         // one-to-one, and the add/done rows are actions.
         if (row.IsAction || row.IsDirectMessage)
             return;
+
+        if (_activeAdapterType == ChannelType.Teams)
+        {
+            var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+            var nextMentionOnly = !teams.MentionOnly;
+            teams.MentionOnly = nextMentionOnly;
+            AutosaveCompletedAction($"Microsoft Teams require @mentions in all selected channels {(nextMentionOnly ? "on" : "off")} and saved.");
+            return;
+        }
 
         var next = !GetChannelMentionRequired(_activeAdapterType, row.Id);
         SetChannelMentionRequired(_activeAdapterType, row.Id, next);
@@ -679,6 +779,16 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         var currentIndex = AudienceIndex(row.Audience);
         var next = AudienceOptions[Wrap(currentIndex + delta, AudienceOptions.Count)];
+        if (_activeAdapterType == ChannelType.Teams
+            && !TrySetTeamsChannelAudience(row.Id, next, teamId: null))
+        {
+            Status.Value = new ConfigStatusMessage(
+                "This Teams channel needs one exact Team ID before its audience can change. Use the Team search path or configure a structured override.",
+                ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
         SetChannelAudience(_activeAdapterType, row.Id, next);
         // Autosave like every other ChannelPermissions mutation (RemoveSelectedChannel,
         // ApplyAddChannel): this ←/→ toggle sets a security-relevant ACL trust tier, and without an
@@ -704,6 +814,20 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             audiences.Remove(row.Id);
         if (_channelMentionRequired.TryGetValue(_activeAdapterType, out var mentionRequired))
             mentionRequired.Remove(row.Id);
+        if (_activeAdapterType == ChannelType.Teams)
+        {
+            var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+            teams.ChannelAudienceOverrides =
+            [
+                .. teams.ChannelAudienceOverrides.Where(audienceOverride =>
+                    !string.Equals(audienceOverride.ChannelId, row.Id, StringComparison.Ordinal))
+            ];
+            teams.ChannelAccessOverrides =
+            [
+                .. teams.ChannelAccessOverrides.Where(accessOverride =>
+                    !string.Equals(accessOverride.ChannelId, row.Id, StringComparison.Ordinal))
+            ];
+        }
 
         UpdateAdapterPickerSummary(_activeAdapterType);
         _channelRowIndex = Clamp(_channelRowIndex, GetChannelRows().Count);
@@ -713,12 +837,229 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     internal void BeginAddChannel()
     {
+        if (_activeAdapterType == ChannelType.Teams)
+        {
+            BeginTeamsTeamSearch();
+            return;
+        }
+
         AddChannelInput = null;
         _audienceSelectionIndex = AudienceIndex(DefaultChannelAudience());
         Screen.Value = ChannelsConfigScreen.AddChannel;
         Status.Value = new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral);
         NotifyContentChanged();
     }
+
+    internal void BeginTeamsTeamSearch()
+    {
+        DirectorySearchInput = null;
+        _teamSearchResults = [];
+        _channelSearchResults = [];
+        _selectedTeam = null;
+        _directoryResultIndex = 0;
+        Screen.Value = ChannelsConfigScreen.TeamsTeamSearch;
+        Status.Value = new ConfigStatusMessage("Search Teams by name, or press M for the advanced canonical-ID path.", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void BeginManualTeamsChannelEntry()
+    {
+        AddChannelInput = null;
+        _audienceSelectionIndex = AudienceIndex(DefaultChannelAudience());
+        Screen.Value = ChannelsConfigScreen.AddChannel;
+        Status.Value = new ConfigStatusMessage("Advanced path: enter canonical Teams channel IDs. Existing IDs remain valid without directory access.", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void ResetTeamsTeamSearchResults()
+    {
+        _teamSearchResults = [];
+        _directoryResultIndex = 0;
+    }
+
+    internal Task SearchTeamsFromInputAsync()
+        => SearchTeamsAsync(_lifetimeCts.Token);
+
+    private async Task SearchTeamsAsync(CancellationToken cancellationToken)
+    {
+        var search = TryGetTeamsDirectorySearch();
+        if (search is null)
+            return;
+
+        Status.Value = new ConfigStatusMessage("Searching Microsoft Teams...", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+        var response = await search.SearchTeamsAsync(DirectorySearchInput ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        if (!response.IsCurrent || cancellationToken.IsCancellationRequested)
+            return;
+
+        if (!response.Result.IsAvailable || response.Result.Value is null)
+        {
+            Status.Value = new ConfigStatusMessage(DirectoryFailureMessage(response.Result.ReasonCode), ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        _teamSearchResults = response.Result.Value;
+        _directoryResultIndex = 0;
+        Status.Value = new ConfigStatusMessage(
+            _teamSearchResults.Count == 0 ? "No Teams matched that search." : "Select a Team, then press Enter.",
+            ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal Task SelectTeamAndSearchChannelsAsync()
+    {
+        if (_teamSearchResults.Count == 0)
+            return Task.CompletedTask;
+
+        _selectedTeam = _teamSearchResults[_directoryResultIndex];
+        _channelSearchResults = [];
+        _directoryResultIndex = 0;
+        Screen.Value = ChannelsConfigScreen.TeamsChannelSearch;
+        NotifyContentChanged();
+        return SearchChannelsForSelectedTeamAsync(_lifetimeCts.Token);
+    }
+
+    private async Task SearchChannelsForSelectedTeamAsync(CancellationToken cancellationToken)
+    {
+        var team = _selectedTeam;
+        var search = TryGetTeamsDirectorySearch();
+        if (team is null || search is null)
+            return;
+
+        Status.Value = new ConfigStatusMessage("Loading Team channels...", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+        var response = await search.GetChannelsAsync(team.Id, cancellationToken).ConfigureAwait(false);
+        if (!response.IsCurrent || cancellationToken.IsCancellationRequested)
+            return;
+
+        if (!response.Result.IsAvailable || response.Result.Value is null)
+        {
+            Status.Value = new ConfigStatusMessage(DirectoryFailureMessage(response.Result.ReasonCode), ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        _channelSearchResults = response.Result.Value;
+        _directoryResultIndex = 0;
+        Status.Value = new ConfigStatusMessage(
+            _channelSearchResults.Count == 0 ? "No channels are available in this Team." : "Select a channel, then press Enter to save it.",
+            ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void MoveDirectoryResult(int delta)
+    {
+        var count = Screen.Value switch
+        {
+            ChannelsConfigScreen.TeamsTeamSearch => _teamSearchResults.Count,
+            ChannelsConfigScreen.TeamsChannelSearch => _channelSearchResults.Count,
+            ChannelsConfigScreen.TeamsUserSearch => _userSearchResults.Count,
+            ChannelsConfigScreen.TeamsGroupSearch => _groupSearchResults.Count,
+            _ => 0
+        };
+        _directoryResultIndex = Clamp(_directoryResultIndex + delta, count);
+        NotifyContentChanged();
+    }
+
+    internal void SaveSelectedTeamsChannel()
+    {
+        if (_selectedTeam is null || _channelSearchResults.Count == 0)
+            return;
+
+        var channel = _channelSearchResults[_directoryResultIndex];
+        AddDiscoveredTeamsChannel(_selectedTeam, channel);
+    }
+
+    internal void AddDiscoveredTeamsChannel(TeamsDirectoryTeam team, TeamsDirectoryChannel channel)
+    {
+        ArgumentNullException.ThrowIfNull(team);
+        ArgumentNullException.ThrowIfNull(channel);
+        if (!string.Equals(team.Id, channel.TeamId, StringComparison.Ordinal))
+        {
+            Status.Value = new ConfigStatusMessage("The selected Teams channel does not belong to the selected Team.", ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        var currentTeams = GetTeamIds();
+        var currentChannels = GetChannelIds(ChannelType.Teams);
+        if (currentChannels.Contains(channel.Id, StringComparer.Ordinal))
+        {
+            Status.Value = new ConfigStatusMessage("That Teams channel is already configured.", ConfigStatusTone.Neutral);
+            NotifyContentChanged();
+            return;
+        }
+
+        SetTeamIds([.. currentTeams, team.Id]);
+        SetChannelIds(ChannelType.Teams, [.. currentChannels, channel.Id]);
+        var audience = DefaultChannelAudience();
+        SetChannelAudience(ChannelType.Teams, channel.Id, audience);
+        TrySetTeamsChannelAudience(channel.Id, audience, team.Id);
+        _teamsById[team.Id] = team;
+        _teamsChannelsByIdentity[TeamsChannelIdentity(team.Id, channel.Id)] = channel;
+        _channelRowIndex = Math.Max(GetChannelRows().Count - 3, 0);
+        Screen.Value = ChannelsConfigScreen.ChannelPermissions;
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        AutosaveCompletedAction($"Added {FormatTeamsChannelLabel(team, channel)} and saved.");
+        NotifyContentChanged();
+    }
+
+    private TeamsDirectorySearchController? TryGetTeamsDirectorySearch()
+    {
+        if (_teamsDirectorySearch is not null)
+            return _teamsDirectorySearch;
+
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        var tenantId = GetEffectiveTeamsSetting("TenantId", teams.TenantId);
+        var clientId = GetEffectiveTeamsSetting("ClientId", teams.ClientId);
+        var secret = GetEffectiveTeamsClientSecret(teams);
+        if (string.IsNullOrWhiteSpace(tenantId)
+            || string.IsNullOrWhiteSpace(clientId)
+            || string.IsNullOrWhiteSpace(secret))
+        {
+            Status.Value = new ConfigStatusMessage("Graph credentials are incomplete. Use the advanced canonical-ID path or configure Teams credentials.", ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return null;
+        }
+
+        var options = new TeamsChannelOptions
+        {
+            TenantId = tenantId,
+            ClientId = clientId,
+            ClientSecret = new SensitiveString(secret)
+        };
+        var directory = _teamsDirectoryFactory?.Invoke(options)
+                        ?? TeamsGraphDirectoryClient.Create(options, _timeProvider);
+        _teamsDirectoryLifetime = directory as IDisposable;
+        _teamsDirectory = directory;
+        _teamsDirectorySearch = new TeamsDirectorySearchController(directory, _timeProvider);
+        return _teamsDirectorySearch;
+    }
+
+    private void InvalidateTeamsDirectory()
+    {
+        _teamsDirectorySearch?.Dispose();
+        _teamsDirectoryLifetime?.Dispose();
+        _teamsDirectorySearch = null;
+        _teamsDirectoryLifetime = null;
+        _teamsDirectory = null;
+        _teamsDirectoryLabelsAvailable = null;
+        _teamsById.Clear();
+        _teamsChannelsByIdentity.Clear();
+        _teamsChannelTeamIds.Clear();
+    }
+
+    private static string DirectoryFailureMessage(string? reasonCode) => reasonCode switch
+    {
+        "teams_directory_authentication_failed" => "Microsoft Graph authentication failed. Check the tenant ID, application ID, and client secret.",
+        "teams_directory_permission_denied" => "Microsoft Graph permission was denied. Grant the required application permissions and tenant admin consent.",
+        "teams_directory_timeout" => "Microsoft Graph timed out. Check network access and try again.",
+        "teams_directory_network_unavailable" => "Microsoft Graph is unavailable. Check network access and try again.",
+        "teams_directory_request_failed" => "Microsoft Graph could not complete the request. Existing IDs remain unchanged.",
+        "teams_directory_query_too_short" => "Enter at least two characters to search the directory.",
+        _ => "Microsoft Graph is unavailable. Existing IDs remain unchanged. Use the advanced canonical-ID path if needed."
+    };
 
     /// <summary>
     /// Appends the typed channel reference(s) to the active adapter, then canonicalizes them through the
@@ -744,6 +1085,15 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (fresh.Count == 0)
         {
             Status.Value = new ConfigStatusMessage("Those channels are already configured.", ConfigStatusTone.Neutral);
+            NotifyContentChanged();
+            return;
+        }
+
+        if (_activeAdapterType == ChannelType.Teams && GetTeamIds().Count != 1)
+        {
+            Status.Value = new ConfigStatusMessage(
+                "Advanced Teams channel entry needs exactly one configured Team ID. Use Team search to save an exact Team/channel binding.",
+                ConfigStatusTone.Error);
             NotifyContentChanged();
             return;
         }
@@ -796,6 +1146,12 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     internal void BeginAllowedUsers()
     {
+        if (_activeAdapterType == ChannelType.Teams)
+        {
+            BeginTeamsUserSearch();
+            return;
+        }
+
         AllowedUsersInput = ChannelCsv.JoinOrNull(GetAllowedUserIds(_activeAdapterType));
         Screen.Value = ChannelsConfigScreen.AllowedUsers;
         Status.Value = new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral);
@@ -805,11 +1161,422 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal void ApplyAllowedUsers()
     {
         var userIds = ChannelCsv.ParseCsv(AllowedUsersInput, trimHash: false);
+        if (_editingChannelAccess is not null)
+        {
+            ReplaceEditingChannelAccess(new TeamsChannelAccessOverride
+            {
+                TeamId = _editingChannelAccess.TeamId,
+                ChannelId = _editingChannelAccess.ChannelId,
+                AllowedUserIds = [.. userIds],
+                AllowedGroupIds = _editingChannelAccess.AllowedGroupIds
+            });
+            Screen.Value = ChannelsConfigScreen.TeamsChannelAccess;
+            AutosaveCompletedAction("Channel-specific allowed users saved.");
+            NotifyContentChanged();
+            return;
+        }
+
         SetAllowedUserIds(_activeAdapterType, userIds);
         UpdateAdapterPickerSummary(_activeAdapterType);
         Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction("Allowed users saved.");
         NotifyContentChanged();
+    }
+
+    internal void BeginAllowedGroups()
+    {
+        if (_activeAdapterType == ChannelType.Teams)
+        {
+            BeginTeamsGroupSearch();
+            return;
+        }
+
+        AllowedGroupsInput = ChannelCsv.JoinOrNull(GetAllowedGroupIds(_activeAdapterType));
+        Screen.Value = ChannelsConfigScreen.AllowedGroups;
+        NotifyContentChanged();
+    }
+
+    internal void ApplyAllowedGroups()
+    {
+        var groupIds = ChannelCsv.ParseCsv(AllowedGroupsInput, trimHash: false);
+        if (_editingChannelAccess is not null)
+        {
+            ReplaceEditingChannelAccess(new TeamsChannelAccessOverride
+            {
+                TeamId = _editingChannelAccess.TeamId,
+                ChannelId = _editingChannelAccess.ChannelId,
+                AllowedUserIds = _editingChannelAccess.AllowedUserIds,
+                AllowedGroupIds = [.. groupIds]
+            });
+            Screen.Value = ChannelsConfigScreen.TeamsChannelAccess;
+            AutosaveCompletedAction("Channel-specific allowed groups saved.");
+            NotifyContentChanged();
+            return;
+        }
+
+        SetAllowedGroupIds(_activeAdapterType, groupIds);
+        UpdateAdapterPickerSummary(_activeAdapterType);
+        Screen.Value = ChannelsConfigScreen.AdapterMenu;
+        AutosaveCompletedAction("Allowed group settings saved.");
+        NotifyContentChanged();
+    }
+
+    internal void BeginGroupChats()
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        GroupChatsEnabled = teams.AllowGroupChats;
+        AllowedGroupChatsInput = teams.AllowedGroupChatIdsInput;
+        Screen.Value = ChannelsConfigScreen.GroupChats;
+        Status.Value = new ConfigStatusMessage(
+            "Group Chat names are display-only. Save canonical chat IDs.",
+            ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void ToggleGroupChats()
+    {
+        GroupChatsEnabled = !GroupChatsEnabled;
+        NotifyContentChanged();
+    }
+
+    internal void ApplyGroupChats()
+    {
+        var groupChatIds = ChannelCsv.ParseCsv(AllowedGroupChatsInput, trimHash: false);
+        if (groupChatIds.Any(id => !TeamsSessionIdentifierCodec.IsCanonicalGroupChatConversationId(id)))
+        {
+            Status.Value = new ConfigStatusMessage(
+                "Each Group Chat ID must use the canonical 19:…@thread.v2 format.",
+                ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        teams.AllowGroupChats = GroupChatsEnabled;
+        teams.AllowedGroupChatIdsInput = ChannelCsv.JoinOrNull(groupChatIds);
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        Screen.Value = ChannelsConfigScreen.AdapterMenu;
+        AutosaveCompletedAction("Microsoft Teams Group Chat settings saved.");
+        NotifyContentChanged();
+    }
+
+    internal void BeginAttachments()
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        AttachmentsEnabled = teams.AllowAttachments;
+        Screen.Value = ChannelsConfigScreen.Attachments;
+        Status.Value = new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void ToggleAttachments()
+    {
+        AttachmentsEnabled = !AttachmentsEnabled;
+        Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowAttachments = AttachmentsEnabled;
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        AutosaveCompletedAction($"Microsoft Teams attachments {(AttachmentsEnabled ? "enabled" : "disabled")} and saved.");
+        NotifyContentChanged();
+    }
+
+    private void BeginTeamsChannelAccess(string channelId)
+    {
+        var teams = GetTeamIds();
+        var matches = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelAccessOverrides
+            .Where(accessOverride => string.Equals(accessOverride.ChannelId, channelId, StringComparison.Ordinal))
+            .ToArray();
+        if (matches.Length > 1)
+        {
+            Status.Value = new ConfigStatusMessage("Channel-specific access is ambiguous. Use the Team search path or correct the structured overrides in configuration.", ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        var existing = matches.SingleOrDefault();
+        if (existing is null && teams.Count != 1)
+        {
+            Status.Value = new ConfigStatusMessage("Channel-specific access needs one canonical Team ID. Use the Team search path or add an exact structured override in configuration.", ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        _editingChannelAccess = existing ?? new TeamsChannelAccessOverride
+        {
+            TeamId = teams[0],
+            ChannelId = channelId
+        };
+        _channelAccessRowIndex = 0;
+        Screen.Value = ChannelsConfigScreen.TeamsChannelAccess;
+        NotifyContentChanged();
+    }
+
+    internal void MoveChannelAccessRow(int delta)
+    {
+        _channelAccessRowIndex = Clamp(_channelAccessRowIndex + delta, 3);
+        NotifyContentChanged();
+    }
+
+    internal void ActivateChannelAccessRow()
+    {
+        if (_editingChannelAccess is null)
+            return;
+
+        switch (_channelAccessRowIndex)
+        {
+            case 0:
+                BeginTeamsUserSearch();
+                break;
+            case 1:
+                BeginTeamsGroupSearch();
+                break;
+            default:
+                _editingChannelAccess = null;
+                Screen.Value = ChannelsConfigScreen.ChannelPermissions;
+                break;
+        }
+
+        NotifyContentChanged();
+    }
+
+    private void ReplaceEditingChannelAccess(TeamsChannelAccessOverride replacement)
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        teams.ChannelAccessOverrides =
+        [
+            .. teams.ChannelAccessOverrides.Where(accessOverride =>
+                !string.Equals(accessOverride.TeamId, replacement.TeamId, StringComparison.Ordinal)
+                || !string.Equals(accessOverride.ChannelId, replacement.ChannelId, StringComparison.Ordinal)),
+            replacement
+        ];
+        _editingChannelAccess = replacement;
+    }
+
+    internal void BeginTeamsUserSearch()
+    {
+        DirectorySearchInput = null;
+        _userSearchResults = [];
+        _directoryResultIndex = 0;
+        Screen.Value = ChannelsConfigScreen.TeamsUserSearch;
+        Status.Value = new ConfigStatusMessage("Search users by name, UPN, or mail. Press M for the advanced canonical-ID path.", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void BeginTeamsGroupSearch()
+    {
+        DirectorySearchInput = null;
+        _groupSearchResults = [];
+        _directoryResultIndex = 0;
+        Screen.Value = ChannelsConfigScreen.TeamsGroupSearch;
+        Status.Value = new ConfigStatusMessage("Search Microsoft 365 or security groups. Press M for the advanced canonical-ID path.", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void BeginManualTeamsUserEntry()
+    {
+        AllowedUsersInput = ChannelCsv.JoinOrNull(_editingChannelAccess?.AllowedUserIds ?? GetAllowedUserIds(ChannelType.Teams));
+        Screen.Value = ChannelsConfigScreen.AllowedUsers;
+        Status.Value = new ConfigStatusMessage("Advanced path: enter canonical Entra user IDs.", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void BeginManualTeamsGroupEntry()
+    {
+        AllowedGroupsInput = ChannelCsv.JoinOrNull(_editingChannelAccess?.AllowedGroupIds ?? GetAllowedGroupIds(ChannelType.Teams));
+        Screen.Value = ChannelsConfigScreen.AllowedGroups;
+        Status.Value = new ConfigStatusMessage("Advanced path: enter canonical Entra group IDs.", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void ResetTeamsPrincipalSearchResults()
+    {
+        _userSearchResults = [];
+        _groupSearchResults = [];
+        _directoryResultIndex = 0;
+    }
+
+    internal Task SearchUsersFromInputAsync()
+        => SearchUsersAsync(_lifetimeCts.Token);
+
+    private async Task SearchUsersAsync(CancellationToken cancellationToken)
+    {
+        var search = TryGetTeamsDirectorySearch();
+        if (search is null)
+            return;
+
+        Status.Value = new ConfigStatusMessage("Searching Entra users...", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+        var response = await search.SearchUsersAsync(DirectorySearchInput ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        if (!response.IsCurrent || cancellationToken.IsCancellationRequested)
+            return;
+
+        if (!response.Result.IsAvailable || response.Result.Value is null)
+        {
+            Status.Value = new ConfigStatusMessage(DirectoryFailureMessage(response.Result.ReasonCode), ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        _userSearchResults = response.Result.Value;
+        _directoryResultIndex = 0;
+        Status.Value = new ConfigStatusMessage(
+            _userSearchResults.Count == 0 ? "No users matched that search." : "Select a user, then press Enter to add it.",
+            ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal Task SearchGroupsFromInputAsync()
+        => SearchGroupsAsync(_lifetimeCts.Token);
+
+    private async Task SearchGroupsAsync(CancellationToken cancellationToken)
+    {
+        var search = TryGetTeamsDirectorySearch();
+        if (search is null)
+            return;
+
+        Status.Value = new ConfigStatusMessage("Searching Entra groups...", ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+        var response = await search.SearchGroupsAsync(DirectorySearchInput ?? string.Empty, cancellationToken).ConfigureAwait(false);
+        if (!response.IsCurrent || cancellationToken.IsCancellationRequested)
+            return;
+
+        if (!response.Result.IsAvailable || response.Result.Value is null)
+        {
+            Status.Value = new ConfigStatusMessage(DirectoryFailureMessage(response.Result.ReasonCode), ConfigStatusTone.Error);
+            NotifyContentChanged();
+            return;
+        }
+
+        _groupSearchResults = response.Result.Value;
+        _directoryResultIndex = 0;
+        Status.Value = new ConfigStatusMessage(
+            _groupSearchResults.Count == 0 ? "No groups matched that search." : "Select a group, then press Enter to add it.",
+            ConfigStatusTone.Neutral);
+        NotifyContentChanged();
+    }
+
+    internal void AddSelectedTeamsUser()
+    {
+        if (_userSearchResults.Count == 0)
+            return;
+
+        AddDiscoveredTeamsUser(_userSearchResults[_directoryResultIndex]);
+    }
+
+    internal void AddDiscoveredTeamsUser(TeamsDirectoryUser user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+        if (_editingChannelAccess is not null)
+        {
+            if (_editingChannelAccess.AllowedUserIds.Contains(user.Id, StringComparer.Ordinal))
+            {
+                Status.Value = new ConfigStatusMessage("That user already has channel access.", ConfigStatusTone.Neutral);
+                NotifyContentChanged();
+                return;
+            }
+
+            ReplaceEditingChannelAccess(new TeamsChannelAccessOverride
+            {
+                TeamId = _editingChannelAccess.TeamId,
+                ChannelId = _editingChannelAccess.ChannelId,
+                AllowedUserIds = [.. _editingChannelAccess.AllowedUserIds, user.Id],
+                AllowedGroupIds = _editingChannelAccess.AllowedGroupIds
+            });
+            Screen.Value = ChannelsConfigScreen.TeamsChannelAccess;
+            AutosaveCompletedAction($"Added {FormatTeamsUserLabel(user)} to the channel and saved.");
+            NotifyContentChanged();
+            return;
+        }
+
+        var users = GetAllowedUserIds(ChannelType.Teams);
+        if (users.Contains(user.Id, StringComparer.Ordinal))
+        {
+            Status.Value = new ConfigStatusMessage("That user is already allowed.", ConfigStatusTone.Neutral);
+            NotifyContentChanged();
+            return;
+        }
+
+        SetAllowedUserIds(ChannelType.Teams, [.. users, user.Id]);
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        AutosaveCompletedAction($"Added {FormatTeamsUserLabel(user)} and saved.");
+        NotifyContentChanged();
+    }
+
+    internal void AddSelectedTeamsGroup()
+    {
+        if (_groupSearchResults.Count == 0)
+            return;
+
+        AddDiscoveredTeamsGroup(_groupSearchResults[_directoryResultIndex]);
+    }
+
+    internal void AddDiscoveredTeamsGroup(TeamsDirectoryGroup group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        if (_editingChannelAccess is not null)
+        {
+            if (_editingChannelAccess.AllowedGroupIds.Contains(group.Id, StringComparer.Ordinal))
+            {
+                Status.Value = new ConfigStatusMessage("That group already has channel access.", ConfigStatusTone.Neutral);
+                NotifyContentChanged();
+                return;
+            }
+
+            ReplaceEditingChannelAccess(new TeamsChannelAccessOverride
+            {
+                TeamId = _editingChannelAccess.TeamId,
+                ChannelId = _editingChannelAccess.ChannelId,
+                AllowedUserIds = _editingChannelAccess.AllowedUserIds,
+                AllowedGroupIds = [.. _editingChannelAccess.AllowedGroupIds, group.Id]
+            });
+            Screen.Value = ChannelsConfigScreen.TeamsChannelAccess;
+            AutosaveCompletedAction($"Added {FormatTeamsGroupLabel(group)} to the channel and saved.");
+            NotifyContentChanged();
+            return;
+        }
+
+        var groups = GetAllowedGroupIds(ChannelType.Teams);
+        if (groups.Contains(group.Id, StringComparer.Ordinal))
+        {
+            Status.Value = new ConfigStatusMessage("That group is already allowed.", ConfigStatusTone.Neutral);
+            NotifyContentChanged();
+            return;
+        }
+
+        SetAllowedGroupIds(ChannelType.Teams, [.. groups, group.Id]);
+        UpdateAdapterPickerSummary(ChannelType.Teams);
+        AutosaveCompletedAction($"Added {FormatTeamsGroupLabel(group)} and saved.");
+        NotifyContentChanged();
+    }
+
+    internal IReadOnlyList<string> GetDirectoryStatusLines()
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        var tenantId = GetEffectiveTeamsSetting("TenantId", teams.TenantId);
+        var clientId = GetEffectiveTeamsSetting("ClientId", teams.ClientId);
+        var botId = GetEffectiveTeamsSetting("BotId", teams.BotId);
+        var hasClientSecret = !string.IsNullOrWhiteSpace(GetEffectiveTeamsClientSecret(teams));
+        var teamsConnectionConfigured = !string.IsNullOrWhiteSpace(tenantId)
+                                       && !string.IsNullOrWhiteSpace(clientId)
+                                       && !string.IsNullOrWhiteSpace(botId)
+                                       && hasClientSecret;
+        var graphCredentialsConfigured = !string.IsNullOrWhiteSpace(tenantId)
+                                        && !string.IsNullOrWhiteSpace(clientId)
+                                        && hasClientSecret;
+        var groupsConfigured = GetAllowedGroupIds(ChannelType.Teams).Count > 0;
+        return
+        [
+            teamsConnectionConfigured ? "Teams connection: configured" : "Teams connection: incomplete",
+            graphCredentialsConfigured ? "Graph app credentials: configured; access not yet verified" : "Graph app credentials: incomplete",
+            "Required Graph application permissions: Team.ReadBasic.All, Channel.ReadBasic.All",
+            "Required Graph application permissions: User.Read.All, GroupMember.Read.All",
+            "Admin consent: required for Graph application permissions",
+            _teamsDirectoryLabelsAvailable switch
+            {
+                true => "Directory labels: available",
+                false => "Directory labels: unavailable",
+                _ => "Directory labels: not yet tested"
+            },
+            groupsConfigured ? "Group authorization: configured (fails closed when Graph is unavailable)" : "Group authorization: not configured"
+        ];
     }
 
     internal void BeginDirectMessages()
@@ -856,6 +1623,10 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         AppTokenInput = null;
         ServerUrlInput = GetServerUrl(_activeAdapterType);
         CallbackUrlInput = GetCallbackUrl(_activeAdapterType);
+        TenantIdInput = _activeAdapterType == ChannelType.Teams ? Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).TenantId : null;
+        ClientIdInput = _activeAdapterType == ChannelType.Teams ? Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ClientId : null;
+        BotIdInput = _activeAdapterType == ChannelType.Teams ? Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).BotId : null;
+        ClientSecretInput = null;
         CredentialFieldIndex = 0;
         Screen.Value = ChannelsConfigScreen.RotateCredentials;
         Status.Value = new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral);
@@ -881,9 +1652,21 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 new CredentialFieldSpec("bot", "Bot token", IsSecret: true, "Mattermost bot token", GetCredentialPresenceText("bot")),
                 new CredentialFieldSpec("callback", "Callback URL", IsSecret: false, "https://netclaw.example.com/api/mattermost/actions", "Optional interactive button callback URL.")
             ],
+            ChannelType.Teams =>
+            [
+                new CredentialFieldSpec("tenant", "Entra tenant ID", IsSecret: false, "tenant GUID", null),
+                new CredentialFieldSpec("client", "Application / client ID", IsSecret: false, "application GUID", null),
+                new CredentialFieldSpec("botid", "Teams bot ID", IsSecret: false, "bot registration ID", null),
+                new CredentialFieldSpec("secret", "Client secret", IsSecret: true, "client secret", GetCredentialPresenceText("secret"))
+            ],
             _ => []
         };
     }
+
+    internal string GetCredentialsScreenTitle()
+        => _activeAdapterType == ChannelType.Teams
+            ? "Microsoft Teams > Connection & credentials"
+            : $"{ActiveAdapterName} > Credentials";
 
     internal string? GetCredentialDraftValue(string key) => key switch
     {
@@ -891,6 +1674,10 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         "app" => AppTokenInput,
         "server" => ServerUrlInput,
         "callback" => CallbackUrlInput,
+        "tenant" => TenantIdInput,
+        "client" => ClientIdInput,
+        "botid" => BotIdInput,
+        "secret" => ClientSecretInput,
         _ => null
     };
 
@@ -910,23 +1697,36 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             case "callback":
                 CallbackUrlInput = value;
                 break;
+            case "tenant":
+                TenantIdInput = value;
+                break;
+            case "client":
+                ClientIdInput = value;
+                break;
+            case "botid":
+                BotIdInput = value;
+                break;
+            case "secret":
+                ClientSecretInput = value;
+                break;
         }
     }
 
     internal void MoveCredentialField(int delta)
     {
-        CredentialFieldIndex = Clamp(CredentialFieldIndex + delta, GetCredentialFields().Count);
+        CredentialFieldIndex = Wrap(CredentialFieldIndex + delta, GetCredentialFields().Count);
         NotifyContentChanged();
     }
 
-    internal void ApplyCredentials()
+    internal Task ApplyCredentialsAsync()
     {
         var issue = ValidateCredentialDrafts();
         if (issue is not null)
         {
+            FocusCredentialField(issue.FieldId);
             Status.Value = new ConfigStatusMessage(issue.Message, ConfigStatusTone.Error);
             NotifyContentChanged();
-            return;
+            return Task.CompletedTask;
         }
 
         switch (_activeAdapterType)
@@ -945,11 +1745,90 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 mattermost.BotToken = Normalize(BotTokenInput);
                 mattermost.CallbackUrl = Normalize(CallbackUrlInput);
                 break;
+            case ChannelType.Teams:
+                var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+                teams.TenantId = Normalize(TenantIdInput);
+                teams.ClientId = Normalize(ClientIdInput);
+                teams.BotId = Normalize(BotIdInput);
+                teams.ClientSecret = Normalize(ClientSecretInput);
+                break;
         }
 
-        Screen.Value = ChannelsConfigScreen.AdapterMenu;
-        AutosaveCompletedAction("Credential changes saved.");
+        IsCredentialSaveInProgress = true;
+        Status.Value = new ConfigStatusMessage($"Saving {ActiveAdapterName} connection...", ConfigStatusTone.Neutral);
         NotifyContentChanged();
+        return EnqueueConfigWriteAsync(CompleteCredentialSaveAsync);
+    }
+
+    private async Task CompleteCredentialSaveAsync()
+    {
+        // Yield before the disk write. The key handler keeps the Termina loop free while the
+        // existing serialized write path persists and reloads the candidate configuration.
+        await Task.Yield();
+
+        var savedAdapter = _activeAdapterType;
+        var successMessage = savedAdapter == ChannelType.Teams
+            ? "Microsoft Teams connection saved."
+            : "Credential changes saved.";
+        var saved = await SaveCompletedAsync(successMessage, _lifetimeCts.Token);
+
+        await InvokeAsync(() => FinishCredentialSave(savedAdapter, saved), _lifetimeCts.Token);
+    }
+
+    private void FinishCredentialSave(ChannelType savedAdapter, bool saved)
+    {
+        IsCredentialSaveInProgress = false;
+        if (!saved)
+        {
+            NotifyContentChanged();
+            return;
+        }
+
+        if (savedAdapter == ChannelType.Teams)
+        {
+            var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+            if (!teams.HasPersistedClientSecret)
+            {
+                Status.Value = new ConfigStatusMessage("Microsoft Teams client secret did not persist. Enter the secret and apply again.", ConfigStatusTone.Error);
+                NotifyContentChanged();
+                return;
+            }
+
+            InvalidateTeamsDirectory();
+            StartChannelLabelResolution(ChannelType.Teams);
+        }
+
+        UpdateAdapterPickerSummary(savedAdapter);
+        Screen.Value = ChannelsConfigScreen.AdapterMenu;
+        Status.Value = new ConfigStatusMessage(
+            savedAdapter == ChannelType.Teams ? "Microsoft Teams connection saved." : "Credential changes saved.",
+            ConfigStatusTone.Success);
+        NotifyContentChanged();
+    }
+
+    private void FocusCredentialField(string? fieldId)
+    {
+        var key = fieldId switch
+        {
+            ChannelsEditorFieldPaths.SlackBotToken or ChannelsEditorFieldPaths.DiscordBotToken or ChannelsEditorFieldPaths.MattermostBotToken => "bot",
+            ChannelsEditorFieldPaths.SlackAppToken => "app",
+            ChannelsEditorFieldPaths.MattermostServerUrl => "server",
+            ChannelsEditorFieldPaths.MattermostCallbackUrl => "callback",
+            ChannelsEditorFieldPaths.TeamsTenantId => "tenant",
+            ChannelsEditorFieldPaths.TeamsClientId => "client",
+            ChannelsEditorFieldPaths.TeamsBotId => "botid",
+            ChannelsEditorFieldPaths.TeamsClientSecret => "secret",
+            _ => null
+        };
+        if (key is null)
+            return;
+
+        var fields = GetCredentialFields();
+        var index = fields
+            .Select((field, index) => (field, index))
+            .FirstOrDefault(entry => string.Equals(entry.field.Key, key, StringComparison.Ordinal))
+            .index;
+        CredentialFieldIndex = index;
     }
 
     private ChannelsEditorValidationResult ValidateCurrentStep()
@@ -1408,6 +2287,13 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 model.Mattermost.BotTokenDraft = Normalize(BotTokenInput);
                 model.Mattermost.CallbackUrl = Normalize(CallbackUrlInput);
                 break;
+            case ChannelType.Teams:
+                model.Teams.Enabled = true;
+                model.Teams.TenantId = Normalize(TenantIdInput);
+                model.Teams.ClientId = Normalize(ClientIdInput);
+                model.Teams.BotId = Normalize(BotIdInput);
+                model.Teams.ClientSecretDraft = Normalize(ClientSecretInput);
+                break;
         }
     }
 
@@ -1428,6 +2314,13 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 ChannelsEditorFieldPaths.MattermostServerUrl,
                 ChannelsEditorFieldPaths.MattermostBotToken,
                 ChannelsEditorFieldPaths.MattermostCallbackUrl,
+            },
+            ChannelType.Teams => new HashSet<string>(StringComparer.Ordinal)
+            {
+                ChannelsEditorFieldPaths.TeamsTenantId,
+                ChannelsEditorFieldPaths.TeamsClientId,
+                ChannelsEditorFieldPaths.TeamsBotId,
+                ChannelsEditorFieldPaths.TeamsClientSecret,
             },
             _ => new HashSet<string>(StringComparer.Ordinal),
         };
@@ -1487,6 +2380,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             Step.OnEnter(_context, NavigationDirection.Forward);
             _mapper.ApplyToStep(Step, savedDraft);
             _activeAdapterType = resetType;
+            if (resetType == ChannelType.Teams)
+                InvalidateTeamsDirectory();
             Screen.Value = ChannelsConfigScreen.Picker;
             Status.Value = new ConfigStatusMessage($"{resetName} reset saved.", ConfigStatusTone.Success);
             IsSaved.Value = true;
@@ -1543,6 +2438,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         }
 
         _labelResolutionCts?.Dispose();
+        InvalidateTeamsDirectory();
         _lifetimeCts.Dispose();
         IsSaved.Dispose();
         Screen.Dispose();
@@ -1559,7 +2455,16 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             ChannelsConfigScreen.AdapterMenu => ChannelsConfigScreen.Picker,
             ChannelsConfigScreen.ChannelPermissions => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.AddChannel => ChannelsConfigScreen.ChannelPermissions,
-            ChannelsConfigScreen.AllowedUsers => ChannelsConfigScreen.AdapterMenu,
+            ChannelsConfigScreen.TeamsTeamSearch => ChannelsConfigScreen.ChannelPermissions,
+            ChannelsConfigScreen.TeamsChannelSearch => ChannelsConfigScreen.TeamsTeamSearch,
+            ChannelsConfigScreen.TeamsUserSearch => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
+            ChannelsConfigScreen.TeamsGroupSearch => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
+            ChannelsConfigScreen.TeamsChannelAccess => ChannelsConfigScreen.ChannelPermissions,
+            ChannelsConfigScreen.AllowedUsers => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
+            ChannelsConfigScreen.AllowedGroups => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
+            ChannelsConfigScreen.GroupChats => ChannelsConfigScreen.AdapterMenu,
+            ChannelsConfigScreen.Attachments => ChannelsConfigScreen.AdapterMenu,
+            ChannelsConfigScreen.DirectoryStatus => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.DirectMessages => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.RotateCredentials => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.ResetConfirm => ChannelsConfigScreen.AdapterMenu,
@@ -1630,6 +2535,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         AddAudienceDraft(ChannelType.Slack, draft.Slack.ChannelAudiences);
         AddAudienceDraft(ChannelType.Discord, draft.Discord.ChannelAudiences);
         AddAudienceDraft(ChannelType.Mattermost, draft.Mattermost.ChannelAudiences);
+        AddTeamsAudienceDraft(draft.Teams.ChannelAudienceOverrides);
         AddMentionRequiredDraft(ChannelType.Slack, draft.Slack.MentionRequiredInThreadByChannel);
         AddMentionRequiredDraft(ChannelType.Discord, draft.Discord.MentionRequiredInThreadByChannel);
         AddMentionRequiredDraft(ChannelType.Mattermost, draft.Mattermost.MentionRequiredInThreadByChannel);
@@ -1641,6 +2547,24 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             return;
 
         _channelAudiences[type] = new Dictionary<string, TrustAudience>(audiences, StringComparer.Ordinal);
+    }
+
+    private void AddTeamsAudienceDraft(IReadOnlyList<TeamsChannelAudienceOverride> overrides)
+    {
+        var exactOverrides = overrides
+            .Where(static audienceOverride => !string.IsNullOrWhiteSpace(audienceOverride.ChannelId)
+                                             && SecurityPolicyDefaults.TryParseAudience(audienceOverride.Audience, out _))
+            .GroupBy(static audienceOverride => audienceOverride.ChannelId!, StringComparer.Ordinal)
+            .Where(static group => group.Count() == 1)
+            .ToDictionary(
+                static group => group.Key,
+                static group =>
+                {
+                    SecurityPolicyDefaults.TryParseAudience(group.Single().Audience, out var audience);
+                    return audience;
+                },
+                StringComparer.Ordinal);
+        AddAudienceDraft(ChannelType.Teams, exactOverrides);
     }
 
     private void AddMentionRequiredDraft(ChannelType type, IReadOnlyDictionary<string, bool> mentionRequired)
@@ -1665,12 +2589,59 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         }
 
         audiences[channelId] = audience;
+        if (type == ChannelType.Teams)
+            TrySetTeamsChannelAudience(channelId, audience, teamId: null);
+    }
+
+    private bool TrySetTeamsChannelAudience(string channelId, TrustAudience audience, string? teamId)
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        var resolvedTeamId = teamId;
+        if (string.IsNullOrWhiteSpace(resolvedTeamId))
+        {
+            var candidates = teams.ChannelAudienceOverrides
+                .Where(audienceOverride => string.Equals(audienceOverride.ChannelId, channelId, StringComparison.Ordinal))
+                .Select(static audienceOverride => audienceOverride.TeamId)
+                .Concat(teams.ChannelAccessOverrides
+                    .Where(accessOverride => string.Equals(accessOverride.ChannelId, channelId, StringComparison.Ordinal))
+                    .Select(static accessOverride => accessOverride.TeamId))
+                .Where(static id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (candidates.Length == 1)
+                resolvedTeamId = candidates[0];
+            else
+            {
+                var configuredTeams = GetTeamIds();
+                if (configuredTeams.Count == 1)
+                    resolvedTeamId = configuredTeams[0];
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(resolvedTeamId))
+            return false;
+
+        teams.ChannelAudienceOverrides =
+        [
+            .. teams.ChannelAudienceOverrides.Where(audienceOverride =>
+                !string.Equals(audienceOverride.TeamId, resolvedTeamId, StringComparison.Ordinal)
+                || !string.Equals(audienceOverride.ChannelId, channelId, StringComparison.Ordinal)),
+            new TeamsChannelAudienceOverride
+            {
+                TeamId = resolvedTeamId,
+                ChannelId = channelId,
+                Audience = audience.ToWireValue()
+            }
+        ];
+        return true;
     }
 
     private bool GetChannelMentionRequired(ChannelType type, string channelId)
-        => _channelMentionRequired.TryGetValue(type, out var mentionRequired)
-            && mentionRequired.TryGetValue(channelId, out var required)
-            && required;
+        => type == ChannelType.Teams
+            ? Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).MentionOnly
+            : _channelMentionRequired.TryGetValue(type, out var mentionRequired)
+              && mentionRequired.TryGetValue(channelId, out var required)
+              && required;
 
     private void SetChannelMentionRequired(ChannelType type, string channelId, bool value)
     {
@@ -1696,8 +2667,14 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         ChannelType.Slack => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<SlackStepViewModel>(ChannelType.Slack).ChannelNamesInput, trimHash: true),
         ChannelType.Discord => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<DiscordStepViewModel>(ChannelType.Discord).ChannelIdsInput, trimHash: true),
         ChannelType.Mattermost => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<MattermostStepViewModel>(ChannelType.Mattermost).ChannelIdsInput, trimHash: true),
+        ChannelType.Teams => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelIdsInput, trimHash: false),
         _ => []
     };
+
+    private IReadOnlyList<string> GetTeamIds()
+        => ChannelCsv.ParseCsv(
+            Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).TeamIdsInput,
+            trimHash: false);
 
     private void SetChannelIds(ChannelType type, IReadOnlyList<string> channelIds)
     {
@@ -1713,14 +2690,22 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             case ChannelType.Mattermost:
                 Step.GetAdapterViewModel<MattermostStepViewModel>(ChannelType.Mattermost).ChannelIdsInput = value;
                 break;
+            case ChannelType.Teams:
+                Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelIdsInput = value;
+                break;
         }
     }
+
+    private void SetTeamIds(IReadOnlyList<string> teamIds)
+        => Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).TeamIdsInput =
+            ChannelCsv.JoinOrNull(teamIds.Distinct(StringComparer.Ordinal).ToArray());
 
     private IReadOnlyList<string> GetAllowedUserIds(ChannelType type) => type switch
     {
         ChannelType.Slack => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<SlackStepViewModel>(ChannelType.Slack).AllowedUserIdsInput, trimHash: false),
         ChannelType.Discord => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<DiscordStepViewModel>(ChannelType.Discord).AllowedUserIdsInput, trimHash: false),
         ChannelType.Mattermost => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<MattermostStepViewModel>(ChannelType.Mattermost).AllowedUserIdsInput, trimHash: false),
+        ChannelType.Teams => ChannelCsv.ParseCsv(Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedUserIdsInput, trimHash: false),
         _ => []
     };
 
@@ -1744,7 +2729,21 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 mattermost.RestrictToSpecificUsers = userIds.Count > 0;
                 mattermost.AllowedUserIdsInput = value;
                 break;
+            case ChannelType.Teams:
+                Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedUserIdsInput = value;
+                break;
         }
+    }
+
+    private IReadOnlyList<string> GetAllowedGroupIds(ChannelType type)
+        => type == ChannelType.Teams
+            ? ChannelCsv.ParseCsv(Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedGroupIdsInput, trimHash: false)
+            : [];
+
+    private void SetAllowedGroupIds(ChannelType type, IReadOnlyList<string> groupIds)
+    {
+        if (type == ChannelType.Teams)
+            Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedGroupIdsInput = ChannelCsv.JoinOrNull(groupIds);
     }
 
     private bool GetAllowDirectMessages(ChannelType type) => type switch
@@ -1752,6 +2751,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         ChannelType.Slack => Step.GetAdapterViewModel<SlackStepViewModel>(ChannelType.Slack).AllowDirectMessages,
         ChannelType.Discord => Step.GetAdapterViewModel<DiscordStepViewModel>(ChannelType.Discord).AllowDirectMessages,
         ChannelType.Mattermost => Step.GetAdapterViewModel<MattermostStepViewModel>(ChannelType.Mattermost).AllowDirectMessages,
+        ChannelType.Teams => Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowDirectMessages,
         _ => false
     };
 
@@ -1767,6 +2767,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 break;
             case ChannelType.Mattermost:
                 Step.GetAdapterViewModel<MattermostStepViewModel>(ChannelType.Mattermost).AllowDirectMessages = enabled;
+                break;
+            case ChannelType.Teams:
+                Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowDirectMessages = enabled;
                 break;
         }
     }
@@ -1793,6 +2796,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 "configured - leave blank to keep",
             ChannelType.Mattermost when key == "bot" && Step.GetAdapterViewModel<MattermostStepViewModel>(ChannelType.Mattermost).HasPersistedBotToken =>
                 "configured - leave blank to keep",
+            ChannelType.Teams when key == "secret" && Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).HasPersistedClientSecret =>
+                "configured - leave blank to keep",
             _ => null
         };
     }
@@ -1811,15 +2816,42 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             ChannelType.Mattermost => Step.GetAdapterViewModel<MattermostStepViewModel>(ChannelType.Mattermost).HasPersistedBotToken
                 ? "bot token configured"
                 : "bot token missing",
+            ChannelType.Teams => HasCompleteTeamsConnection()
+                ? "connection configured"
+                : "connection incomplete",
             _ => "credentials unknown"
         };
     }
+
+    private bool HasCompleteTeamsConnection()
+    {
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        return !string.IsNullOrWhiteSpace(GetEffectiveTeamsSetting("TenantId", teams.TenantId))
+               && !string.IsNullOrWhiteSpace(GetEffectiveTeamsSetting("ClientId", teams.ClientId))
+               && !string.IsNullOrWhiteSpace(GetEffectiveTeamsSetting("BotId", teams.BotId))
+               && !string.IsNullOrWhiteSpace(GetEffectiveTeamsClientSecret(teams));
+    }
+
+    // The daemon treats NETCLAW_* variables as the highest-priority source. The
+    // TUI's live Graph lookup must use that same connection, otherwise a stale
+    // secrets.json value can make discovery fail while the deployed connector works.
+    private string? GetEffectiveTeamsSetting(string name, string? persistedValue)
+    {
+        var environmentValue = Normalize(_environmentVariableReader($"NETCLAW_Teams__{name}"));
+        return string.IsNullOrWhiteSpace(environmentValue) ? Normalize(persistedValue) : environmentValue;
+    }
+
+    private string? GetEffectiveTeamsClientSecret(TeamsStepViewModel teams)
+        => GetEffectiveTeamsSetting(
+            "ClientSecret",
+            GetEffectiveSecret("Teams.ClientSecret", teams.ClientSecret, teams.HasPersistedClientSecret));
 
     private static string GetAdapterDisplayName(ChannelType type) => type switch
     {
         ChannelType.Slack => "Slack",
         ChannelType.Discord => "Discord",
         ChannelType.Mattermost => "Mattermost",
+        ChannelType.Teams => "Microsoft Teams",
         _ => type.ToString()
     };
 
@@ -1850,6 +2882,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             ChannelType.Slack => FormatSlackChannelLabel(channelId),
             ChannelType.Discord => FormatDiscordChannelLabel(channelId),
             ChannelType.Mattermost => FormatMattermostChannelLabel(channelId),
+            ChannelType.Teams => FormatTeamsChannelLabel(channelId),
             _ => channelId
         };
 
@@ -1882,6 +2915,94 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         return !string.IsNullOrWhiteSpace(resolved.DisplayName)
             ? resolved.DisplayName
             : $"#{resolved.ChannelName}";
+    }
+
+    private static string FormatTeamsChannelLabel(TeamsDirectoryTeam team, TeamsDirectoryChannel channel)
+    {
+        var teamLabel = string.IsNullOrWhiteSpace(team.DisplayName) ? "Microsoft Teams" : team.DisplayName;
+        var channelLabel = string.IsNullOrWhiteSpace(channel.DisplayName) ? "Channel" : channel.DisplayName;
+        return $"{teamLabel} / {channelLabel}";
+    }
+
+    private string FormatTeamsChannelLabel(string channelId)
+    {
+        if (!TryResolveTeamsTeamId(channelId, out var teamId))
+            return $"Teams channel {AbbreviateIdentifier(channelId)}";
+
+        _teamsById.TryGetValue(teamId, out var team);
+        _teamsChannelsByIdentity.TryGetValue(TeamsChannelIdentity(teamId, channelId), out var channel);
+        if (team is null && channel is null)
+            return $"Teams channel {AbbreviateIdentifier(channelId)}";
+
+        var teamLabel = string.IsNullOrWhiteSpace(team?.DisplayName) ? "Microsoft Teams" : team.DisplayName;
+        var channelLabel = string.IsNullOrWhiteSpace(channel?.DisplayName)
+            ? AbbreviateIdentifier(channelId)
+            : channel.DisplayName;
+        return $"{teamLabel} / {channelLabel}";
+    }
+
+    private bool TryResolveTeamsTeamId(string channelId, out string teamId)
+    {
+        if (_teamsChannelTeamIds.TryGetValue(channelId, out var cachedTeamId)
+            && !string.IsNullOrWhiteSpace(cachedTeamId))
+        {
+            teamId = cachedTeamId;
+            return true;
+        }
+
+        var teams = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        var candidates = teams.ChannelAudienceOverrides
+            .Where(audienceOverride => string.Equals(audienceOverride.ChannelId, channelId, StringComparison.Ordinal))
+            .Select(static audienceOverride => audienceOverride.TeamId)
+            .Concat(teams.ChannelAccessOverrides
+                .Where(accessOverride => string.Equals(accessOverride.ChannelId, channelId, StringComparison.Ordinal))
+                .Select(static accessOverride => accessOverride.TeamId))
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (candidates.Length == 1)
+        {
+            teamId = candidates[0];
+            return true;
+        }
+
+        var configuredTeams = GetTeamIds();
+        if (configuredTeams.Count == 1)
+        {
+            teamId = configuredTeams[0];
+            return true;
+        }
+
+        teamId = string.Empty;
+        return false;
+    }
+
+    private static string TeamsChannelIdentity(string teamId, string channelId) => teamId + "\n" + channelId;
+
+    private static string AbbreviateIdentifier(string value)
+    {
+        const int visibleLength = 8;
+        if (string.IsNullOrWhiteSpace(value))
+            return "unavailable";
+
+        var trimmed = value.Trim();
+        return trimmed.Length <= visibleLength * 2
+            ? trimmed
+            : $"{trimmed[..visibleLength]}…{trimmed[^visibleLength..]}";
+    }
+
+    private static string FormatTeamsUserLabel(TeamsDirectoryUser user)
+    {
+        var principal = user.UserPrincipalName ?? user.Mail;
+        return !string.IsNullOrWhiteSpace(user.DisplayName) && !string.IsNullOrWhiteSpace(principal)
+            ? $"{user.DisplayName} <{principal}>"
+            : principal ?? user.DisplayName ?? "selected user";
+    }
+
+    private static string FormatTeamsGroupLabel(TeamsDirectoryGroup group)
+    {
+        var label = group.DisplayName ?? group.Mail ?? "selected group";
+        return $"{label} ({group.Kind})";
     }
 
     private static int AudienceIndex(TrustAudience audience)
@@ -1943,6 +3064,18 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     private void StartChannelLabelResolution(ChannelType type)
     {
+        if (type == ChannelType.Teams)
+        {
+            if (TryGetTeamsDirectorySearch() is null || _teamsDirectory is null)
+                return;
+
+            _labelResolutionCts?.Cancel();
+            _labelResolutionCts?.Dispose();
+            _labelResolutionCts = new CancellationTokenSource();
+            _labelRefreshTask = RefreshTeamsChannelLabelsInBackgroundAsync(_teamsDirectory, _labelResolutionCts.Token);
+            return;
+        }
+
         if (type is not (ChannelType.Slack or ChannelType.Discord or ChannelType.Mattermost))
             return;
 
@@ -1952,6 +3085,122 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         // Fire-and-forget: probe off-loop, then marshal the reconcile onto the loop via InvokeAsync. This
         // path must NOT reconcile in its continuation (that is the render/edit race this fix closes).
         _labelRefreshTask = RefreshChannelLabelsInBackgroundAsync(type, _labelResolutionCts.Token);
+    }
+
+    private async Task RefreshTeamsChannelLabelsInBackgroundAsync(ITeamsDirectory directory, CancellationToken ct)
+    {
+        if (!Step.IsAdapterEnabled(ChannelType.Teams))
+            return;
+
+        var channelIds = GetChannelIds(ChannelType.Teams);
+        var mappings = channelIds
+            .Select(channelId => TryResolveTeamsTeamId(channelId, out var teamId)
+                ? new TeamsSavedChannel(teamId, channelId)
+                : default(TeamsSavedChannel?))
+            .OfType<TeamsSavedChannel>()
+            .Distinct()
+            .ToArray();
+        var unmappedChannelIds = channelIds
+            .Except(mappings.Select(static mapping => mapping.ChannelId), StringComparer.Ordinal)
+            .ToHashSet(StringComparer.Ordinal);
+        var configuredTeamIds = GetTeamIds();
+        if (mappings.Length == 0 && (unmappedChannelIds.Count == 0 || configuredTeamIds.Count == 0))
+            return;
+
+        var teams = new ConcurrentDictionary<string, TeamsDirectoryTeam>(StringComparer.Ordinal);
+        var channels = new ConcurrentDictionary<string, TeamsDirectoryChannel>(StringComparer.Ordinal);
+        var legacyCandidates = new ConcurrentDictionary<string, ConcurrentDictionary<string, TeamsDirectoryChannel>>(StringComparer.Ordinal);
+        var directoryRequestCount = 0;
+        var availableRequestCount = 0;
+        try
+        {
+            if (unmappedChannelIds.Count > 0 && configuredTeamIds.Count > 0)
+            {
+                await Parallel.ForEachAsync(
+                    configuredTeamIds,
+                    new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = 4 },
+                    async (teamId, token) =>
+                    {
+                        Interlocked.Increment(ref directoryRequestCount);
+                        var result = await directory.GetChannelsAsync(teamId, TeamsGraphSearchLimits.MaximumResults, token).ConfigureAwait(false);
+                        if (!result.IsAvailable || result.Value is null)
+                            return;
+
+                        Interlocked.Increment(ref availableRequestCount);
+
+                        foreach (var channel in result.Value.Where(channel => unmappedChannelIds.Contains(channel.Id)))
+                        {
+                            var candidates = legacyCandidates.GetOrAdd(
+                                channel.Id,
+                                static _ => new ConcurrentDictionary<string, TeamsDirectoryChannel>(StringComparer.Ordinal));
+                            candidates[channel.TeamId] = channel;
+                        }
+                    }).ConfigureAwait(false);
+            }
+
+            var legacyMappings = legacyCandidates
+                .Where(static candidate => candidate.Value.Count == 1)
+                .Select(static candidate => new TeamsSavedChannel(candidate.Value.Single().Key, candidate.Key))
+                .ToArray();
+            foreach (var mapping in legacyMappings)
+            {
+                var channel = legacyCandidates[mapping.ChannelId][mapping.TeamId];
+                channels[TeamsChannelIdentity(mapping.TeamId, mapping.ChannelId)] = channel;
+            }
+
+            var resolvedMappings = mappings.Concat(legacyMappings).Distinct().ToArray();
+            await Parallel.ForEachAsync(
+                resolvedMappings.Select(static mapping => mapping.TeamId).Distinct(StringComparer.Ordinal),
+                new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = 4 },
+                async (teamId, token) =>
+                {
+                    Interlocked.Increment(ref directoryRequestCount);
+                    var result = await directory.GetTeamAsync(teamId, token).ConfigureAwait(false);
+                    if (result.IsAvailable && result.Value is not null)
+                    {
+                        Interlocked.Increment(ref availableRequestCount);
+                        teams[result.Value.Id] = result.Value;
+                    }
+                }).ConfigureAwait(false);
+
+            await Parallel.ForEachAsync(
+                mappings,
+                new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = 4 },
+                async (mapping, token) =>
+                {
+                    Interlocked.Increment(ref directoryRequestCount);
+                    var result = await directory.GetChannelAsync(mapping.TeamId, mapping.ChannelId, token).ConfigureAwait(false);
+                    if (result.IsAvailable && result.Value is not null)
+                    {
+                        Interlocked.Increment(ref availableRequestCount);
+                        channels[TeamsChannelIdentity(result.Value.TeamId, result.Value.Id)] = result.Value;
+                    }
+                }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (ct.IsCancellationRequested || directoryRequestCount == 0)
+            return;
+
+        _ = InvokeAsync(
+            () =>
+            {
+                if (ct.IsCancellationRequested)
+                    return;
+
+                _teamsDirectoryLabelsAvailable = availableRequestCount > 0;
+                foreach (var (teamId, team) in teams)
+                    _teamsById[teamId] = team;
+                foreach (var (identity, channel) in channels)
+                    _teamsChannelsByIdentity[identity] = channel;
+                foreach (var candidate in legacyCandidates.Where(static candidate => candidate.Value.Count == 1))
+                    _teamsChannelTeamIds[candidate.Key] = candidate.Value.Single().Key;
+                NotifyContentChanged();
+            },
+            ct);
     }
 
     // Exposes the in-flight background label refresh for tests asserting save/dispose serialization.
@@ -1979,6 +3228,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         _labelRefreshTask = null;
     }
 
+    private readonly record struct TeamsSavedChannel(string TeamId, string ChannelId);
+
     // Fail CLOSED to Public on a corrupt posture via the shared reader rather than throwing into this
     // view-model's constructor. The Security editor (the posture's owner) surfaces the corruption;
     // Channels only consumes posture for channel/DM audience ACL defaults, where Public is the safe
@@ -1997,7 +3248,16 @@ internal enum ChannelsConfigScreen
     AdapterMenu,
     ChannelPermissions,
     AddChannel,
+    TeamsTeamSearch,
+    TeamsChannelSearch,
+    TeamsUserSearch,
+    TeamsGroupSearch,
+    TeamsChannelAccess,
     AllowedUsers,
+    AllowedGroups,
+    GroupChats,
+    Attachments,
+    DirectoryStatus,
     DirectMessages,
     RotateCredentials,
     ResetConfirm
@@ -2008,6 +3268,10 @@ internal enum ChannelsManagementAction
     ManageChannels,
     AddChannel,
     ManageUsers,
+    ManageGroups,
+    ManageGroupChats,
+    ManageAttachments,
+    DirectoryStatus,
     DirectMessages,
     RotateCredentials,
     ToggleEnabled,
@@ -2051,7 +3315,8 @@ internal sealed class ChannelsConfigPersistenceMapper
         {
             [ChannelType.Slack] = new ChannelPersistenceSpec("Slack", ["Slack.BotToken", "Slack.AppToken"]),
             [ChannelType.Discord] = new ChannelPersistenceSpec("Discord", ["Discord.BotToken"]),
-            [ChannelType.Mattermost] = new ChannelPersistenceSpec("Mattermost", ["Mattermost.BotToken"])
+            [ChannelType.Mattermost] = new ChannelPersistenceSpec("Mattermost", ["Mattermost.BotToken"]),
+            [ChannelType.Teams] = new ChannelPersistenceSpec("Teams", ["Teams.ClientSecret"])
         };
 
     internal ChannelsConfigDraft Load(NetclawPaths paths)
@@ -2062,12 +3327,14 @@ internal sealed class ChannelsConfigPersistenceMapper
         {
             Slack = LoadSlack(paths, config, secrets),
             Discord = LoadDiscord(paths, config, secrets),
-            Mattermost = LoadMattermost(paths, config, secrets)
+            Mattermost = LoadMattermost(paths, config, secrets),
+            Teams = LoadTeams(paths, config, secrets)
         };
 
         AddKnownProvider(draft.KnownProviders, ChannelType.Slack, draft.Slack.IsKnown);
         AddKnownProvider(draft.KnownProviders, ChannelType.Discord, draft.Discord.IsKnown);
         AddKnownProvider(draft.KnownProviders, ChannelType.Mattermost, draft.Mattermost.IsKnown);
+        AddKnownProvider(draft.KnownProviders, ChannelType.Teams, draft.Teams.IsKnown);
         return draft;
     }
 
@@ -2093,6 +3360,13 @@ internal sealed class ChannelsConfigPersistenceMapper
             BuildSummary(draft.Mattermost),
             vm => ApplyMattermost((MattermostStepViewModel)vm, draft.Mattermost),
             draft.Mattermost.IsKnown);
+
+        step.LoadAdapterState(
+            ChannelType.Teams,
+            draft.Teams.Enabled,
+            BuildSummary(draft.Teams),
+            vm => ApplyTeams((TeamsStepViewModel)vm, draft.Teams),
+            draft.Teams.IsKnown);
     }
 
     internal SectionContribution BuildContribution(
@@ -2138,6 +3412,12 @@ internal sealed class ChannelsConfigPersistenceMapper
             channelAudiences,
             channelMentionRequired,
             posture);
+        AddTeamsContribution(
+            fields,
+            secrets,
+            step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams),
+            step.IsAdapterEnabled(ChannelType.Teams),
+            knownProviders.Contains(ChannelType.Teams));
 
         return new SectionContribution(fields, secrets);
     }
@@ -2221,6 +3501,35 @@ internal sealed class ChannelsConfigPersistenceMapper
         };
     }
 
+    private static TeamsChannelDraft LoadTeams(
+        NetclawPaths paths,
+        Dictionary<string, object> config,
+        Dictionary<string, object> secrets)
+    {
+        var hasClientSecret = HasSecret(paths, secrets, "Teams.ClientSecret");
+        var sectionPresent = SectionPresent(config, "Teams");
+        return new TeamsChannelDraft
+        {
+            IsKnown = sectionPresent || hasClientSecret,
+            Enabled = sectionPresent && GetBool(config, "Teams.Enabled", defaultValue: false),
+            HasPersistedClientSecret = hasClientSecret,
+            TenantId = GetString(config, "Teams.TenantId"),
+            ClientId = GetString(config, "Teams.ClientId"),
+            BotId = GetString(config, "Teams.BotId"),
+            TeamIds = GetStringArray(config, "Teams.AllowedTeamIds"),
+            ChannelIds = GetStringArray(config, "Teams.AllowedChannelIds"),
+            AllowDirectMessages = GetBool(config, "Teams.AllowDirectMessages", defaultValue: false),
+            AllowGroupChats = GetBool(config, "Teams.AllowGroupChats", defaultValue: false),
+            AllowAttachments = GetBool(config, "Teams.AllowAttachments", defaultValue: false),
+            AllowedGroupChatIds = GetStringArray(config, "Teams.AllowedGroupChatIds"),
+            MentionOnly = GetBool(config, "Teams.MentionOnly", defaultValue: true),
+            AllowedUserIds = GetStringArray(config, "Teams.AllowedUserIds"),
+            AllowedGroupIds = GetStringArray(config, "Teams.AllowedGroupIds"),
+            ChannelAudienceOverrides = GetTeamsChannelAudienceOverrides(config),
+            ChannelAccessOverrides = GetTeamsChannelAccessOverrides(config)
+        };
+    }
+
     private static void ApplySlack(SlackStepViewModel vm, SlackChannelDraft draft)
     {
         vm.SlackEnabled = draft.Enabled;
@@ -2256,6 +3565,27 @@ internal sealed class ChannelsConfigPersistenceMapper
         vm.RestrictToSpecificUsers = draft.AllowedUserIds.Count > 0;
         vm.AllowedUserIdsInput = ChannelCsv.JoinOrNull(draft.AllowedUserIds);
         vm.CallbackUrl = draft.CallbackUrl;
+    }
+
+    private static void ApplyTeams(TeamsStepViewModel vm, TeamsChannelDraft draft)
+    {
+        vm.TeamsEnabled = draft.Enabled;
+        vm.TenantId = draft.TenantId;
+        vm.ClientId = draft.ClientId;
+        vm.BotId = draft.BotId;
+        vm.ClientSecret = null;
+        vm.HasPersistedClientSecret = draft.HasPersistedClientSecret;
+        vm.TeamIdsInput = ChannelCsv.JoinOrNull(draft.TeamIds);
+        vm.ChannelIdsInput = ChannelCsv.JoinOrNull(draft.ChannelIds);
+        vm.AllowDirectMessages = draft.AllowDirectMessages;
+        vm.AllowGroupChats = draft.AllowGroupChats;
+        vm.AllowAttachments = draft.AllowAttachments;
+        vm.AllowedGroupChatIdsInput = ChannelCsv.JoinOrNull(draft.AllowedGroupChatIds);
+        vm.MentionOnly = draft.MentionOnly;
+        vm.AllowedUserIdsInput = ChannelCsv.JoinOrNull(draft.AllowedUserIds);
+        vm.AllowedGroupIdsInput = ChannelCsv.JoinOrNull(draft.AllowedGroupIds);
+        vm.ChannelAudienceOverrides = [.. draft.ChannelAudienceOverrides];
+        vm.ChannelAccessOverrides = [.. draft.ChannelAccessOverrides];
     }
 
     private static void AddSlackContribution(
@@ -2357,6 +3687,39 @@ internal sealed class ChannelsConfigPersistenceMapper
         AddSecretPreserveOrSet(secrets, "Mattermost.BotToken", vm.BotToken, vm.HasPersistedBotToken);
     }
 
+    private static void AddTeamsContribution(
+        List<SectionFieldAction> fields,
+        List<SectionSecretAction> secrets,
+        TeamsStepViewModel vm,
+        bool enabled,
+        bool knownProvider)
+    {
+        if (!enabled)
+        {
+            if (knownProvider)
+                fields.Add(new SectionFieldAction("Teams.Enabled", SectionFieldActionKind.Set, false));
+            AddSecretPreserveOrSet(secrets, "Teams.ClientSecret", vm.ClientSecret, vm.HasPersistedClientSecret);
+            return;
+        }
+
+        fields.Add(new SectionFieldAction("Teams.Enabled", SectionFieldActionKind.Set, true));
+        fields.Add(new SectionFieldAction("Teams.MentionOnly", SectionFieldActionKind.Set, vm.MentionOnly));
+        fields.Add(new SectionFieldAction("Teams.AllowDirectMessages", SectionFieldActionKind.Set, vm.AllowDirectMessages));
+        fields.Add(new SectionFieldAction("Teams.AllowGroupChats", SectionFieldActionKind.Set, vm.AllowGroupChats));
+        fields.Add(new SectionFieldAction("Teams.AllowAttachments", SectionFieldActionKind.Set, vm.AllowAttachments));
+        SetStringOrDelete(fields, "Teams.TenantId", vm.TenantId);
+        SetStringOrDelete(fields, "Teams.ClientId", vm.ClientId);
+        SetStringOrDelete(fields, "Teams.BotId", vm.BotId);
+        SetArrayOrDelete(fields, "Teams.AllowedTeamIds", ChannelCsv.ParseCsv(vm.TeamIdsInput, trimHash: false));
+        SetArrayOrDelete(fields, "Teams.AllowedChannelIds", ChannelCsv.ParseCsv(vm.ChannelIdsInput, trimHash: false));
+        SetArrayOrDelete(fields, "Teams.AllowedGroupChatIds", ChannelCsv.ParseCsv(vm.AllowedGroupChatIdsInput, trimHash: false));
+        SetArrayOrDelete(fields, "Teams.AllowedUserIds", ChannelCsv.ParseCsv(vm.AllowedUserIdsInput, trimHash: false));
+        SetArrayOrDelete(fields, "Teams.AllowedGroupIds", ChannelCsv.ParseCsv(vm.AllowedGroupIdsInput, trimHash: false));
+        SetTeamsChannelAudienceOverridesOrDelete(fields, vm.ChannelAudienceOverrides);
+        SetTeamsChannelAccessOverridesOrDelete(fields, vm.ChannelAccessOverrides);
+        AddSecretPreserveOrSet(secrets, "Teams.ClientSecret", vm.ClientSecret, vm.HasPersistedClientSecret);
+    }
+
     private static void AddSecretPreserveOrSet(
         List<SectionSecretAction> secrets,
         string path,
@@ -2388,6 +3751,32 @@ internal sealed class ChannelsConfigPersistenceMapper
         fields.Add(values.Count > 0
             ? new SectionFieldAction(path, SectionFieldActionKind.Set, values.ToArray())
             : new SectionFieldAction(path, SectionFieldActionKind.Delete));
+    }
+
+    private static void SetTeamsChannelAccessOverridesOrDelete(
+        List<SectionFieldAction> fields,
+        IReadOnlyList<TeamsChannelAccessOverride> overrides)
+    {
+        var valid = overrides
+            .Where(static accessOverride => !string.IsNullOrWhiteSpace(accessOverride.TeamId)
+                                            && !string.IsNullOrWhiteSpace(accessOverride.ChannelId))
+            .ToArray();
+        fields.Add(valid.Length > 0
+            ? new SectionFieldAction("Teams.ChannelAccessOverrides", SectionFieldActionKind.Set, valid)
+            : new SectionFieldAction("Teams.ChannelAccessOverrides", SectionFieldActionKind.Delete));
+    }
+
+    private static void SetTeamsChannelAudienceOverridesOrDelete(
+        List<SectionFieldAction> fields,
+        IReadOnlyList<TeamsChannelAudienceOverride> overrides)
+    {
+        var valid = overrides
+            .Where(static audienceOverride => !string.IsNullOrWhiteSpace(audienceOverride.TeamId)
+                                             && SecurityPolicyDefaults.TryParseAudience(audienceOverride.Audience, out _))
+            .ToArray();
+        fields.Add(valid.Length > 0
+            ? new SectionFieldAction("Teams.ChannelAudienceOverrides", SectionFieldActionKind.Set, valid)
+            : new SectionFieldAction("Teams.ChannelAudienceOverrides", SectionFieldActionKind.Delete));
     }
 
     private static void SetDictionaryOrDelete(List<SectionFieldAction> fields, string path, IReadOnlyDictionary<string, string> values)
@@ -2538,6 +3927,66 @@ internal sealed class ChannelsConfigPersistenceMapper
         throw new InvalidOperationException($"Configuration value '{path}' must be an array of strings.");
     }
 
+    private static IReadOnlyList<TeamsChannelAccessOverride> GetTeamsChannelAccessOverrides(Dictionary<string, object> config)
+    {
+        if (!ConfigFileHelper.TryGetPathValue(config, "Teams.ChannelAccessOverrides", out var value) || value is null)
+            return [];
+
+        if (value is not object[] values)
+            throw new InvalidOperationException("Configuration value 'Teams.ChannelAccessOverrides' must be an array.");
+
+        var overrides = new List<TeamsChannelAccessOverride>(values.Length);
+        foreach (var valueItem in values)
+        {
+            var accessOverride = valueItem switch
+            {
+                JsonElement element => JsonSerializer.Deserialize<TeamsChannelAccessOverride>(element.GetRawText()),
+                Dictionary<string, object> item => JsonSerializer.Deserialize<TeamsChannelAccessOverride>(JsonSerializer.Serialize(item)),
+                _ => null
+            };
+            if (accessOverride is null
+                || string.IsNullOrWhiteSpace(accessOverride.TeamId)
+                || string.IsNullOrWhiteSpace(accessOverride.ChannelId))
+            {
+                throw new InvalidOperationException("Teams channel access overrides require canonical TeamId and ChannelId values.");
+            }
+
+            overrides.Add(accessOverride);
+        }
+
+        return overrides;
+    }
+
+    private static IReadOnlyList<TeamsChannelAudienceOverride> GetTeamsChannelAudienceOverrides(Dictionary<string, object> config)
+    {
+        if (!ConfigFileHelper.TryGetPathValue(config, "Teams.ChannelAudienceOverrides", out var value) || value is null)
+            return [];
+
+        if (value is not object[] values)
+            throw new InvalidOperationException("Configuration value 'Teams.ChannelAudienceOverrides' must be an array.");
+
+        var overrides = new List<TeamsChannelAudienceOverride>(values.Length);
+        foreach (var valueItem in values)
+        {
+            var audienceOverride = valueItem switch
+            {
+                JsonElement element => JsonSerializer.Deserialize<TeamsChannelAudienceOverride>(element.GetRawText()),
+                Dictionary<string, object> item => JsonSerializer.Deserialize<TeamsChannelAudienceOverride>(JsonSerializer.Serialize(item)),
+                _ => null
+            };
+            if (audienceOverride is null
+                || string.IsNullOrWhiteSpace(audienceOverride.TeamId)
+                || !SecurityPolicyDefaults.TryParseAudience(audienceOverride.Audience, out _))
+            {
+                throw new InvalidOperationException("Teams channel audience overrides require a canonical TeamId and a valid audience.");
+            }
+
+            overrides.Add(audienceOverride);
+        }
+
+        return overrides;
+    }
+
     private static Dictionary<string, TrustAudience> GetChannelAudiences(Dictionary<string, object> config, string path)
     {
         if (!ConfigFileHelper.TryGetPathValue(config, path, out var value) || value is null)
@@ -2638,6 +4087,7 @@ internal sealed class ChannelsConfigDraft
     public required SlackChannelDraft Slack { get; init; }
     public required DiscordChannelDraft Discord { get; init; }
     public required MattermostChannelDraft Mattermost { get; init; }
+    public required TeamsChannelDraft Teams { get; init; }
     public HashSet<ChannelType> KnownProviders { get; } = [];
 }
 
@@ -2668,6 +4118,22 @@ internal sealed class MattermostChannelDraft : ChannelProviderDraft
     public string? ServerUrl { get; init; }
     public bool HasPersistedBotToken { get; init; }
     public string? CallbackUrl { get; init; }
+}
+
+internal sealed class TeamsChannelDraft : ChannelProviderDraft
+{
+    public string? TenantId { get; init; }
+    public string? ClientId { get; init; }
+    public string? BotId { get; init; }
+    public bool HasPersistedClientSecret { get; init; }
+    public bool MentionOnly { get; init; } = true;
+    public IReadOnlyList<string> TeamIds { get; init; } = [];
+    public bool AllowGroupChats { get; init; }
+    public bool AllowAttachments { get; init; }
+    public IReadOnlyList<string> AllowedGroupChatIds { get; init; } = [];
+    public IReadOnlyList<string> AllowedGroupIds { get; init; } = [];
+    public IReadOnlyList<TeamsChannelAudienceOverride> ChannelAudienceOverrides { get; init; } = [];
+    public IReadOnlyList<TeamsChannelAccessOverride> ChannelAccessOverrides { get; init; } = [];
 }
 
 /// <summary>
