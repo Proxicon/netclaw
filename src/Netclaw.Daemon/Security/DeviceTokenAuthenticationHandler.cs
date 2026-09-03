@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Netclaw.Configuration;
+using Netclaw.Daemon.Configuration;
 
 namespace Netclaw.Daemon.Security;
 
@@ -46,6 +47,12 @@ internal sealed class DeviceTokenAuthenticationHandler : AuthenticationHandler<A
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        // The Teams SDK endpoint owns Bot Framework bearer validation through
+        // AzureAd. A default-scheme probe must not misclassify that bearer as a
+        // device credential and emit a misleading device-token failure.
+        if (Request.Path == TeamsActivityEndpointExtensions.ActivityPath)
+            return AuthenticateResult.NoResult();
+
         if (!Request.Headers.TryGetValue("Authorization", out var authHeader))
             return AuthenticateResult.NoResult();
 

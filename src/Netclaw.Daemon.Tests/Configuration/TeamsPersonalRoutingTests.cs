@@ -1257,6 +1257,61 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Mentioned_channel_image_only_root_creates_one_model_turn()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        const string conversationId = "conversation-inline-image-only-root;messageid=root-a";
+        var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId),
+            CreateAttachmentEnabledChannelDependencies(paths)));
+
+        var activity = CreateChannelActivity(
+            "root-a",
+            conversationId,
+            text: string.Empty,
+            attachments: [CreateInboundAttachment("inline.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, activity)).Disposition);
+
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Established_channel_thread_image_only_continuation_creates_one_model_turn()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        const string conversationId = "conversation-inline-image-only-thread;messageid=root-a";
+        var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId),
+            CreateAttachmentEnabledChannelDependencies(paths)));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, CreateChannelActivity("root-a", conversationId))).Disposition);
+        ReceiveDispatchedMessage();
+
+        var continuation = CreateChannelActivity(
+            "reply-image-only",
+            conversationId,
+            isMentioned: false,
+            text: string.Empty,
+            attachments: [CreateInboundAttachment("inline.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, continuation)).Disposition);
+
+        ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var dispatched = ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Mentioned_channel_text_and_inline_image_with_rendering_companion_creates_one_model_turn()
     {
         using var root = new DisposableTempDir();
@@ -1303,9 +1358,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         [
             new Microsoft.Teams.Apps.Schema.TeamsAttachment
             {
-                ContentType = new AttachmentContentType("image/png"),
-                ContentUrl = new Uri("https://smba.trafficmanager.net/amer/v3/attachments/image"),
-                Name = "inline.png"
+                ContentType = new AttachmentContentType("image/*"),
+                ContentUrl = new Uri("https://smba.trafficmanager.net/amer/v3/attachments/image")
             },
             new Microsoft.Teams.Apps.Schema.TeamsAttachment
             {
@@ -1326,8 +1380,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             TimeProvider.System)
         {
             PromptInjectionDetector = SafeTeamsPromptInjectionDetector.Instance,
-            AttachmentDownloader = new TestTeamsAttachmentDownloader(),
-            ContentScanner = new NullContentScanner(),
+            AttachmentDownloader = new PngTeamsAttachmentDownloader(),
+            ContentScanner = new MagicByteContentScanner(new ContentPolicy()),
             AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles(),
             Paths = paths
         };
@@ -1340,6 +1394,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var dispatched = ReceiveDispatchedMessage();
         Assert.Contains("inspect this image", dispatched.Content, StringComparison.Ordinal);
         Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+        Assert.Contains("attachment-1.png", dispatched.Content, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4064,6 +4119,28 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         audienceProfiles: ToolAudienceProfileDefaults.CreateProfiles(),
         paths: paths);
 
+    private TeamsConversationDependencies CreateAttachmentEnabledChannelDependencies(NetclawPaths paths) => new(
+        new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            MentionOnly = true,
+            AllowedTeamIds = ["team-a"],
+            AllowedChannelIds = ["channel-a"],
+            AllowedUserIds = ["user-a"],
+            AllowAttachments = true
+        },
+        CreatePipeline(TestActor),
+        new TestTeamsReplyClient(),
+        new TeamsOutputRenderer(),
+        TimeProvider.System)
+    {
+        PromptInjectionDetector = SafeTeamsPromptInjectionDetector.Instance,
+        AttachmentDownloader = new TestTeamsAttachmentDownloader(),
+        ContentScanner = new NullContentScanner(),
+        AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles(),
+        Paths = paths
+    };
+
     private static ServiceProvider CreateConversationServiceProvider(
         ISessionPipeline pipeline,
         bool includeDetector = true,
@@ -4104,6 +4181,23 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             var path = Path.Combine(stagingDirectory, ".teams-test-download.tmp");
             await File.WriteAllBytesAsync(path, [1, 2, 3, 4], cancellationToken);
             return new AttachmentDownloadResult(path, 4);
+        }
+    }
+
+    private sealed class PngTeamsAttachmentDownloader : ITeamsAttachmentDownloader
+    {
+        private static readonly byte[] PngBytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+        public async Task<AttachmentDownloadResult> DownloadAsync(
+            TeamsInboundActivity activity,
+            TeamsAttachmentMetadata attachment,
+            string stagingDirectory,
+            long maximumBytes,
+            CancellationToken cancellationToken)
+        {
+            var path = Path.Combine(stagingDirectory, ".teams-png-download.tmp");
+            await File.WriteAllBytesAsync(path, PngBytes, cancellationToken);
+            return new AttachmentDownloadResult(path, PngBytes.Length);
         }
     }
 

@@ -175,6 +175,13 @@ public sealed record TeamsAttachmentMetadata
 
     public TeamsInboundAttachmentKind Kind { get; init; }
 
+    /// <summary>
+    /// True only when the daemon translator had to create the display name
+    /// because Teams did not provide one. Actors use it only to request a
+    /// verified extension after the scanner identifies the bytes.
+    /// </summary>
+    public bool UsesGeneratedName { get; init; }
+
     public int SourceIndex { get; init; } = -1;
 }
 

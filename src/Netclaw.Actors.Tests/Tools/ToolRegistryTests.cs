@@ -339,6 +339,33 @@ public class ToolRegistryTests
     }
 
     [Fact]
+    public void Registry_routes_a_current_tool_with_nonlegacy_invalid_punctuation_through_its_safe_alias()
+    {
+        var registry = new ToolRegistry();
+        var adapter = new McpToolAdapter(
+            CreateFakeTool("lookup"), "server.name", "tool name");
+        registry.Register(adapter);
+
+        var alias = adapter.LlmFacingName.Value;
+        Assert.True(LlmFacingToolName.IsProviderSafe(alias));
+        Assert.Equal(alias, ((AIFunction)adapter.ToAITool()).Name);
+        Assert.Same(adapter, registry.GetByName(alias));
+        Assert.Equal(adapter.Name, registry.ToCanonicalName(alias));
+    }
+
+    [Fact]
+    public void Registry_rejects_colliding_provider_aliases_deterministically()
+    {
+        var registry = new ToolRegistry();
+        registry.Register(new McpToolAdapter(CreateFakeTool("run"), "tools", "run"));
+
+        var error = Assert.Throws<ArgumentException>(
+            () => registry.Register(CreateFakeTool("tools__run"), "builtin"));
+
+        Assert.Contains("provider-facing name", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Canonical_and_LlmFacing_round_trip_for_first_party_tools_is_identity()
     {
         // First-party tool names already satisfy the Anthropic regex —

@@ -33,7 +33,8 @@ public static class ContentVerification
         DeclaredMimeType declaredMimeType,
         ChannelAttachmentPolicy policy,
         TimeSpan scanTimeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ContentScanOptions scanOptions = default)
     {
         ContentScanResult scanResult;
         try
@@ -41,7 +42,7 @@ public static class ContentVerification
             using var scanCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             scanCts.CancelAfter(scanTimeout);
             scanResult = await scanner.ScanFileAsync(
-                filePath, filename, declaredMimeType.Value, scanCts.Token);
+                filePath, filename, declaredMimeType.Value, scanOptions, scanCts.Token);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

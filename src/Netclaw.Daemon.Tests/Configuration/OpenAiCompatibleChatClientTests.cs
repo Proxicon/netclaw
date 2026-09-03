@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using Netclaw.Providers.SelfHosted;
+using Netclaw.Tools;
 using Xunit;
 
 namespace Netclaw.Daemon.Tests.Configuration;
@@ -274,6 +275,48 @@ data: [DONE]
         // Tool result message should include tool_call_id
         Assert.Contains("\"tool_call_id\":\"call_42\"", body, StringComparison.Ordinal);
         Assert.Contains("\"role\":\"tool\"", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Historical_invalid_tool_names_are_normalized_without_losing_the_following_user_turn()
+    {
+        string? body = null;
+        using var handler = new RecordingHandler(req =>
+        {
+            body = req.Content is null ? null : req.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"id\":\"1\",\"model\":\"test\",\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ordinary turn completed\"}}]}",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        });
+        using var httpClient = new HttpClient(handler) { BaseAddress = new Uri("http://localhost:8000") };
+        var client = new OpenAiCompatibleChatClient(
+            httpClient,
+            OpenAiCompatibleEndpoint.FromBaseUrl("http://localhost:8000"),
+            "test-model");
+        var legacyNames = new[] { "legacy.tool", "legacy/tool", "legacy:tool", "legacy tool", "legacy$tool" };
+        var history = legacyNames.Select((name, index) => new ChatMessage(
+            ChatRole.Assistant,
+            [new FunctionCallContent($"call_{index}", name, new Dictionary<string, object?>())]));
+
+        var response = await client.GetResponseAsync(
+            [.. history, new ChatMessage(ChatRole.User, "ordinary personal message")],
+            cancellationToken: TestContext.Current.CancellationToken);
+
+        Assert.Equal("ordinary turn completed", response.Text);
+        Assert.NotNull(body);
+        using var payload = JsonDocument.Parse(body);
+        var toolNames = payload.RootElement
+            .GetProperty("messages")
+            .EnumerateArray()
+            .Where(message => message.TryGetProperty("tool_calls", out _))
+            .Select(message => message.GetProperty("tool_calls")[0].GetProperty("function").GetProperty("name").GetString())
+            .ToArray();
+        Assert.Equal(legacyNames.Length, toolNames.Length);
+        Assert.All(toolNames, name => Assert.True(LlmFacingToolName.IsProviderSafe(name)));
     }
 
     [Fact]

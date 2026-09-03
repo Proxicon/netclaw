@@ -13,6 +13,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Netclaw.Media;
+using Netclaw.Tools;
 
 namespace Netclaw.Providers.SelfHosted;
 
@@ -555,7 +556,7 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
                         ["type"] = "function",
                         ["function"] = new JsonObject
                         {
-                            ["name"] = tc.Name ?? string.Empty,
+                            ["name"] = LlmFacingToolName.ForProvider(tc.Name),
                             ["arguments"] = tc.Arguments is not null
                                 ? JsonSerializer.Serialize(tc.Arguments, JsonOptions)
                                 : "{}"
@@ -680,7 +681,7 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
             ["type"] = "function",
             ["function"] = new JsonObject
             {
-                ["name"] = tool.Name,
+                ["name"] = LlmFacingToolName.ForProvider(tool.Name),
                 ["description"] = tool.Description,
                 ["parameters"] = schema
             }

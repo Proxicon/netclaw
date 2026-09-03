@@ -3,6 +3,8 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Netclaw.Tools;
@@ -17,9 +19,9 @@ namespace Netclaw.Tools;
 /// <remarks>
 /// Inside Netclaw, tool identity is always the canonical
 /// <see cref="ToolName"/> (e.g. <c>notion/notion-create-pages</c> for
-/// MCP, <c>shell_execute</c> for first-party). The LLM-facing alias
-/// replaces characters disallowed by the regex above — currently only
-/// <c>/</c> → <c>__</c> — and is surfaced only at the two LLM boundaries:
+/// MCP, <c>shell_execute</c> for first-party). The LLM-facing alias preserves
+/// the established MCP slash replacement and encodes other disallowed names.
+/// It is surfaced only at the two LLM boundaries:
 /// when emitting tool definitions, and when echoing tool result messages
 /// back. Internal code (audit logs, approvals, prompts, CLI) should
 /// keep working in canonical <see cref="ToolName"/> values.
@@ -28,6 +30,8 @@ public readonly record struct LlmFacingToolName
 {
     private static readonly Regex AnthropicSafeName =
         new("^[a-zA-Z0-9_-]{1,128}$", RegexOptions.Compiled);
+    private const string EncodedPrefix = "nc_";
+    private const string HashedPrefix = "nc_hash_";
 
     private LlmFacingToolName(string value) => Value = value;
 
@@ -36,29 +40,44 @@ public readonly record struct LlmFacingToolName
     public string Value { get; }
 
     /// <summary>
-    /// Produce an LLM-facing alias from a canonical tool name. The only
-    /// transformation today is <c>/</c> → <c>__</c> (MCP namespacing);
-    /// names without disallowed characters round-trip unchanged. Throws
-    /// <see cref="ArgumentException"/> if the result still fails the
-    /// regex — that means a name with other disallowed characters (space,
-    /// dot, colon, etc.) made it this far, which is a bug at the source.
+    /// Produce a deterministic provider-safe alias. Already-safe canonical
+    /// names keep their established wire value. Canonical MCP names preserve
+    /// their existing slash replacement. Other names use reversible Base64Url
+    /// UTF-8 encoding when it fits the provider limit. An oversized name uses
+    /// a deterministic hash and remains correlated by the registry.
     /// </summary>
     public static LlmFacingToolName FromCanonical(string canonical)
     {
         ArgumentException.ThrowIfNullOrEmpty(canonical);
 
-        var sanitized = canonical.Replace("/", "__", StringComparison.Ordinal);
-        if (!AnthropicSafeName.IsMatch(sanitized))
-        {
-            throw new ArgumentException(
-                $"Tool name '{canonical}' cannot be made LLM-safe by replacing '/' with '__'. " +
-                $"Result '{sanitized}' contains characters outside [a-zA-Z0-9_-] or exceeds 128 chars. " +
-                "Pick a name that satisfies the Anthropic tool-name regex.",
-                nameof(canonical));
-        }
+        if (IsProviderSafe(canonical))
+            return new LlmFacingToolName(canonical);
 
-        return new LlmFacingToolName(sanitized);
+        var slashSanitized = canonical.Replace("/", "__", StringComparison.Ordinal);
+        if (IsProviderSafe(slashSanitized))
+            return new LlmFacingToolName(slashSanitized);
+
+        var encoded = EncodedPrefix + Convert.ToBase64String(Encoding.UTF8.GetBytes(canonical))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+        if (IsProviderSafe(encoded))
+            return new LlmFacingToolName(encoded);
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+        var compact = HashedPrefix + hash;
+        return new LlmFacingToolName(compact);
     }
+
+    /// <summary>
+    /// Returns a safe name for every provider-visible tool call, including
+    /// malformed historical records that cannot be dispatched any more.
+    /// </summary>
+    public static string ForProvider(string? canonical) =>
+        string.IsNullOrWhiteSpace(canonical) ? "nc_empty" : FromCanonical(canonical).Value;
+
+    public static bool IsProviderSafe(string? name) =>
+        name is not null && AnthropicSafeName.IsMatch(name);
 
     public override string ToString() => Value;
 
@@ -86,11 +105,40 @@ public readonly record struct LlmFacingToolName
     {
         if (string.IsNullOrEmpty(name))
             return null;
+
+        if (name.StartsWith(EncodedPrefix, StringComparison.Ordinal)
+            && TryDecodeBase64Url(name[EncodedPrefix.Length..], out var decoded)
+            && decoded is not null
+            && !IsProviderSafe(decoded)
+            && string.Equals(FromCanonical(decoded).Value, name, StringComparison.Ordinal))
+        {
+            return decoded;
+        }
+
         if (name.Contains('/', StringComparison.Ordinal))
             return null;
         var idx = name.IndexOf("__", StringComparison.Ordinal);
         if (idx <= 0 || idx + 2 >= name.Length)
             return null;
         return string.Concat(name.AsSpan(0, idx), "/", name.AsSpan(idx + 2));
+    }
+
+    private static bool TryDecodeBase64Url(string encoded, out string? value)
+    {
+        value = null;
+        if (string.IsNullOrEmpty(encoded))
+            return false;
+
+        try
+        {
+            var base64 = encoded.Replace('-', '+').Replace('_', '/');
+            base64 = base64.PadRight(base64.Length + ((4 - base64.Length % 4) % 4), '=');
+            value = Encoding.UTF8.GetString(Convert.FromBase64String(base64));
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 }

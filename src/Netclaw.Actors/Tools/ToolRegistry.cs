@@ -65,11 +65,13 @@ public sealed class ToolRegistry
         lock (_writeSync)
         {
             var current = _tools;
-            _tools = RegistrySnapshot.Create(
+            RegistryEntry[] entries =
             [
                 ..current.Entries,
                 new RegistryEntry(new ToolRegistration(tool, tool.GrantCategory), exposureTier)
-            ]);
+            ];
+            EnsureUniqueLlmFacingNames(entries);
+            _tools = RegistrySnapshot.Create(entries);
         }
     }
 
@@ -87,14 +89,16 @@ public sealed class ToolRegistry
         lock (_writeSync)
         {
             var current = _tools;
-            _tools = RegistrySnapshot.Create(
+            RegistryEntry[] entries =
             [
                 ..current.Entries.Where(entry => !string.Equals(
                     entry.Registration.Tool.Name,
                     tool.Name,
                     StringComparison.Ordinal)),
                 new RegistryEntry(new ToolRegistration(tool, tool.GrantCategory), exposureTier),
-            ]);
+            ];
+            EnsureUniqueLlmFacingNames(entries);
+            _tools = RegistrySnapshot.Create(entries);
         }
     }
 
@@ -113,14 +117,16 @@ public sealed class ToolRegistry
         lock (_writeSync)
         {
             var current = _tools;
-            _tools = RegistrySnapshot.Create(
+            RegistryEntry[] entries =
             [
                 ..current.Entries.Where(entry => entry.Registration.Tool is not McpToolAdapter mcp
                                     || !string.Equals(mcp.ServerName, serverName, StringComparison.OrdinalIgnoreCase)),
                 ..tools.Select(static tool => new RegistryEntry(
                     new ToolRegistration(tool, tool.GrantCategory),
                     ToolExposureTier.Deferred)),
-            ]);
+            ];
+            EnsureUniqueLlmFacingNames(entries);
+            _tools = RegistrySnapshot.Create(entries);
         }
     }
 
@@ -141,13 +147,15 @@ public sealed class ToolRegistry
         lock (_writeSync)
         {
             var current = _tools;
-            _tools = RegistrySnapshot.Create(
+            RegistryEntry[] entries =
             [
                 ..current.Entries,
                 new RegistryEntry(
                     new ToolRegistration(new AIToolAdapter(tool, grantCategory), grantCategory),
                     exposureTier)
-            ]);
+            ];
+            EnsureUniqueLlmFacingNames(entries);
+            _tools = RegistrySnapshot.Create(entries);
         }
     }
 
@@ -181,7 +189,8 @@ public sealed class ToolRegistry
     /// wire.
     /// </summary>
     public string ToLlmFacingName(string canonicalName) =>
-        FindRegistration(canonicalName)?.Tool.LlmFacingName.Value ?? canonicalName;
+        FindRegistration(canonicalName)?.Tool.LlmFacingName.Value
+        ?? LlmFacingToolName.ForProvider(canonicalName);
 
     /// <summary>
     /// Map either a canonical or LLM-facing tool name to the canonical
@@ -202,9 +211,22 @@ public sealed class ToolRegistry
         var direct = tools.FirstOrDefault(entry => entry.Registration.Tool.Name == name);
         if (direct is not null)
             return direct.Registration;
-        return tools.FirstOrDefault(entry =>
-            entry.Registration.Tool is McpToolAdapter mcp
-            && string.Equals(mcp.LlmFacingName.Value, name, StringComparison.Ordinal))?.Registration;
+        return tools.FirstOrDefault(entry => string.Equals(
+            entry.Registration.Tool.LlmFacingName.Value,
+            name,
+            StringComparison.Ordinal))?.Registration;
+    }
+
+    private static void EnsureUniqueLlmFacingNames(IEnumerable<RegistryEntry> entries)
+    {
+        var duplicate = entries
+            .GroupBy(static entry => entry.Registration.Tool.LlmFacingName.Value, StringComparer.Ordinal)
+            .FirstOrDefault(static group => group.Select(entry => entry.Registration.Tool.Name).Distinct(StringComparer.Ordinal).Skip(1).Any());
+        if (duplicate is not null)
+        {
+            throw new ArgumentException(
+                $"Tool registrations resolve to the same provider-facing name '{duplicate.Key}'.");
+        }
     }
 
     /// <summary>
@@ -614,6 +636,7 @@ public sealed class ToolRegistry
     private sealed class AIToolAdapter : INetclawTool
     {
         private readonly AITool _tool;
+        private readonly AITool _providerTool;
 
         public AIToolAdapter(AITool tool, string grantCategory)
         {
@@ -626,7 +649,10 @@ public sealed class ToolRegistry
             // assumption at construction.
             LlmFacingName = LlmFacingToolName.FromCanonical(Name);
             Description = tool is AIFunction fn ? (fn.Description ?? "") : "";
-            ParameterSchema = default;
+            ParameterSchema = tool is AIFunction function ? function.JsonSchema : default;
+            _providerTool = tool is AIFunction && !string.Equals(Name, LlmFacingName.Value, StringComparison.Ordinal)
+                ? AIFunctionFactory.CreateDeclaration(LlmFacingName.Value, Description, ParameterSchema)
+                : tool;
         }
 
         public string Name { get; }
@@ -634,7 +660,7 @@ public sealed class ToolRegistry
         public string Description { get; }
         public string GrantCategory { get; }
         public System.Text.Json.JsonElement ParameterSchema { get; }
-        public AITool ToAITool() => _tool;
+        public AITool ToAITool() => _providerTool;
 
         public Task<string> ExecuteAsync(
             IDictionary<string, object?>? arguments,

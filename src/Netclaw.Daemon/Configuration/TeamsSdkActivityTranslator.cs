@@ -482,14 +482,19 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         TeamsAttachment attachment,
         TeamsAttachmentEvidence evidence,
         TeamsInboundAttachmentKind kind,
-        int index) => new(
-            GetBoundedAttachmentMetadata(attachment.Name, MaxAttachmentNameLength) ?? $"attachment-{index + 1}",
+        int index)
+    {
+        var suppliedName = GetBoundedAttachmentMetadata(attachment.Name, MaxAttachmentNameLength);
+        return new TeamsAttachmentMetadata(
+            suppliedName ?? $"attachment-{index + 1}",
             evidence.ContentType,
             declaredSizeBytes: null)
         {
             Kind = kind,
+            UsesGeneratedName = suppliedName is null,
             SourceIndex = index
         };
+    }
 
     private static bool TryGetSupportedAttachmentKind(
         string? contentType,

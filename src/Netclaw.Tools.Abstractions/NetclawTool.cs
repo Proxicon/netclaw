@@ -33,7 +33,7 @@ public abstract partial class NetclawTool<TParams> : INetclawTool where TParams 
     /// <inheritdoc />
     public AITool ToAITool()
     {
-        return _aiTool ??= AIFunctionFactory.CreateDeclaration(Name, Description, ParameterSchema);
+        return _aiTool ??= AIFunctionFactory.CreateDeclaration(LlmFacingName.Value, Description, ParameterSchema);
     }
 
     /// <summary>

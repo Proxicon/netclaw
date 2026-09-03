@@ -78,7 +78,8 @@ public static class MagicByteValidator
         long totalFileSize,
         string declaredMimeType,
         string filename,
-        ContentPolicy? policy = null)
+        ContentPolicy? policy = null,
+        ContentScanOptions scanOptions = default)
     {
         if (totalFileSize == 0)
         {
@@ -108,6 +109,12 @@ public static class MagicByteValidator
         var extension = Path.GetExtension(filename);
         if (string.IsNullOrEmpty(extension))
         {
+            if (scanOptions.AllowExtensionlessProvisionalImage
+                && IsBoundedImageTransportMime(declaredMimeType))
+            {
+                return ValidateExtensionlessProvisionalImage(header, effectivePolicy);
+            }
+
             return ContentScanResult.Rejected(
                 ContentScanError.UnrecognizedFileType,
                 "File has no extension");
@@ -171,6 +178,48 @@ public static class MagicByteValidator
     {
         return ValidateFromHeader(content, content.Length, declaredMimeType, filename, policy);
     }
+
+    private static ContentScanResult ValidateExtensionlessProvisionalImage(
+        ReadOnlySpan<byte> header,
+        ContentPolicy policy)
+    {
+        var detected = DetectMimeType(header);
+        if (detected is null)
+        {
+            return ContentScanResult.Rejected(
+                ContentScanError.UnrecognizedFileType,
+                "Extensionless provisional image content is not a supported image");
+        }
+
+        var verifiedMimeType = new MimeType(detected);
+        if (MimeTypeCatalog.GetCategory(verifiedMimeType) != AttachmentCategory.Image
+            || !SignatureMatchers.TryGetValue(verifiedMimeType.Value, out var matcher)
+            || !matcher(header)
+            || !policy.AllowedMimeTypes.Contains(verifiedMimeType.Value))
+        {
+            return ContentScanResult.Rejected(
+                ContentScanError.MimeTypeMismatch,
+                "Extensionless provisional image content did not verify as an allowed image",
+                verifiedMimeType);
+        }
+
+        return ContentScanResult.Allowed(verifiedMimeType);
+    }
+
+    private static bool IsBoundedImageTransportMime(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        var mediaType = value.Split(';', 2)[0].Trim();
+        return mediaType.Length > "image/".Length
+               && mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+               && mediaType["image/".Length..].All(IsMimeTokenCharacter);
+    }
+
+    private static bool IsMimeTokenCharacter(char character) =>
+        char.IsAsciiLetterOrDigit(character)
+        || character is '!' or '#' or '$' or '%' or '&' or '\'' or '*' or '+' or '-' or '.' or '^' or '_' or '`' or '|' or '~';
 
     /// <summary>
     /// Detects MIME type from magic bytes for supported signature families.

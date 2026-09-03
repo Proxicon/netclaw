@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Netclaw.Configuration;
+using Netclaw.Daemon.Configuration;
 using Netclaw.Daemon.Security;
 using Netclaw.Tests.Utilities;
 using Xunit;
@@ -196,5 +197,20 @@ public sealed class DeviceTokenAuthenticationHandlerTests : IDisposable
 
         Assert.False(result.Succeeded);
         Assert.Null(result.Failure);  // NoResult, not Fail
+    }
+
+    [Fact]
+    public async Task Teams_activity_bearer_defers_to_the_teams_authentication_scheme()
+    {
+        var sp = BuildServiceProvider();
+        var ctx = BuildContext("Bearer bot-framework-token", sp);
+        ctx.Request.Path = TeamsActivityEndpointExtensions.ActivityPath;
+
+        var result = await sp.GetRequiredService<IAuthenticationService>()
+            .AuthenticateAsync(ctx, DeviceTokenAuthenticationHandler.SchemeName);
+
+        Assert.False(result.Succeeded);
+        Assert.Null(result.Failure);
+        Assert.Null(result.Principal);
     }
 }

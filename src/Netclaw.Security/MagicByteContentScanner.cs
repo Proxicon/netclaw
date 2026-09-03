@@ -44,6 +44,14 @@ public sealed class MagicByteContentScanner(ContentPolicy policy) : IContentScan
         string filename,
         string declaredMimeType,
         CancellationToken cancellationToken = default)
+        => ScanFileAsync(filePath, filename, declaredMimeType, default, cancellationToken);
+
+    public Task<ContentScanResult> ScanFileAsync(
+        string filePath,
+        string filename,
+        string declaredMimeType,
+        ContentScanOptions options,
+        CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -59,7 +67,7 @@ public sealed class MagicByteContentScanner(ContentPolicy policy) : IContentScan
             }
 
             var result = MagicByteValidator.ValidateFromHeader(
-                header[..bytesRead], fileSize, declaredMimeType, filename, _policy);
+                header[..bytesRead], fileSize, declaredMimeType, filename, _policy, options);
             return Task.FromResult(result);
         }
         catch (OperationCanceledException)

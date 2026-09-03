@@ -15,7 +15,7 @@ public class LlmFacingToolNameTests
     [InlineData("file_read", "file_read")]
     [InlineData("notion/notion-create-pages", "notion__notion-create-pages")]
     [InlineData("memorizer/store", "memorizer__store")]
-    public void FromCanonical_replaces_slash_with_double_underscore(string canonical, string expectedLlmFacing)
+    public void FromCanonical_keeps_established_safe_names(string canonical, string expectedLlmFacing)
     {
         var llm = LlmFacingToolName.FromCanonical(canonical);
         Assert.Equal(expectedLlmFacing, llm.Value);
@@ -35,17 +35,22 @@ public class LlmFacingToolNameTests
     [InlineData("has:colon")]
     [InlineData("has\\backslash")]
     [InlineData("emoji_💥")]
-    public void FromCanonical_throws_for_names_with_other_disallowed_chars(string canonical)
+    public void FromCanonical_encodes_disallowed_characters_as_safe_reversible_aliases(string canonical)
     {
-        Assert.Throws<ArgumentException>(() => LlmFacingToolName.FromCanonical(canonical));
+        var alias = LlmFacingToolName.FromCanonical(canonical);
+
+        Assert.True(LlmFacingToolName.IsProviderSafe(alias.Value));
+        Assert.Equal(canonical, LlmFacingToolName.TryReverseSanitizedToCanonical(alias.Value));
     }
 
     [Fact]
-    public void FromCanonical_throws_for_names_exceeding_128_chars_after_sanitization()
+    public void FromCanonical_hashes_oversized_names_to_a_safe_correlatable_alias()
     {
-        // 65 chars + '/' + 64 chars = 130 sanitized chars.
         var tooLong = new string('a', 65) + "/" + new string('b', 64);
-        Assert.Throws<ArgumentException>(() => LlmFacingToolName.FromCanonical(tooLong));
+        var alias = LlmFacingToolName.FromCanonical(tooLong);
+
+        Assert.True(LlmFacingToolName.IsProviderSafe(alias.Value));
+        Assert.StartsWith("nc_hash_", alias.Value, StringComparison.Ordinal);
     }
 
     [Theory]

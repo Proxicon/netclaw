@@ -1508,7 +1508,13 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 new AttachmentIngressRequest(
                     attachment.Name,
                     attachment.ContentType ?? "application/octet-stream",
-                    attachment.DeclaredSizeBytes ?? 0),
+                    attachment.DeclaredSizeBytes ?? 0,
+                    attachment.Kind == TeamsInboundAttachmentKind.InlineImage
+                        ? AttachmentIngressIntent.ProvisionalInlineImage
+                        : AttachmentIngressIntent.None,
+                    attachment.UsesGeneratedName
+                    || (attachment.Kind == TeamsInboundAttachmentKind.InlineImage
+                        && string.IsNullOrEmpty(Path.GetExtension(attachment.Name)))),
                 audience,
                 policy,
                 inlineImages,

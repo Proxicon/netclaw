@@ -32,4 +32,17 @@ public interface IContentScanner
         var bytes = File.ReadAllBytes(filePath);
         return ScanAsync(bytes, filename, declaredMimeType, cancellationToken);
     }
+
+    /// <summary>
+    /// Scans a staged file with narrow, caller-proven scanner facts. Existing
+    /// scanners keep their strict behavior unless they explicitly support an
+    /// option.
+    /// </summary>
+    Task<ContentScanResult> ScanFileAsync(
+        string filePath,
+        string filename,
+        string declaredMimeType,
+        ContentScanOptions options,
+        CancellationToken cancellationToken = default) =>
+        ScanFileAsync(filePath, filename, declaredMimeType, cancellationToken);
 }

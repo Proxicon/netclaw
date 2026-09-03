@@ -30,7 +30,23 @@ public abstract record AttachmentIngestOutcome
 /// untrusted — the canonical category used for the accept gate comes from the
 /// content scanner's verified MIME, not this value.
 /// </summary>
-public readonly record struct AttachmentIngressRequest(string Name, string DeclaredMimeType, long Size);
+public enum AttachmentIngressIntent
+{
+    None,
+    ProvisionalInlineImage
+}
+
+/// <summary>
+/// Channel-reported facts plus a narrow transport classification. An intent
+/// admits a candidate to the verified scan; it is never a verified MIME or an
+/// authorization to bypass policy.
+/// </summary>
+public readonly record struct AttachmentIngressRequest(
+    string Name,
+    string DeclaredMimeType,
+    long Size,
+    AttachmentIngressIntent Intent = AttachmentIngressIntent.None,
+    bool RequiresVerifiedFileName = false);
 
 /// <summary>
 /// Downloads the attachment bytes into <paramref name="stagingDir"/>, honoring
@@ -75,7 +91,18 @@ public static class AttachmentIngressPipeline
         // after download.
         var provisionalMimeType = MimeTypeCatalog.NormalizeDeclaredForExtension(
             declaredMimeType.Value, Path.GetExtension(name));
-        var category = MimeTypeCatalog.GetCategory(provisionalMimeType);
+        var category = request.Intent == AttachmentIngressIntent.ProvisionalInlineImage
+            ? AttachmentCategory.Image
+            : MimeTypeCatalog.GetCategory(provisionalMimeType);
+
+        if (request.Intent == AttachmentIngressIntent.ProvisionalInlineImage
+            && !IsBoundedImageTransportMime(declaredMimeType.Value))
+        {
+            log.Warning(
+                "attachment_rejected name={Name} mime={Mime} reason=invalid-provisional-image-intent",
+                name, declaredMimeType.Value);
+            return Reject($"`{name}` is not a supported image attachment.");
+        }
 
         if (!policy.Allows(category))
         {
@@ -137,7 +164,15 @@ public static class AttachmentIngressPipeline
         }
 
         var verification = await ContentVerification.ResolveAsync(
-            scanner, downloadResult.FilePath, name, declaredMimeType, policy, operationTimeout, cancellationToken);
+            scanner,
+            downloadResult.FilePath,
+            name,
+            declaredMimeType,
+            policy,
+            operationTimeout,
+            cancellationToken,
+            new ContentScanOptions(request.Intent == AttachmentIngressIntent.ProvisionalInlineImage
+                                   && string.IsNullOrEmpty(Path.GetExtension(name))));
 
         if (verification is not ContentVerificationResult.Verified verified)
         {
@@ -178,11 +213,16 @@ public static class AttachmentIngressPipeline
 
         var verifiedMime = verified.MimeType;
         var verifiedCategory = verified.Category;
+        var verifiedName = ResolveVerifiedName(
+            name,
+            verifiedMime,
+            request.Intent,
+            request.RequiresVerifiedFileName);
 
         string inboxPath;
         try
         {
-            inboxPath = InboxWriter.SanitizeReserveAndMove(inboxDir, name, downloadResult.FilePath);
+            inboxPath = InboxWriter.SanitizeReserveAndMove(inboxDir, verifiedName, downloadResult.FilePath);
         }
         catch (InboxWriter.CollisionExhaustedException ex)
         {
@@ -203,7 +243,7 @@ public static class AttachmentIngressPipeline
 
         var projection = await AttachmentIngressFormatting.BuildAcceptedProjectionAsync(
             inboxPath,
-            name,
+            verifiedName,
             verifiedMime.Value,
             verifiedCategory,
             inlineImages,
@@ -212,7 +252,7 @@ public static class AttachmentIngressPipeline
 
         log.Info(
             "attachment_accepted name={Name} declaredMime={DeclaredMime} verifiedMime={VerifiedMime} size={Size} category={Category} inlined={Inlined}",
-            name, declaredMimeType.Value, verifiedMime.Value, downloadResult.BytesWritten, verifiedCategory, projection.Inlined);
+            verifiedName, declaredMimeType.Value, verifiedMime.Value, downloadResult.BytesWritten, verifiedCategory, projection.Inlined);
 
         return new AttachmentIngestOutcome.Accepted(projection.Line, projection.InlineContent);
     }
@@ -225,6 +265,36 @@ public static class AttachmentIngressPipeline
             "Please DM me if you want to share this class of file.");
 
     private static string FormatBytes(long size) => AttachmentIngressFormatting.FormatBytes(size);
+
+    private static string ResolveVerifiedName(
+        string name,
+        MimeType verifiedMime,
+        AttachmentIngressIntent intent,
+        bool requiresVerifiedFileName)
+    {
+        if (intent != AttachmentIngressIntent.ProvisionalInlineImage
+            || !requiresVerifiedFileName)
+        {
+            return name;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(name);
+        return string.IsNullOrWhiteSpace(stem)
+            ? "attachment" + MimeTypeCatalog.ExtensionFor(verifiedMime)
+            : stem + MimeTypeCatalog.ExtensionFor(verifiedMime);
+    }
+
+    private static bool IsBoundedImageTransportMime(string value)
+    {
+        var mediaType = value.Split(';', 2)[0].Trim();
+        return mediaType.Length > "image/".Length
+               && mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+               && mediaType["image/".Length..].All(IsMimeTokenCharacter);
+    }
+
+    private static bool IsMimeTokenCharacter(char character) =>
+        char.IsAsciiLetterOrDigit(character)
+        || character is '!' or '#' or '$' or '%' or '&' or '\'' or '*' or '+' or '-' or '.' or '^' or '_' or '`' or '|' or '~';
 
     private static void TryDeleteTemp(ILoggingAdapter log, string tempPath)
     {
