@@ -867,6 +867,28 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Attachment_only_non_executable_unknown_has_no_model_turn()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var replyClient = new RecordingTeamsReplyClient();
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateAttachmentDependencies(CreatePipeline(TestActor), paths, replyClient),
+            "teams-attachment-only-unknown");
+        var activity = CreateAttachmentActivity(
+            "attachment-only-unknown",
+            string.Empty,
+            [CreateInboundAttachment("unsupported.bin", TeamsInboundAttachmentKind.Unknown, 0)]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("not supported", replyClient.Messages[0].Text, StringComparison.Ordinal);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
     public async Task Text_with_a_rejected_attachment_still_creates_one_model_turn()
     {
         var replyClient = new RecordingTeamsReplyClient();
@@ -1179,6 +1201,145 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var continuation = ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
         Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel("tenant-a", conversationId, "root-a", out var expected, out _));
         Assert.Equal(expected, continuation.SessionId);
+    }
+
+    [Fact]
+    public async Task Established_channel_thread_with_text_and_image_creates_one_model_turn()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var pipeline = CreatePipeline(TestActor);
+        var dependencies = new TeamsConversationDependencies(
+            new TeamsChannelOptions
+            {
+                TenantId = "tenant-a",
+                MentionOnly = true,
+                AllowedTeamIds = ["team-a"],
+                AllowedChannelIds = ["channel-a"],
+                AllowedUserIds = ["user-a"],
+                AllowAttachments = true
+            },
+            pipeline,
+            new TestTeamsReplyClient(),
+            new TeamsOutputRenderer(),
+            TimeProvider.System)
+        {
+            PromptInjectionDetector = SafeTeamsPromptInjectionDetector.Instance,
+            AttachmentDownloader = new TestTeamsAttachmentDownloader(),
+            ContentScanner = new NullContentScanner(),
+            AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles(),
+            Paths = paths
+        };
+        const string conversationId = "conversation-inline-image;messageid=root-a";
+        var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId), dependencies));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, CreateChannelActivity("root-a", conversationId))).Disposition);
+        ReceiveDispatchedMessage();
+
+        var continuation = CreateChannelActivity(
+            "reply-with-image",
+            conversationId,
+            isMentioned: false,
+            text: "inspect this image",
+            attachments: [CreateInboundAttachment("inline.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, continuation)).Disposition);
+
+        ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var dispatched = ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("inspect this image", dispatched.Content, StringComparison.Ordinal);
+        Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Mentioned_channel_text_and_inline_image_with_rendering_companion_creates_one_model_turn()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var options = new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            BotId = "bot",
+            MentionOnly = true,
+            AllowedTeamIds = ["team-a"],
+            AllowedChannelIds = ["channel-a"],
+            AllowedUserIds = ["user-a"],
+            AllowAttachments = true
+        };
+        var translator = new TeamsSdkActivityTranslator(options, TimeProvider.System);
+        var source = MessageActivity.FromActivity(CoreActivity.FromJsonString("""
+            {
+              "type": "message",
+              "id": "root-a",
+              "text": "<at>Netclaw</at> inspect this image",
+              "from": { "id": "user-a" },
+              "recipient": { "id": "28:bot" },
+              "serviceUrl": "https://service.invalid/",
+              "conversation": {
+                "id": "conversation-inline-root;messageid=root-a",
+                "tenantId": "tenant-a",
+                "conversationType": "channel"
+              },
+              "channelData": {
+                "team": { "id": "team-a" },
+                "channel": { "id": "channel-a" }
+              },
+              "entities": [
+                {
+                  "type": "mention",
+                  "mentioned": { "id": "28:bot" },
+                  "text": "<at>Netclaw</at>"
+                }
+              ]
+            }
+            """));
+        source.Attachments =
+        [
+            new Microsoft.Teams.Apps.Schema.TeamsAttachment
+            {
+                ContentType = new AttachmentContentType("image/png"),
+                ContentUrl = new Uri("https://smba.trafficmanager.net/amer/v3/attachments/image"),
+                Name = "inline.png"
+            },
+            new Microsoft.Teams.Apps.Schema.TeamsAttachment
+            {
+                ContentType = new AttachmentContentType("text/html"),
+                Content = "<div><img src=\"https://rendering.invalid/inline\" /></div>"
+            }
+        ];
+        var translated = translator.Translate(source, "tenant-a");
+        Assert.Equal(TeamsTranslationDisposition.Accepted, translated.Disposition);
+        Assert.DoesNotContain("Url", string.Join(',', translated.Activity!.Attachments
+            .SelectMany(attachment => attachment.GetType().GetProperties())
+            .Select(property => property.Name)), StringComparison.OrdinalIgnoreCase);
+        var dependencies = new TeamsConversationDependencies(
+            options,
+            CreatePipeline(TestActor),
+            new TestTeamsReplyClient(),
+            new TeamsOutputRenderer(),
+            TimeProvider.System)
+        {
+            PromptInjectionDetector = SafeTeamsPromptInjectionDetector.Instance,
+            AttachmentDownloader = new TestTeamsAttachmentDownloader(),
+            ContentScanner = new NullContentScanner(),
+            AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles(),
+            Paths = paths
+        };
+        var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", translated.Activity.Trust.ConversationId), dependencies));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(parent, translated.Activity)).Disposition);
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Contains("inspect this image", dispatched.Content, StringComparison.Ordinal);
+        Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -4133,7 +4294,9 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         TeamsIngressActivityKind kind = TeamsIngressActivityKind.Message,
         string rootActivityId = "root-a",
         bool isMentioned = true,
-        string senderId = "user-a") => new(
+        string senderId = "user-a",
+        string text = "hello",
+        ImmutableArray<TeamsAttachmentMetadata> attachments = default) => new(
         new TeamsIngressTrustContext(
             TrustAudience.Public,
             PrincipalClassification.UntrustedExternal,
@@ -4145,9 +4308,10 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             TeamsConversationScope.Channel,
             activityId,
             TimeProvider.System.GetUtcNow()),
-        kind == TeamsIngressActivityKind.Message ? "hello" : string.Empty,
+        kind == TeamsIngressActivityKind.Message ? text : string.Empty,
         new TeamsReplyMetadata(null, rootActivityId, "https://service.invalid/"),
         isMentioned: isMentioned,
+        attachments: attachments,
         kind: kind,
         teamId: "team-a",
         channelId: "channel-a");

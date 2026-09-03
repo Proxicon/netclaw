@@ -1,5 +1,58 @@
 # Microsoft Teams live validation evidence
 
+## Inline image translation remediation (2026-09-03)
+
+Status: **OFFLINE IMPLEMENTATION COMPLETE; LIVE SMOKE PENDING**.
+
+The owner tenant logs identified the root cause.
+
+- Teams sent two attachment entries for one inline image.
+- One entry was a PNG with a content URL.
+- The other entry was HTML image-rendering metadata.
+- The translator accepted the PNG entry.
+- The translator then rejected the full activity for the companion entry.
+- No attachment download, scan, model call, or reply followed.
+
+The old tests used a single image entry or a single text-rendering entry.
+They did not use both entries in one live message shape.
+
+The new translator evaluates each entry independently.
+It accepts a bounded content-URL image transport MIME.
+It does not use a four-item declared MIME allow list.
+The shared scanner and verified-MIME pipeline remain the content authority.
+It ignores only the strict HTML image-rendering companion shape.
+It keeps unknown entries non-executable and rejects hostile entries fail closed.
+The daemon boundary still excludes raw attachment URLs from actor state.
+
+The change does not add Microsoft Graph permissions.
+It does not need `Files.Read.All`, `Sites.Read.All`, or `Chat.Read.All`.
+The existing host allow list, redirect block, byte limits, staging, scan, MIME,
+model-image, and durable idempotency controls remain in force.
+
+The default daemon selector also sent the Bot Framework bearer token to the
+device-token handler before the Teams policy ran.
+The Teams route now selects the active Teams SDK scheme first.
+Device-token rules for every other endpoint stay unchanged.
+
+Focused regression coverage proves these cases:
+
+- A mentioned channel message with text, PNG, and a rendering companion makes one model turn.
+- An established thread with text and an image makes one model turn.
+- An image-only accepted continuation makes one model turn.
+- Disabled attachments never reach the model.
+- A known rendering companion is ignored.
+- A hostile structured companion remains rejected.
+- Text remains available when a safe attachment is rejected.
+- No raw attachment URL enters the actor or persistence contract.
+
+After deployment, the owner should run this smoke sequence:
+
+1. Send a normal `@Netclaw` text message.
+2. Send `@Netclaw` with a PNG.
+3. Send PNG and text in an established thread.
+4. Send an image-only established-thread continuation.
+5. Disable attachments and repeat one image message.
+
 ## Channel-binding and approval parity (2026-08-25)
 
 Status: **OFFLINE IMPLEMENTATION COMPLETE; NOT LIVE VALIDATED**.

@@ -30,9 +30,11 @@ other senders are ignored before a session or model turn.
 The package supports personal chats, standard team channels, and approved group
 chats. It enables Teams file support for a bounded attachment pipeline.
 
-`AllowAttachments` defaults to `false`. When enabled, Netclaw accepts PNG,
-JPEG, GIF, and WebP images from supported conversations. It accepts personal
-file cards. It defers normal channel and group-chat files.
+`AllowAttachments` defaults to `false`. When enabled, Netclaw treats a bounded
+content-URL `image/*` value as an image candidate. The scanner and verified MIME
+policy decide if Netclaw accepts the file. PNG, JPEG, GIF, and WebP can reach a
+model with image support. Other verified image formats remain path-only. It
+accepts personal file cards. It defers normal channel and group-chat files.
 
 The package does not request message-write, `Chat.Read.All`,
 `ChatMessage.Read.All`, `Files.Read.All`, or `Sites.Read.All`. It does not

@@ -1033,7 +1033,7 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
-    public async Task Teams_policy_uses_azuread_after_a_default_device_bearer_failure()
+    public async Task Teams_policy_uses_azuread_without_a_device_bearer_attempt()
     {
         await using var app = await BuildTeamsAuthorizationTestHostAsync();
         var authorization = app.Services.GetRequiredService<IAuthorizationPolicyProvider>();
@@ -1058,6 +1058,7 @@ public sealed class TeamsChannelFoundationTests
         var rejectedDeviceResponse = await client.SendAsync(rejectedDeviceRequest, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Unauthorized, rejectedDeviceResponse.StatusCode);
 
+        FailingDeviceAuthenticationHandler.ResetAttempts();
         var teamsRequest = new HttpRequestMessage(HttpMethod.Post, TeamsActivityEndpointExtensions.ActivityPath)
         {
             Content = new StringContent("{}")
@@ -1070,6 +1071,7 @@ public sealed class TeamsChannelFoundationTests
         Assert.Equal(
             TeamsActivityEndpointExtensions.AuthenticationScheme,
             await teamsResponse.Content.ReadAsStringAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(0, FailingDeviceAuthenticationHandler.Attempts);
     }
 
     [Fact]
@@ -1735,6 +1737,67 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
+    public void Translator_accepts_a_live_inline_image_with_its_html_rendering_companion()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions
+        {
+            TenantId = "tenant",
+            BotId = "bot"
+        }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.Channel);
+        activity.Id = "root";
+        activity.Conversation!.Id = "conversation;messageid=root";
+        activity.Text = "<at>Netclaw</at> inspect this image";
+        ((CoreActivity)activity).Recipient = new TeamsAccount { Id = "28:bot" };
+        activity.Entities = [new MentionEntity
+        {
+            Type = "mention",
+            Mentioned = new TeamsAccount { Id = "28:bot" },
+            Text = "<at>Netclaw</at>"
+        }];
+        activity.Attachments =
+        [
+            new TeamsAttachment
+            {
+                ContentType = new AttachmentContentType("image/png"),
+                ContentUrl = new Uri("https://smba.trafficmanager.net/amer/v3/attachments/image"),
+                Name = "inline.png"
+            },
+            new TeamsAttachment
+            {
+                ContentType = TeamsContentType.Html,
+                Content = "<div><img src=\"https://rendering.invalid/inline\" /></div>"
+            }
+        ];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal(" inspect this image", result.Activity!.Text);
+        var attachment = Assert.Single(result.Activity.Attachments);
+        Assert.Equal(TeamsInboundAttachmentKind.InlineImage, attachment.Kind);
+        Assert.Equal(0, attachment.SourceIndex);
+    }
+
+    [Fact]
+    public void Translator_treats_a_bounded_image_transport_mime_as_an_image_candidate()
+    {
+        var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
+        var activity = CreateSdkMessage(TeamsConversationType.GroupChat);
+        activity.Attachments = [new TeamsAttachment
+        {
+            ContentType = new AttachmentContentType("image/bmp"),
+            ContentUrl = new Uri("https://smba.trafficmanager.net/emea/attachments/image"),
+            Name = "diagram.bmp"
+        }];
+
+        var result = translator.Translate(activity, "tenant");
+
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal(TeamsInboundAttachmentKind.InlineImage, Assert.Single(result.Activity!.Attachments).Kind);
+    }
+
+    [Fact]
     public void Translator_accepts_an_attachment_only_message()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
@@ -1863,7 +1926,7 @@ public sealed class TeamsChannelFoundationTests
         var result = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Equal("attachment_malformed_rejected", result.ReasonCode);
         Assert.Null(result.Activity);
     }
 
@@ -1886,7 +1949,7 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
-    public void Translator_rejects_messages_with_conflicting_attachment_representations_before_routing()
+    public void Translator_maps_a_bounded_unknown_attachment_as_non_executable()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Personal);
@@ -1900,27 +1963,32 @@ public sealed class TeamsChannelFoundationTests
 
         var result = translator.Translate(activity, "tenant");
 
-        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        var attachment = Assert.Single(result.Activity!.Attachments);
+        Assert.Equal(TeamsInboundAttachmentKind.Unknown, attachment.Kind);
+        Assert.Equal(0, attachment.SourceIndex);
     }
 
     [Fact]
-    public void Translator_rejects_a_mixed_text_wrapper_and_unknown_attachment_before_routing()
+    public void Translator_preserves_text_when_a_bounded_unknown_companion_is_not_accepted()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Personal);
         activity.Conversation!.Id = "conversation";
+        activity.Text = "safe text";
         activity.Attachments =
         [
-            new TeamsAttachment { ContentType = TeamsContentType.Html, Content = "<pre><a href=\"https://rendering.invalid/metadata\">normal text</a></pre>" },
+            new TeamsAttachment { ContentType = TeamsContentType.Html, Content = "<div>rendering metadata</div>" },
             new TeamsAttachment { ContentType = TeamsContentType.Text, Content = "untrusted inline attachment" }
         ];
 
         var result = translator.Translate(activity, "tenant");
 
-        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
-        Assert.Null(result.Activity);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal("safe text", result.Activity!.Text);
+        var attachment = Assert.Single(result.Activity.Attachments);
+        Assert.Equal(TeamsInboundAttachmentKind.Unknown, attachment.Kind);
+        Assert.Equal(1, attachment.SourceIndex);
     }
 
     [Fact]
@@ -1939,7 +2007,7 @@ public sealed class TeamsChannelFoundationTests
         var result = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Equal("attachment_malformed_rejected", result.ReasonCode);
         Assert.Null(result.Activity);
     }
 
@@ -1963,7 +2031,7 @@ public sealed class TeamsChannelFoundationTests
     }
 
     [Fact]
-    public void Translator_rejects_a_channel_upload_reference_shape_before_routing()
+    public void Translator_maps_a_bounded_channel_upload_reference_as_non_executable()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
@@ -1979,13 +2047,12 @@ public sealed class TeamsChannelFoundationTests
 
         var result = translator.Translate(activity, "tenant");
 
-        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
-        Assert.Null(result.Activity);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal(TeamsInboundAttachmentKind.Unknown, Assert.Single(result.Activity!.Attachments).Kind);
     }
 
     [Fact]
-    public void Translator_rejects_a_channel_reference_inside_an_unknown_html_envelope_before_routing()
+    public void Translator_maps_a_bounded_channel_html_reference_as_non_executable()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant", BotId = "bot" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Channel);
@@ -2001,13 +2068,12 @@ public sealed class TeamsChannelFoundationTests
 
         var result = translator.Translate(activity, "tenant");
 
-        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
-        Assert.Null(result.Activity);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal(TeamsInboundAttachmentKind.Unknown, Assert.Single(result.Activity!.Attachments).Kind);
     }
 
     [Fact]
-    public void Translator_rejects_inline_attachment_content_before_routing()
+    public void Translator_maps_inline_attachment_content_as_non_executable()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Personal);
@@ -2020,13 +2086,12 @@ public sealed class TeamsChannelFoundationTests
 
         var result = translator.Translate(activity, "tenant");
 
-        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
-        Assert.Null(result.Activity);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal(TeamsInboundAttachmentKind.Unknown, Assert.Single(result.Activity!.Attachments).Kind);
     }
 
     [Fact]
-    public void Translator_rejects_non_graph_attachment_urls_without_a_proven_download_shape()
+    public void Translator_maps_a_bounded_non_graph_url_as_non_executable()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions { TenantId = "tenant" }, TimeProvider.System);
         var activity = CreateSdkMessage(TeamsConversationType.Personal);
@@ -2039,9 +2104,8 @@ public sealed class TeamsChannelFoundationTests
 
         var result = translator.Translate(activity, "tenant");
 
-        Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
-        Assert.Null(result.Activity);
+        Assert.Equal(TeamsTranslationDisposition.Accepted, result.Disposition);
+        Assert.Equal(TeamsInboundAttachmentKind.Unknown, Assert.Single(result.Activity!.Attachments).Kind);
     }
 
     [Fact]
@@ -2088,7 +2152,7 @@ public sealed class TeamsChannelFoundationTests
         var result = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Equal("attachment_malformed_rejected", result.ReasonCode);
         Assert.Null(result.Activity);
     }
 
@@ -2108,7 +2172,7 @@ public sealed class TeamsChannelFoundationTests
         var result = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Equal("attachment_malformed_rejected", result.ReasonCode);
         Assert.Null(result.Activity);
     }
 
@@ -2128,12 +2192,12 @@ public sealed class TeamsChannelFoundationTests
         var result = translator.Translate(activity, "tenant");
 
         Assert.Equal(TeamsTranslationDisposition.RejectedMalformed, result.Disposition);
-        Assert.Equal("unsupported_attachment_shape", result.ReasonCode);
+        Assert.Equal("attachment_malformed_rejected", result.ReasonCode);
         Assert.Null(result.Activity);
     }
 
     [Fact]
-    public void Translator_describes_an_unsupported_channel_attachment_without_payload_data()
+    public void Translator_describes_each_rejected_channel_attachment_without_payload_data()
     {
         var translator = new TeamsSdkActivityTranslator(new TeamsChannelOptions
         {
@@ -2165,11 +2229,20 @@ public sealed class TeamsChannelFoundationTests
             Mentioned = new TeamsAccount { Id = "28:bot" },
             Text = "<at>Netclaw</at>"
         }];
-        activity.Attachments = [new TeamsAttachment
-        {
-            ContentType = TeamsContentType.Html,
-            Content = JsonDocument.Parse("\"<span><a href=\\\"https://rendering.invalid/opaque\\\">synthetic</a></span>\"").RootElement.Clone()
-        }];
+        activity.Attachments =
+        [
+            new TeamsAttachment
+            {
+                ContentType = new AttachmentContentType("image/png"),
+                ContentUrl = new Uri("https://smba.trafficmanager.net/amer/v3/attachments/image"),
+                Name = "inline.png"
+            },
+            new TeamsAttachment
+            {
+                ContentType = TeamsContentType.Html,
+                Content = JsonDocument.Parse("{}").RootElement.Clone()
+            }
+        ];
 
         var result = translator.Translate(activity, "tenant");
         var diagnostic = translator.DescribeRejectedAttachment(activity, "tenant", result);
@@ -2183,22 +2256,26 @@ public sealed class TeamsChannelFoundationTests
         Assert.True(diagnostic.Mentioned);
         Assert.True(diagnostic.RootActivityValid);
         Assert.True(diagnostic.AudienceValid);
-        Assert.Equal("unsupported_attachment_shape", diagnostic.PolicyReason);
-        Assert.Equal(1, diagnostic.AttachmentCount);
-        Assert.Equal("text_html", diagnostic.AttachmentContentType);
-        Assert.Equal(nameof(TeamsAttachmentContentKind.NonEmptyText), diagnostic.AttachmentContentKind);
-        Assert.True(diagnostic.AttachmentContentExists);
-        Assert.False(diagnostic.AttachmentContentUrlExists);
-        Assert.True(diagnostic.AttachmentReferenceExists);
-        Assert.False(diagnostic.AttachmentGraphReferenceExists);
-        Assert.False(diagnostic.AttachmentNameExists);
-        Assert.False(diagnostic.AttachmentThumbnailExists);
-        Assert.True(diagnostic.ChannelDataExists);
-        Assert.False(diagnostic.AttachmentHtmlRenderingMarkupExists);
-        Assert.Equal("span", diagnostic.AttachmentHtmlEnvelopeKind);
-        Assert.True(diagnostic.AttachmentHtmlAnchorExists);
-        Assert.True(diagnostic.AttachmentHtmlHrefExists);
-        Assert.True(diagnostic.AttachmentHtmlClosingEnvelopeExists);
+        Assert.Equal("attachment_malformed_rejected", diagnostic.PolicyReason);
+        Assert.Equal(2, diagnostic.AttachmentCount);
+        var image = diagnostic.Attachments[0];
+        Assert.Equal(0, image.Index);
+        Assert.Equal("image", image.ContentType);
+        Assert.Equal(nameof(TeamsAttachmentContentKind.Missing), image.ContentKind);
+        Assert.True(image.HasContentUrl);
+        Assert.True(image.HasName);
+        Assert.False(image.HasThumbnail);
+        Assert.Equal(nameof(TeamsAttachmentClassification.UnsupportedAttachmentShape), image.ClassifierDisposition);
+        Assert.Equal(nameof(TeamsInboundAttachmentKind.InlineImage), image.ResolvedInboundAttachmentKind);
+        var hostile = diagnostic.Attachments[1];
+        Assert.Equal(1, hostile.Index);
+        Assert.Equal("text_html", hostile.ContentType);
+        Assert.Equal(nameof(TeamsAttachmentContentKind.Structured), hostile.ContentKind);
+        Assert.False(hostile.HasContentUrl);
+        Assert.False(hostile.HasName);
+        Assert.False(hostile.HasThumbnail);
+        Assert.Equal(nameof(TeamsAttachmentClassification.UnsupportedAttachmentShape), hostile.ClassifierDisposition);
+        Assert.Equal(nameof(TeamsInboundAttachmentKind.Unknown), hostile.ResolvedInboundAttachmentKind);
         Assert.Equal(1, diagnostic.MentionCount);
         Assert.False(diagnostic.ReplyToIdExists);
     }
@@ -2560,6 +2637,8 @@ public sealed class TeamsChannelFoundationTests
 
     private sealed class FailingDeviceAuthenticationHandler : AuthenticationHandler<AuthenticationSchemeOptions>
     {
+        private static int _attempts;
+
         public FailingDeviceAuthenticationHandler(
             IOptionsMonitor<AuthenticationSchemeOptions> options,
             ILoggerFactory logger,
@@ -2568,8 +2647,15 @@ public sealed class TeamsChannelFoundationTests
         {
         }
 
+        public static int Attempts => Volatile.Read(ref _attempts);
+
+        public static void ResetAttempts() => Interlocked.Exchange(ref _attempts, 0);
+
         protected override Task<AuthenticateResult> HandleAuthenticateAsync()
-            => Task.FromResult(AuthenticateResult.Fail("test device authentication failure"));
+        {
+            Interlocked.Increment(ref _attempts);
+            return Task.FromResult(AuthenticateResult.Fail("test device authentication failure"));
+        }
     }
 
     private sealed class RecordingIngressSink : ITeamsConversationIngressSink
