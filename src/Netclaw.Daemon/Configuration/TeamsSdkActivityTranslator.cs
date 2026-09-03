@@ -21,6 +21,7 @@ namespace Netclaw.Daemon.Configuration;
 internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, TimeProvider timeProvider)
 {
     private const int MaxAttachmentContentTypeLength = 255;
+    private const int MaxAttachmentNameLength = 255;
     private const int MaxAttachmentContentUrlLength = 2_048;
     internal const string PreservedReplyToActivityIdProperty = "netclaw.teams.replyToActivityId";
 
@@ -42,9 +43,9 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
     }
 
     /// <summary>
-    /// Creates bounded diagnostic facts for a rejected attachment. This exists
-    /// only to capture one tenant-safe structural sample for a compatibility
-    /// investigation. It never returns SDK payload values or platform IDs.
+    /// Creates bounded diagnostic facts for rejected attachments. This exists
+    /// only to capture tenant-safe structural samples for compatibility work.
+    /// It never returns SDK payload values or platform IDs.
     /// </summary>
     internal TeamsRejectedAttachmentDiagnostic? DescribeRejectedAttachment(
         TeamsActivity activity,
@@ -54,7 +55,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         ArgumentNullException.ThrowIfNull(activity);
         ArgumentNullException.ThrowIfNull(result);
 
-        if (result.ReasonCode != "unsupported_attachment_shape" || activity is not MessageActivity message)
+        if (result.Disposition == TeamsTranslationDisposition.Accepted
+            || activity is not MessageActivity message)
             return null;
 
         var attachments = message.Attachments;
@@ -68,55 +70,58 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         var rootActivityValid = scope == TeamsConversationScope.Channel
             && TeamsTenantEvidenceMappings.TryGetCanonicalChannelRootActivityId(message.Conversation?.Id, out _);
 
-        foreach (var attachment in attachments)
+        var diagnostics = ImmutableArray.CreateBuilder<TeamsRejectedAttachmentDiagnosticEntry>(attachments.Count);
+        for (var index = 0; index < attachments.Count; index++)
         {
+            var attachment = attachments[index];
             if (attachment is null)
-                continue;
-
-            var evidence = CreateAttachmentEvidence(attachment, message.ChannelData is not null);
-            if (TeamsTenantEvidenceMappings.ClassifyAttachment(evidence).Classification
-                == TeamsAttachmentClassification.InlineTextRendering)
             {
+                diagnostics.Add(TeamsRejectedAttachmentDiagnosticEntry.Malformed(index));
                 continue;
             }
 
-            var (htmlEnvelopeKind, htmlAnchorExists, htmlHrefExists, htmlClosingEnvelopeExists) = DescribeHtmlEnvelope(attachment.Content);
-
-            return new TeamsRejectedAttachmentDiagnostic(
-                Scope: DescribeScope(scope),
-                TenantMatch: !string.IsNullOrWhiteSpace(authenticatedTenantId)
-                             && string.Equals(authenticatedTenantId, options.TenantId, StringComparison.Ordinal),
-                TeamMatch: !string.IsNullOrWhiteSpace(teamId)
-                           && options.AllowedTeamIds.Contains(teamId, StringComparer.Ordinal),
-                ChannelMatch: !string.IsNullOrWhiteSpace(channelId)
-                              && options.AllowedChannelIds.Contains(channelId, StringComparer.Ordinal),
-                SenderMatch: options.AllowedUserIds.Length == 0
-                             || (message.From is { } sender
-                                 && options.AllowedUserIds.Contains(GetCanonicalSenderId(sender), StringComparer.Ordinal)),
-                Mentioned: mentions.Any(mention => IsQualifiedBotMention(mention, message.Recipient?.Id, options.BotId)),
-                RootActivityValid: rootActivityValid,
-                AudienceValid: HasSingleTeamAudienceOverride(teamId, channelId),
-                PolicyReason: result.ReasonCode,
-                AttachmentCount: attachments.Count,
-                AttachmentContentType: DescribeContentType(evidence.ContentType),
-                AttachmentContentKind: evidence.ContentKind.ToString(),
-                AttachmentContentExists: evidence.ContentKind != TeamsAttachmentContentKind.Missing,
-                AttachmentContentUrlExists: evidence.HasContentUrl,
-                AttachmentReferenceExists: evidence.HasEmbeddedContentReference,
-                AttachmentGraphReferenceExists: evidence.HasEmbeddedGraphBackedContentReference,
-                AttachmentNameExists: evidence.HasName,
-                AttachmentThumbnailExists: evidence.HasThumbnailUrl,
-                ChannelDataExists: evidence.HasChannelData,
-                AttachmentHtmlRenderingMarkupExists: evidence.HasHtmlRenderingMarkup,
-                AttachmentHtmlEnvelopeKind: htmlEnvelopeKind,
-                AttachmentHtmlAnchorExists: htmlAnchorExists,
-                AttachmentHtmlHrefExists: htmlHrefExists,
-                AttachmentHtmlClosingEnvelopeExists: htmlClosingEnvelopeExists,
-                MentionCount: mentions.Length,
-                ReplyToIdExists: !string.IsNullOrWhiteSpace(GetReplyToActivityId(message)));
+            var evidence = CreateAttachmentEvidence(attachment, message.ChannelData is not null);
+            var classifier = TeamsTenantEvidenceMappings.ClassifyAttachment(evidence);
+            var resolvedKind = TryGetSupportedAttachmentKind(
+                evidence.ContentType,
+                evidence.HasContentUrl,
+                scope ?? TeamsConversationScope.Personal,
+                classifier,
+                out var kind)
+                ? kind.ToString()
+                : classifier.Classification == TeamsAttachmentClassification.InlineTextRendering
+                    ? "None"
+                    : TeamsInboundAttachmentKind.Unknown.ToString();
+            diagnostics.Add(new TeamsRejectedAttachmentDiagnosticEntry(
+                index,
+                DescribeContentType(evidence.ContentType),
+                evidence.ContentKind.ToString(),
+                evidence.HasContentUrl,
+                evidence.HasName,
+                evidence.HasThumbnailUrl,
+                classifier.Classification.ToString(),
+                resolvedKind));
         }
 
-        return null;
+        return new TeamsRejectedAttachmentDiagnostic(
+            Scope: DescribeScope(scope),
+            TenantMatch: !string.IsNullOrWhiteSpace(authenticatedTenantId)
+                         && string.Equals(authenticatedTenantId, options.TenantId, StringComparison.Ordinal),
+            TeamMatch: !string.IsNullOrWhiteSpace(teamId)
+                       && options.AllowedTeamIds.Contains(teamId, StringComparer.Ordinal),
+            ChannelMatch: !string.IsNullOrWhiteSpace(channelId)
+                          && options.AllowedChannelIds.Contains(channelId, StringComparer.Ordinal),
+            SenderMatch: options.AllowedUserIds.Length == 0
+                         || (message.From is { } sender
+                             && options.AllowedUserIds.Contains(GetCanonicalSenderId(sender), StringComparer.Ordinal)),
+            Mentioned: mentions.Any(mention => IsQualifiedBotMention(mention, message.Recipient?.Id, options.BotId)),
+            RootActivityValid: rootActivityValid,
+            AudienceValid: HasSingleTeamAudienceOverride(teamId, channelId),
+            PolicyReason: result.ReasonCode,
+            AttachmentCount: attachments.Count,
+            Attachments: diagnostics.ToImmutable(),
+            MentionCount: mentions.Length,
+            ReplyToIdExists: !string.IsNullOrWhiteSpace(GetReplyToActivityId(message)));
     }
 
     private TeamsTranslationResult TranslateApprovalAction(
@@ -407,83 +412,98 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             return null;
 
         var builder = ImmutableArray.CreateBuilder<TeamsAttachmentMetadata>();
-        var reasonCode = "unsupported_attachment_shape";
-        var hasUnsupportedAttachment = false;
-        var hasMalformedAttachment = false;
         for (var index = 0; index < attachments.Count; index++)
         {
             var attachment = attachments[index];
             if (attachment is null)
+                return RejectMalformedAttachment();
+
+            if (!HasBoundedAttachmentMetadata(attachment.ContentType?.ToString(), MaxAttachmentContentTypeLength)
+                || !HasBoundedAttachmentMetadata(attachment.Name, MaxAttachmentNameLength)
+                || !HasBoundedContentUrl(attachment.ContentUrl))
             {
-                hasUnsupportedAttachment = true;
-                hasMalformedAttachment = true;
-                continue;
+                return RejectMalformedAttachment();
             }
 
             var evidence = CreateAttachmentEvidence(attachment, hasChannelData);
-
             var classification = TeamsTenantEvidenceMappings.ClassifyAttachment(evidence);
             if (classification.Classification == TeamsAttachmentClassification.InlineTextRendering)
                 continue;
 
-            if (TryGetSupportedAttachmentKind(evidence.ContentType, evidence.HasContentUrl, scope, out var kind))
+            if (TryGetSupportedAttachmentKind(evidence.ContentType, evidence.HasContentUrl, scope, classification, out var kind))
             {
-                builder.Add(new TeamsAttachmentMetadata(
-                    GetBoundedAttachmentMetadata(attachment.Name, 255) ?? $"attachment-{index + 1}",
-                    evidence.ContentType,
-                    declaredSizeBytes: null)
-                {
-                    Kind = kind,
-                    SourceIndex = index
-                });
+                builder.Add(CreateInboundAttachmentMetadata(attachment, evidence, kind, index));
                 continue;
             }
 
             if (classification.Classification == TeamsAttachmentClassification.GraphBackedUnsupported
                 && IsTeamsFileDownloadInfo(evidence.ContentType))
             {
-                builder.Add(new TeamsAttachmentMetadata(
-                    GetBoundedAttachmentMetadata(attachment.Name, 255) ?? $"attachment-{index + 1}",
-                    evidence.ContentType,
-                    declaredSizeBytes: null)
-                {
-                    Kind = TeamsInboundAttachmentKind.Unknown,
-                    SourceIndex = index
-                });
+                builder.Add(CreateInboundAttachmentMetadata(
+                    attachment,
+                    evidence,
+                    TeamsInboundAttachmentKind.Unknown,
+                    index));
                 continue;
             }
 
-            hasUnsupportedAttachment = true;
             if (classification.Classification == TeamsAttachmentClassification.GraphBackedUnsupported)
-                reasonCode = classification.ReasonCode!;
+            {
+                return TeamsTranslationResult.Rejected(
+                    TeamsTranslationDisposition.RejectedMalformed,
+                    TeamsIngressActivityKind.Message,
+                    classification.ReasonCode!);
+            }
+
+            if (IsHostileUnknownAttachment(evidence))
+                return RejectMalformedAttachment();
+
+            // This attachment is bounded but not a recognized executable
+            // download shape. Preserve the containing message, but ensure the
+            // actor can only reject it; it cannot download or expose its data.
+            builder.Add(CreateInboundAttachmentMetadata(
+                attachment,
+                evidence,
+                TeamsInboundAttachmentKind.Unknown,
+                index));
         }
 
-        if (!hasUnsupportedAttachment)
-        {
-            inboundAttachments = builder.ToImmutable();
-            return null;
-        }
+        inboundAttachments = builder.ToImmutable();
+        return null;
+    }
 
-        if (reasonCode == "unsupported_attachment_shape" && hasMalformedAttachment)
-            reasonCode = "attachment_malformed_rejected";
-
-        return TeamsTranslationResult.Rejected(
+    private static TeamsTranslationResult RejectMalformedAttachment() =>
+        TeamsTranslationResult.Rejected(
             TeamsTranslationDisposition.RejectedMalformed,
             TeamsIngressActivityKind.Message,
-            reasonCode);
-    }
+            "attachment_malformed_rejected");
+
+    private static TeamsAttachmentMetadata CreateInboundAttachmentMetadata(
+        TeamsAttachment attachment,
+        TeamsAttachmentEvidence evidence,
+        TeamsInboundAttachmentKind kind,
+        int index) => new(
+            GetBoundedAttachmentMetadata(attachment.Name, MaxAttachmentNameLength) ?? $"attachment-{index + 1}",
+            evidence.ContentType,
+            declaredSizeBytes: null)
+        {
+            Kind = kind,
+            SourceIndex = index
+        };
 
     private static bool TryGetSupportedAttachmentKind(
         string? contentType,
         bool hasContentUrl,
         TeamsConversationScope scope,
+        TeamsAttachmentClassificationResult classification,
         out TeamsInboundAttachmentKind kind)
     {
         kind = TeamsInboundAttachmentKind.Unknown;
         if (!hasContentUrl)
             return false;
 
-        if (IsInlineImageContentType(contentType))
+        if (classification.Classification != TeamsAttachmentClassification.GraphBackedUnsupported
+            && IsImageTransportContentType(contentType))
         {
             kind = TeamsInboundAttachmentKind.InlineImage;
             return true;
@@ -498,8 +518,20 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         return false;
     }
 
-    private static bool IsInlineImageContentType(string? value)
-        => value?.Split(';', 2)[0].Trim().ToLowerInvariant() is "image/png" or "image/jpeg" or "image/gif" or "image/webp";
+    private static bool IsImageTransportContentType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        var mediaType = value.Split(';', 2)[0].Trim();
+        return mediaType.Length > "image/".Length
+               && mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+               && mediaType["image/".Length..].All(IsMimeTokenCharacter);
+    }
+
+    private static bool IsMimeTokenCharacter(char character)
+        => char.IsAsciiLetterOrDigit(character)
+           || character is '!' or '#' or '$' or '%' or '&' or '\'' or '*' or '+' or '-' or '.' or '^' or '_' or '`' or '|' or '~';
 
     private static bool IsTeamsFileDownloadInfo(string? value)
         => string.Equals(value, "application/vnd.microsoft.teams.file.download.info", StringComparison.OrdinalIgnoreCase)
@@ -508,9 +540,19 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
     private static string? GetBoundedAttachmentMetadata(string? value, int maximumLength)
         => value is { Length: > 0 } && value.Length <= maximumLength ? value : null;
 
+    private static bool HasBoundedAttachmentMetadata(string? value, int maximumLength)
+        => value is null || (value.Length > 0 && value.Length <= maximumLength);
+
+    private static bool HasBoundedContentUrl(Uri? value)
+        => value is null || (value.IsAbsoluteUri && value.ToString().Length is > 0 and <= MaxAttachmentContentUrlLength);
+
+    private static bool IsHostileUnknownAttachment(TeamsAttachmentEvidence evidence)
+        => evidence.ContentKind == TeamsAttachmentContentKind.Structured
+           || evidence.HasThumbnailUrl;
+
     private static TeamsAttachmentEvidence CreateAttachmentEvidence(TeamsAttachment attachment, bool hasChannelData)
     {
-        var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup) = GetContentFacts(attachment.Content);
+        var (contentKind, hasEmbeddedContentReference, hasEmbeddedGraphBackedContentReference, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup, hasImageRenderingMarkup) = GetContentFacts(attachment.Content);
         return new TeamsAttachmentEvidence(
             GetBoundedAttachmentMetadata(attachment.ContentType?.ToString(), MaxAttachmentContentTypeLength),
             attachment.Name is not null,
@@ -522,7 +564,8 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             attachment.ThumbnailUrl is not null,
             hasChannelData,
             hasHtmlRenderingMarkup,
-            hasParagraphRenderingMarkup);
+            hasParagraphRenderingMarkup,
+            hasImageRenderingMarkup);
     }
 
     private TeamsConversationScope? GetScope(TeamsActivity activity) => activity.Conversation?.ConversationType switch
@@ -561,13 +604,15 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
             return "text_html";
         if (contentType.StartsWith("application/vnd.microsoft.teams.file.download.info", StringComparison.OrdinalIgnoreCase))
             return "teams_file_download_info";
+        if (contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            return "image";
         return "other";
     }
 
-    private static (TeamsAttachmentContentKind ContentKind, bool HasReference, bool HasGraphBackedReference, bool HasHtmlRenderingMarkup, bool HasParagraphRenderingMarkup) GetContentFacts(object? content)
+    private static (TeamsAttachmentContentKind ContentKind, bool HasReference, bool HasGraphBackedReference, bool HasHtmlRenderingMarkup, bool HasParagraphRenderingMarkup, bool HasImageRenderingMarkup) GetContentFacts(object? content)
     {
         if (content is null)
-            return (TeamsAttachmentContentKind.Missing, false, false, false, false);
+            return (TeamsAttachmentContentKind.Missing, false, false, false, false, false);
 
         // The Teams SDK declares attachment Content as object. System.Text.Json
         // therefore materializes the normal text/html rendering wrapper as a
@@ -576,23 +621,24 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         // arrays remain structured attachment evidence and fail closed.
         var text = GetScalarAttachmentText(content);
         if (text is null)
-            return (TeamsAttachmentContentKind.Structured, false, false, false, false);
+            return (TeamsAttachmentContentKind.Structured, false, false, false, false, false);
         if (string.IsNullOrWhiteSpace(text))
-            return (TeamsAttachmentContentKind.EmptyText, false, false, false, false);
+            return (TeamsAttachmentContentKind.EmptyText, false, false, false, false, false);
 
         var hasReference = text.Contains("http://", StringComparison.OrdinalIgnoreCase)
                            || text.Contains("https://", StringComparison.OrdinalIgnoreCase);
         var hasHtmlRenderingMarkup = HasHtmlRenderingMarkup(text);
         var hasParagraphRenderingMarkup = HasParagraphRenderingMarkup(text);
+        var hasImageRenderingMarkup = HasImageRenderingMarkup(text);
         if (!hasReference)
-            return (TeamsAttachmentContentKind.NonEmptyText, false, false, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup);
+            return (TeamsAttachmentContentKind.NonEmptyText, false, false, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup, hasImageRenderingMarkup);
 
         var hasGraphBackedReference = text.Contains("graph.microsoft.com", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains(".sharepoint.com", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains(".sharepoint.us", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains(".onedrive.com", StringComparison.OrdinalIgnoreCase)
                                       || text.Contains("onedrive.live.com", StringComparison.OrdinalIgnoreCase);
-        return (TeamsAttachmentContentKind.NonEmptyText, true, hasGraphBackedReference, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup);
+        return (TeamsAttachmentContentKind.NonEmptyText, true, hasGraphBackedReference, hasHtmlRenderingMarkup, hasParagraphRenderingMarkup, hasImageRenderingMarkup);
     }
 
     private static string? GetScalarAttachmentText(object? content) => content switch
@@ -601,39 +647,6 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         JsonElement { ValueKind: JsonValueKind.String } json => json.GetString(),
         _ => null
     };
-
-    private static (string EnvelopeKind, bool HasAnchor, bool HasHref, bool HasClosingEnvelope) DescribeHtmlEnvelope(object? content)
-    {
-        var text = GetScalarAttachmentText(content);
-        if (string.IsNullOrWhiteSpace(text))
-            return ("none", false, false, false);
-
-        var trimmed = text.AsSpan().Trim();
-        var envelopeKind = trimmed.StartsWith("<div", StringComparison.OrdinalIgnoreCase)
-            ? "div"
-            : trimmed.StartsWith("<p", StringComparison.OrdinalIgnoreCase)
-                ? "paragraph"
-                : trimmed.StartsWith("<span", StringComparison.OrdinalIgnoreCase)
-                    ? "span"
-                    : trimmed.StartsWith("<a", StringComparison.OrdinalIgnoreCase)
-                        ? "anchor"
-                        : !trimmed.IsEmpty && trimmed[0] == '<'
-                            ? "other_html"
-                            : "text";
-        var closingTag = envelopeKind switch
-        {
-            "div" => "</div>",
-            "paragraph" => "</p>",
-            "span" => "</span>",
-            "anchor" => "</a>",
-            _ => string.Empty
-        };
-        return (
-            envelopeKind,
-            trimmed.Contains("<a ", StringComparison.OrdinalIgnoreCase),
-            trimmed.Contains("href=", StringComparison.OrdinalIgnoreCase),
-            closingTag.Length > 0 && trimmed.EndsWith(closingTag, StringComparison.OrdinalIgnoreCase));
-    }
 
     private static bool HasHtmlRenderingMarkup(string text)
     {
@@ -650,6 +663,28 @@ internal sealed class TeamsSdkActivityTranslator(TeamsChannelOptions options, Ti
         var trimmed = text.AsSpan().Trim();
         return trimmed.StartsWith("<p", StringComparison.OrdinalIgnoreCase)
                && trimmed.EndsWith("</p>", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasImageRenderingMarkup(string text)
+    {
+        var trimmed = text.AsSpan().Trim();
+        return trimmed.StartsWith("<div", StringComparison.OrdinalIgnoreCase)
+               && trimmed.EndsWith("</div>", StringComparison.OrdinalIgnoreCase)
+               && trimmed.Contains("<img ", StringComparison.OrdinalIgnoreCase)
+               && trimmed.Contains("src=", StringComparison.OrdinalIgnoreCase)
+               && CountCharacters(trimmed, '<') == 3;
+    }
+
+    private static int CountCharacters(ReadOnlySpan<char> value, char character)
+    {
+        var count = 0;
+        foreach (var current in value)
+        {
+            if (current == character)
+                count++;
+        }
+
+        return count;
     }
 
     private static ImmutableArray<TeamsMention> TranslateMentions(IList<Entity>? entities)
@@ -715,19 +750,30 @@ internal sealed record TeamsRejectedAttachmentDiagnostic(
     bool AudienceValid,
     string PolicyReason,
     int AttachmentCount,
-    string AttachmentContentType,
-    string AttachmentContentKind,
-    bool AttachmentContentExists,
-    bool AttachmentContentUrlExists,
-    bool AttachmentReferenceExists,
-    bool AttachmentGraphReferenceExists,
-    bool AttachmentNameExists,
-    bool AttachmentThumbnailExists,
-    bool ChannelDataExists,
-    bool AttachmentHtmlRenderingMarkupExists,
-    string AttachmentHtmlEnvelopeKind,
-    bool AttachmentHtmlAnchorExists,
-    bool AttachmentHtmlHrefExists,
-    bool AttachmentHtmlClosingEnvelopeExists,
+    ImmutableArray<TeamsRejectedAttachmentDiagnosticEntry> Attachments,
     int MentionCount,
     bool ReplyToIdExists);
+
+/// <summary>
+/// Contains one finite, non-content diagnostic summary for one attachment.
+/// </summary>
+internal sealed record TeamsRejectedAttachmentDiagnosticEntry(
+    int Index,
+    string ContentType,
+    string ContentKind,
+    bool HasContentUrl,
+    bool HasName,
+    bool HasThumbnail,
+    string ClassifierDisposition,
+    string ResolvedInboundAttachmentKind)
+{
+    public static TeamsRejectedAttachmentDiagnosticEntry Malformed(int index) => new(
+        index,
+        "missing",
+        "Missing",
+        false,
+        false,
+        false,
+        "Malformed",
+        "None");
+}

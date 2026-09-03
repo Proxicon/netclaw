@@ -99,14 +99,15 @@ public static class TeamsTenantEvidenceMappings
                && !evidence.HasEmbeddedGraphBackedContentReference
                && (!evidence.HasEmbeddedContentReference
                    || evidence.HasHtmlRenderingMarkup
-                   || evidence.HasParagraphRenderingMarkup)
+                   || evidence.HasParagraphRenderingMarkup
+                   || evidence.HasImageRenderingMarkup)
                && evidence.ContentKind == TeamsAttachmentContentKind.NonEmptyText;
     }
 
     /// <summary>
-    /// Classifies only bounded, transport-neutral attachment facts. The current
-    /// tenant evidence approves no downloadable attachment shape, so every
-    /// nonempty attachment fails closed before actor routing.
+    /// Classifies only bounded, transport-neutral attachment facts. The daemon
+    /// resolves downloadable attachment kinds at its SDK boundary. Every other
+    /// attachment remains non-executable until that boundary resolves it.
     /// </summary>
     public static TeamsAttachmentClassificationResult ClassifyAttachment(TeamsAttachmentEvidence evidence)
     {
@@ -227,6 +228,7 @@ public sealed record TeamsAttachmentEvidence(
     bool HasThumbnailUrl = false,
     bool HasChannelData = false,
     bool HasHtmlRenderingMarkup = false,
-    bool HasParagraphRenderingMarkup = false);
+    bool HasParagraphRenderingMarkup = false,
+    bool HasImageRenderingMarkup = false);
 
 public sealed record TeamsMentionEvidence(string Type, string MentionedId, string Text);

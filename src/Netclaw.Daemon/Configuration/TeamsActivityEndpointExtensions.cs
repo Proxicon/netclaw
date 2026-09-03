@@ -263,34 +263,31 @@ internal static class TeamsActivityEndpointExtensions
         if (diagnostic is null)
             return;
 
-        logger.LogWarning(
-            "Teams attachment diagnostic: scope={Scope}; tenant_match={TenantMatch}; team_match={TeamMatch}; channel_match={ChannelMatch}; sender_match={SenderMatch}; mentioned={Mentioned}; root_activity_valid={RootActivityValid}; audience_valid={AudienceValid}; policy_reason={PolicyReason}; attachment_count={AttachmentCount}; attachment_content_type={AttachmentContentType}; attachment_content_kind={AttachmentContentKind}; attachment_content_exists={AttachmentContentExists}; attachment_content_url_exists={AttachmentContentUrlExists}; attachment_reference_exists={AttachmentReferenceExists}; attachment_graph_reference_exists={AttachmentGraphReferenceExists}; attachment_name_exists={AttachmentNameExists}; attachment_thumbnail_exists={AttachmentThumbnailExists}; channel_data_exists={ChannelDataExists}; attachment_html_rendering_markup_exists={AttachmentHtmlRenderingMarkupExists}; attachment_html_envelope_kind={AttachmentHtmlEnvelopeKind}; attachment_html_anchor_exists={AttachmentHtmlAnchorExists}; attachment_html_href_exists={AttachmentHtmlHrefExists}; attachment_html_closing_envelope_exists={AttachmentHtmlClosingEnvelopeExists}; mention_count={MentionCount}; reply_to_id_exists={ReplyToIdExists}",
-            diagnostic.Scope,
-            diagnostic.TenantMatch,
-            diagnostic.TeamMatch,
-            diagnostic.ChannelMatch,
-            diagnostic.SenderMatch,
-            diagnostic.Mentioned,
-            diagnostic.RootActivityValid,
-            diagnostic.AudienceValid,
-            diagnostic.PolicyReason,
-            diagnostic.AttachmentCount,
-            diagnostic.AttachmentContentType,
-            diagnostic.AttachmentContentKind,
-            diagnostic.AttachmentContentExists,
-            diagnostic.AttachmentContentUrlExists,
-            diagnostic.AttachmentReferenceExists,
-            diagnostic.AttachmentGraphReferenceExists,
-            diagnostic.AttachmentNameExists,
-            diagnostic.AttachmentThumbnailExists,
-            diagnostic.ChannelDataExists,
-            diagnostic.AttachmentHtmlRenderingMarkupExists,
-            diagnostic.AttachmentHtmlEnvelopeKind,
-            diagnostic.AttachmentHtmlAnchorExists,
-            diagnostic.AttachmentHtmlHrefExists,
-            diagnostic.AttachmentHtmlClosingEnvelopeExists,
-            diagnostic.MentionCount,
-            diagnostic.ReplyToIdExists);
+        foreach (var attachment in diagnostic.Attachments)
+        {
+            logger.LogWarning(
+                "Teams attachment diagnostic: scope={Scope}; tenant_match={TenantMatch}; team_match={TeamMatch}; channel_match={ChannelMatch}; sender_match={SenderMatch}; mentioned={Mentioned}; root_activity_valid={RootActivityValid}; audience_valid={AudienceValid}; policy_reason={PolicyReason}; attachment_count={AttachmentCount}; attachment_index={AttachmentIndex}; attachment_content_type={AttachmentContentType}; attachment_content_kind={AttachmentContentKind}; attachment_content_url_exists={AttachmentContentUrlExists}; attachment_name_exists={AttachmentNameExists}; attachment_thumbnail_exists={AttachmentThumbnailExists}; classifier_disposition={ClassifierDisposition}; resolved_inbound_attachment_kind={ResolvedInboundAttachmentKind}; mention_count={MentionCount}; reply_to_id_exists={ReplyToIdExists}",
+                diagnostic.Scope,
+                diagnostic.TenantMatch,
+                diagnostic.TeamMatch,
+                diagnostic.ChannelMatch,
+                diagnostic.SenderMatch,
+                diagnostic.Mentioned,
+                diagnostic.RootActivityValid,
+                diagnostic.AudienceValid,
+                diagnostic.PolicyReason,
+                diagnostic.AttachmentCount,
+                attachment.Index,
+                attachment.ContentType,
+                attachment.ContentKind,
+                attachment.HasContentUrl,
+                attachment.HasName,
+                attachment.HasThumbnail,
+                attachment.ClassifierDisposition,
+                attachment.ResolvedInboundAttachmentKind,
+                diagnostic.MentionCount,
+                diagnostic.ReplyToIdExists);
+        }
     }
 
     /// <summary>
