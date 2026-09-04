@@ -104,7 +104,9 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(ingress.Activity.Text))
+        if (string.IsNullOrWhiteSpace(ingress.Activity.Text)
+            && !ingress.Activity.Attachments.Any(static attachment =>
+                attachment.Kind is TeamsInboundAttachmentKind.InlineImage or TeamsInboundAttachmentKind.PersonalFile))
         {
             ChannelTelemetry.For(ChannelType.Teams).RecordEventFiltered("channel_empty_prompt");
             replyTo.Tell(new TeamsBindingRouteResult(TeamsBindingRouteDisposition.Ignored));

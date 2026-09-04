@@ -1,5 +1,33 @@
 # Microsoft Teams live validation evidence
 
+## Wildcard inline-image normalization (2026-09-04)
+
+Status: **OFFLINE IMPLEMENTATION COMPLETE; LIVE SMOKE PENDING**.
+
+The owner tenant logged an `image/*` inline attachment with a content URL and
+no useful filename. The Public policy allowed Image. The generic pre-download
+gate classified the wildcard MIME as Other and rejected it before byte checks.
+
+The Teams adapter now owns this transport normalization. It uses the existing
+trusted downloader, byte limit, redirect block, and host restriction. It
+detects a concrete MIME from the downloaded bytes. It creates safe metadata
+such as `attachment-1.png`. The shared scanner must verify the same concrete
+MIME before model image data can enter a session.
+
+Public policy still allows images only. A PDF or other non-image behind
+`image/*` remains rejected. The adapter never persists a raw Teams content URL.
+The change adds no Microsoft Graph permission. The authenticated Teams
+activity boundary remains unchanged.
+
+Focused tests prove PNG and JPEG model projection, Public image acceptance,
+Public non-image rejection, disabled attachment rejection, image-only Posts,
+and image-only established Threads. The tests also use a live-shaped image
+entry with an HTML rendering companion and no raw URL in actor input.
+
+After deployment, the owner should send a mentioned message with text and an
+inline image. The owner should then send an image-only message and a thread
+reply. The owner should record only sanitized routing and attachment outcomes.
+
 ## Inline image translation remediation (2026-09-03)
 
 Status: **OFFLINE IMPLEMENTATION COMPLETE; LIVE SMOKE PENDING**.

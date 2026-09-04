@@ -41,9 +41,11 @@ using Netclaw.Channels.Teams;
 using Netclaw.Channels.Teams.Serialization;
 using Netclaw.Channels.Telemetry;
 using Netclaw.Configuration;
+using Netclaw.Media;
 using Netclaw.Daemon.Configuration;
 using Netclaw.Security;
 using Netclaw.Tests.Utilities;
+using SkiaSharp;
 using Xunit;
 using static Netclaw.Actors.Reminders.ReminderProtocol;
 using static Netclaw.Actors.Sessions.SessionProtocol;
@@ -60,6 +62,8 @@ namespace Netclaw.Daemon.Tests.Configuration;
 [Collection("TeamsTelemetry")]
 public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : PersistenceTestKit(output: output)
 {
+    private static readonly byte[] PngBytes = TestImages.SmallPng();
+
     protected override void ConfigureAkka(AkkaConfigurationBuilder builder, IServiceProvider provider)
     {
         base.ConfigureAkka(builder, provider);
@@ -935,6 +939,149 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
     }
 
+    [Theory]
+    [InlineData("image/png")]
+    [InlineData("image/jpeg")]
+    public async Task Provisional_wildcard_inline_image_reaches_the_model_with_a_concrete_verified_mime(string expectedMime)
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateVerifiedAttachmentDependencies(CreatePipeline(TestActor), paths, BytesFor(expectedMime)),
+            $"teams-wildcard-{expectedMime.Replace('/', '-')}");
+        var activity = CreateAttachmentActivity(
+            $"wildcard-{expectedMime}",
+            "inspect this image",
+            [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+
+        var dispatched = ReceiveDispatchedMessage();
+        var media = Assert.Single(dispatched.MediaReferences);
+        Assert.Equal(expectedMime, media.MimeType.Value);
+        Assert.EndsWith(MimeTypeCatalog.ExtensionFor(new Netclaw.Media.MimeType(expectedMime)), media.RelativePath, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Provisional_wildcard_inline_image_with_non_image_bytes_is_rejected()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var replyClient = new RecordingTeamsReplyClient();
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateVerifiedAttachmentDependencies(
+                CreatePipeline(TestActor),
+                paths,
+                "%PDF-1.7"u8.ToArray(),
+                replyClient),
+            "teams-wildcard-non-image");
+        var activity = CreateAttachmentActivity(
+            "wildcard-non-image",
+            string.Empty,
+            [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("verified image signature", replyClient.Messages[0].Text, StringComparison.Ordinal);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Wildcard_inline_image_with_text_is_accepted_in_a_public_channel_post()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var dependencies = CreatePublicVerifiedAttachmentDependencies(CreatePipeline(TestActor), paths, PngBytes);
+        const string conversationId = "public-wildcard-post;messageid=root-a";
+        var actor = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId), dependencies));
+        var activity = CreateChannelActivity(
+            "root-a",
+            conversationId,
+            text: "inspect this image",
+            attachments: [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteConversationAsync(actor, activity)).Disposition);
+
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Equal(TrustAudience.Public, dispatched.Source!.Audience);
+        Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
+    }
+
+    [Fact]
+    public async Task Image_only_mentioned_channel_post_with_a_wildcard_inline_image_is_accepted()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var dependencies = CreatePublicVerifiedAttachmentDependencies(CreatePipeline(TestActor), paths, PngBytes);
+        const string conversationId = "public-wildcard-image-only;messageid=root-a";
+        var actor = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId), dependencies));
+        var activity = CreateChannelActivity(
+            "root-a",
+            conversationId,
+            text: string.Empty,
+            attachments: [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteConversationAsync(actor, activity)).Disposition);
+
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Equal(TrustAudience.Public, dispatched.Source!.Audience);
+        Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
+    }
+
+    [Fact]
+    public async Task Public_channel_rejects_non_image_bytes_behind_a_wildcard_inline_image()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var replyClient = new RecordingTeamsReplyClient();
+        var dependencies = CreatePublicVerifiedAttachmentDependencies(
+            CreatePipeline(TestActor),
+            paths,
+            "%PDF-1.7"u8.ToArray(),
+            replyClient);
+        const string conversationId = "public-wildcard-non-image;messageid=root-a";
+        var actor = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId), dependencies));
+        var activity = CreateChannelActivity(
+            "root-a",
+            conversationId,
+            text: string.Empty,
+            attachments: [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteConversationAsync(actor, activity)).Disposition);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Contains("isn't allowed in Public channels", replyClient.Messages[0].Text, StringComparison.Ordinal);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Wildcard_inline_image_is_rejected_when_teams_attachments_are_disabled()
+    {
+        var replyClient = new RecordingTeamsReplyClient();
+        var actor = CreateBindingActor(
+            CreateSessionId("tenant-a", "attachment-conversation"),
+            CreateDependencies(CreatePipeline(TestActor), replyClient: replyClient),
+            "teams-wildcard-attachments-disabled");
+        var activity = CreateAttachmentActivity(
+            "wildcard-attachments-disabled",
+            string.Empty,
+            [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await RouteAsync(actor, activity)).Disposition);
+        await AwaitAssertAsync(() => Assert.Single(replyClient.Messages), cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("Attachments are disabled for Microsoft Teams.", replyClient.Messages[0].Text);
+        ExpectNoMsg(TimeSpan.FromMilliseconds(100), TestContext.Current.CancellationToken);
+    }
+
     [Fact]
     public async Task Attachment_pipeline_failure_after_async_ingress_releases_the_activity_reservation()
     {
@@ -1204,33 +1351,13 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
-    public async Task Established_channel_thread_with_text_and_image_creates_one_model_turn()
+    public async Task Established_channel_thread_with_text_and_wildcard_inline_image_creates_one_model_turn()
     {
         using var root = new DisposableTempDir();
         var paths = new NetclawPaths(root.Path);
         paths.EnsureDirectoriesExist();
         var pipeline = CreatePipeline(TestActor);
-        var dependencies = new TeamsConversationDependencies(
-            new TeamsChannelOptions
-            {
-                TenantId = "tenant-a",
-                MentionOnly = true,
-                AllowedTeamIds = ["team-a"],
-                AllowedChannelIds = ["channel-a"],
-                AllowedUserIds = ["user-a"],
-                AllowAttachments = true
-            },
-            pipeline,
-            new TestTeamsReplyClient(),
-            new TeamsOutputRenderer(),
-            TimeProvider.System)
-        {
-            PromptInjectionDetector = SafeTeamsPromptInjectionDetector.Instance,
-            AttachmentDownloader = new TestTeamsAttachmentDownloader(),
-            ContentScanner = new NullContentScanner(),
-            AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles(),
-            Paths = paths
-        };
+        var dependencies = CreatePublicVerifiedAttachmentDependencies(pipeline, paths, PngBytes);
         const string conversationId = "conversation-inline-image;messageid=root-a";
         var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(
             CreateSessionId("tenant-a", conversationId), dependencies));
@@ -1245,7 +1372,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             conversationId,
             isMentioned: false,
             text: "inspect this image",
-            attachments: [CreateInboundAttachment("inline.png", TeamsInboundAttachmentKind.InlineImage, 0)]);
+            attachments: [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
         Assert.Equal(
             TeamsBindingRouteDisposition.Accepted,
             (await RouteConversationAsync(parent, continuation)).Disposition);
@@ -1254,10 +1381,42 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var dispatched = ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
         Assert.Contains("inspect this image", dispatched.Content, StringComparison.Ordinal);
         Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+        Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
     }
 
     [Fact]
-    public async Task Mentioned_channel_text_and_inline_image_with_rendering_companion_creates_one_model_turn()
+    public async Task Image_only_established_channel_thread_with_a_wildcard_inline_image_creates_one_model_turn()
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var dependencies = CreatePublicVerifiedAttachmentDependencies(CreatePipeline(TestActor), paths, PngBytes);
+        const string conversationId = "public-wildcard-thread;messageid=root-a";
+        var actor = Sys.ActorOf(TeamsConversationActor.CreateProps(
+            CreateSessionId("tenant-a", conversationId), dependencies));
+
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(actor, CreateChannelActivity("root-a", conversationId))).Disposition);
+        ReceiveDispatchedMessage();
+
+        var continuation = CreateChannelActivity(
+            "reply-image-only",
+            conversationId,
+            isMentioned: false,
+            text: string.Empty,
+            attachments: [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+        Assert.Equal(
+            TeamsBindingRouteDisposition.Accepted,
+            (await RouteConversationAsync(actor, continuation)).Disposition);
+
+        ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var dispatched = ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
+    }
+
+    [Fact]
+    public async Task Mentioned_channel_text_and_live_wildcard_inline_image_with_rendering_companion_creates_one_model_turn()
     {
         using var root = new DisposableTempDir();
         var paths = new NetclawPaths(root.Path);
@@ -1299,13 +1458,13 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
               ]
             }
             """));
+        const string rawContentUrl = "https://smba.trafficmanager.net/amer/v3/attachments/live-inline-image";
         source.Attachments =
         [
             new Microsoft.Teams.Apps.Schema.TeamsAttachment
             {
-                ContentType = new AttachmentContentType("image/png"),
-                ContentUrl = new Uri("https://smba.trafficmanager.net/amer/v3/attachments/image"),
-                Name = "inline.png"
+                ContentType = new AttachmentContentType("image/*"),
+                ContentUrl = new Uri(rawContentUrl)
             },
             new Microsoft.Teams.Apps.Schema.TeamsAttachment
             {
@@ -1315,22 +1474,19 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         ];
         var translated = translator.Translate(source, "tenant-a");
         Assert.Equal(TeamsTranslationDisposition.Accepted, translated.Disposition);
+        var inlineImage = Assert.Single(translated.Activity!.Attachments);
+        Assert.Equal("attachment-1", inlineImage.Name);
+        Assert.Equal("image/*", inlineImage.ContentType);
+        Assert.Equal(TeamsInboundAttachmentKind.InlineImage, inlineImage.Kind);
+        Assert.DoesNotContain(rawContentUrl, JsonSerializer.Serialize(translated.Activity), StringComparison.Ordinal);
         Assert.DoesNotContain("Url", string.Join(',', translated.Activity!.Attachments
             .SelectMany(attachment => attachment.GetType().GetProperties())
             .Select(property => property.Name)), StringComparison.OrdinalIgnoreCase);
-        var dependencies = new TeamsConversationDependencies(
-            options,
+        var dependencies = CreatePublicVerifiedAttachmentDependencies(
             CreatePipeline(TestActor),
-            new TestTeamsReplyClient(),
-            new TeamsOutputRenderer(),
-            TimeProvider.System)
-        {
-            PromptInjectionDetector = SafeTeamsPromptInjectionDetector.Instance,
-            AttachmentDownloader = new TestTeamsAttachmentDownloader(),
-            ContentScanner = new NullContentScanner(),
-            AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles(),
-            Paths = paths
-        };
+            paths,
+            PngBytes,
+            options: options);
         var parent = Sys.ActorOf(TeamsConversationActor.CreateProps(
             CreateSessionId("tenant-a", translated.Activity.Trust.ConversationId), dependencies));
 
@@ -1340,6 +1496,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         var dispatched = ReceiveDispatchedMessage();
         Assert.Contains("inspect this image", dispatched.Content, StringComparison.Ordinal);
         Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+        Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
     }
 
     [Fact]
@@ -4030,6 +4187,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         ITeamsAttachmentDownloader? attachmentDownloader = null,
         IContentScanner? contentScanner = null,
         ToolAudienceProfiles? audienceProfiles = null,
+        ModelCapabilities? modelCapabilities = null,
         NetclawPaths? paths = null) => new(
         new TeamsChannelOptions
         {
@@ -4049,6 +4207,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         AttachmentDownloader = attachmentDownloader,
         ContentScanner = contentScanner,
         AudienceProfiles = audienceProfiles,
+        ModelCapabilities = modelCapabilities,
         Paths = paths
     };
 
@@ -4063,6 +4222,60 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         contentScanner: new NullContentScanner(),
         audienceProfiles: ToolAudienceProfileDefaults.CreateProfiles(),
         paths: paths);
+
+    private static TeamsConversationDependencies CreateVerifiedAttachmentDependencies(
+        ISessionPipeline pipeline,
+        NetclawPaths paths,
+        byte[] bytes,
+        ITeamsReplyClient? replyClient = null) => CreateDependencies(
+        pipeline,
+        replyClient: replyClient,
+        allowAttachments: true,
+        attachmentDownloader: new BytesTeamsAttachmentDownloader(bytes),
+        contentScanner: new MagicByteContentScanner(new ContentPolicy()),
+        audienceProfiles: ToolAudienceProfileDefaults.CreateProfiles(),
+        modelCapabilities: ImageModelCapabilities,
+        paths: paths);
+
+    private static TeamsConversationDependencies CreatePublicVerifiedAttachmentDependencies(
+        ISessionPipeline pipeline,
+        NetclawPaths paths,
+        byte[] bytes,
+        ITeamsReplyClient? replyClient = null,
+        TeamsChannelOptions? options = null) => new(
+        options ?? new TeamsChannelOptions
+        {
+            TenantId = "tenant-a",
+            MentionOnly = true,
+            AllowedTeamIds = ["team-a"],
+            AllowedChannelIds = ["channel-a"],
+            AllowedUserIds = ["user-a"],
+            AllowAttachments = true
+        },
+        pipeline,
+        replyClient ?? new TestTeamsReplyClient(),
+        new TeamsOutputRenderer(),
+        TimeProvider.System)
+    {
+        PromptInjectionDetector = SafeTeamsPromptInjectionDetector.Instance,
+        AttachmentDownloader = new BytesTeamsAttachmentDownloader(bytes),
+        ContentScanner = new MagicByteContentScanner(new ContentPolicy()),
+        AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles(),
+        ModelCapabilities = ImageModelCapabilities,
+        Paths = paths
+    };
+
+    private static ModelCapabilities ImageModelCapabilities { get; } = new()
+    {
+        InputModalities = ModelModality.Text | ModelModality.Image
+    };
+
+    private static byte[] BytesFor(string mimeType) => mimeType switch
+    {
+        "image/png" => PngBytes,
+        "image/jpeg" => TestImages.Image(16, 16, SKEncodedImageFormat.Jpeg),
+        _ => throw new ArgumentOutOfRangeException(nameof(mimeType), mimeType, "Unsupported test MIME type.")
+    };
 
     private static ServiceProvider CreateConversationServiceProvider(
         ISessionPipeline pipeline,
@@ -4104,6 +4317,26 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             var path = Path.Combine(stagingDirectory, ".teams-test-download.tmp");
             await File.WriteAllBytesAsync(path, [1, 2, 3, 4], cancellationToken);
             return new AttachmentDownloadResult(path, 4);
+        }
+    }
+
+    private sealed class BytesTeamsAttachmentDownloader(byte[] bytes) : ITeamsAttachmentDownloader
+    {
+        private readonly byte[] _bytes = bytes;
+
+        public async Task<AttachmentDownloadResult> DownloadAsync(
+            TeamsInboundActivity activity,
+            TeamsAttachmentMetadata attachment,
+            string stagingDirectory,
+            long maximumBytes,
+            CancellationToken cancellationToken)
+        {
+            if (_bytes.Length > maximumBytes)
+                throw new AttachmentTooLargeException(_bytes.Length, maximumBytes);
+
+            var path = Path.Combine(stagingDirectory, $".teams-test-download-{Guid.NewGuid():N}.tmp");
+            await File.WriteAllBytesAsync(path, _bytes, cancellationToken);
+            return new AttachmentDownloadResult(path, _bytes.Length);
         }
     }
 
@@ -4282,7 +4515,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     private static TeamsAttachmentMetadata CreateInboundAttachment(
         string name,
         TeamsInboundAttachmentKind kind,
-        int sourceIndex) => new(name, "image/png", 4)
+        int sourceIndex,
+        string contentType = "image/png") => new(name, contentType, 4)
     {
         Kind = kind,
         SourceIndex = sourceIndex

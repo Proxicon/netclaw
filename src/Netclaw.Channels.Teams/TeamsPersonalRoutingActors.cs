@@ -1504,26 +1504,40 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 continue;
             }
 
-            var result = await AttachmentIngressPipeline.IngestAsync(
-                new AttachmentIngressRequest(
-                    attachment.Name,
-                    attachment.ContentType ?? "application/octet-stream",
-                    attachment.DeclaredSizeBytes ?? 0),
-                audience,
-                policy,
-                inlineImages,
-                inboxDirectory,
-                stagingDirectory,
-                TimeSpan.FromSeconds(10),
-                _dependencies.ContentScanner,
-                _log,
-                (staging, maximumBytes, token) => _dependencies.AttachmentDownloader.DownloadAsync(
+            var result = TeamsProvisionalInlineImageIngress.IsProvisionalInlineImage(attachment)
+                ? await TeamsProvisionalInlineImageIngress.IngestAsync(
                     activity,
                     attachment,
-                    staging,
-                    maximumBytes,
-                    token),
-                cancellationToken).ConfigureAwait(false);
+                    audience,
+                    policy,
+                    inlineImages,
+                    inboxDirectory,
+                    stagingDirectory,
+                    TimeSpan.FromSeconds(10),
+                    _dependencies.ContentScanner,
+                    _log,
+                    _dependencies.AttachmentDownloader,
+                    cancellationToken).ConfigureAwait(false)
+                : await AttachmentIngressPipeline.IngestAsync(
+                    new AttachmentIngressRequest(
+                        attachment.Name,
+                        attachment.ContentType ?? "application/octet-stream",
+                        attachment.DeclaredSizeBytes ?? 0),
+                    audience,
+                    policy,
+                    inlineImages,
+                    inboxDirectory,
+                    stagingDirectory,
+                    TimeSpan.FromSeconds(10),
+                    _dependencies.ContentScanner,
+                    _log,
+                    (staging, maximumBytes, token) => _dependencies.AttachmentDownloader.DownloadAsync(
+                        activity,
+                        attachment,
+                        staging,
+                        maximumBytes,
+                        token),
+                    cancellationToken).ConfigureAwait(false);
 
             switch (result)
             {
