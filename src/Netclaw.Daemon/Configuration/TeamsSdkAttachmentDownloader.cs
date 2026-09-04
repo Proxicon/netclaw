@@ -4,7 +4,11 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Collections.Concurrent;
+using System.Net.Http.Headers;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
+using Microsoft.Identity.Abstractions;
+using Microsoft.Identity.Web;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Schema;
 using Netclaw.Channels;
@@ -18,6 +22,8 @@ namespace Netclaw.Daemon.Configuration;
 /// </summary>
 internal sealed class TeamsSdkAttachmentDownloader(
     IHttpClientFactory httpClientFactory,
+    IAuthorizationHeaderProvider authorizationHeaderProvider,
+    IOptionsMonitor<ManagedIdentityOptions> managedIdentityOptions,
     TimeProvider timeProvider) : ITeamsAttachmentDownloader
 {
     private const int MaximumCaptures = 1_024;
@@ -45,9 +51,11 @@ internal sealed class TeamsSdkAttachmentDownloader(
 
             var sdkAttachment = source.Attachments[attachment.SourceIndex];
             if (sdkAttachment is not null
-                && TryGetDownloadUrl(sdkAttachment, attachment.Kind, out var downloadUrl))
+                && TryGetDownloadUrl(sdkAttachment, attachment.Kind, out var downloadUri))
             {
-                captured.TryAdd(attachment.SourceIndex, new CapturedAttachment(downloadUrl));
+                captured.TryAdd(attachment.SourceIndex, new CapturedAttachment(
+                    downloadUri.AbsoluteUri,
+                    RequiresBotConnectorAuthentication(downloadUri)));
             }
         }
 
@@ -66,7 +74,7 @@ internal sealed class TeamsSdkAttachmentDownloader(
             captured);
     }
 
-    public Task<AttachmentDownloadResult> DownloadAsync(
+    public async Task<AttachmentDownloadResult> DownloadAsync(
         TeamsInboundActivity activity,
         TeamsAttachmentMetadata attachment,
         string stagingDirectory,
@@ -85,13 +93,58 @@ internal sealed class TeamsSdkAttachmentDownloader(
         if (captured.Attachments.IsEmpty)
             _captures.TryRemove(CaptureKey.Create(activity), out _);
 
-        return StreamingAttachmentDownloader.DownloadToFileAsync(
+        var authorizationHeader = source.RequiresBotConnectorAuthentication
+            ? await CreateBotConnectorAuthorizationHeaderAsync(cancellationToken).ConfigureAwait(false)
+            : null;
+        return await StreamingAttachmentDownloader.DownloadToFileAsync(
             httpClientFactory.CreateClient("teams-attachments"),
             source.DownloadUrl,
-            configureRequest: null,
+            configureRequest: authorizationHeader is null
+                ? null
+                : request => request.Headers.Authorization = CreateBearerHeader(authorizationHeader),
             targetDirectory: stagingDirectory,
             maxBytes: maximumBytes,
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string> CreateBotConnectorAuthorizationHeaderAsync(CancellationToken cancellationToken)
+    {
+        var options = new AuthorizationHeaderProviderOptions
+        {
+            AcquireTokenOptions = new AcquireTokenOptions
+            {
+                AuthenticationOptionsName = TeamsActivityEndpointExtensions.AuthenticationScheme
+            }
+        };
+        var managedIdentity = managedIdentityOptions.Get(TeamsActivityEndpointExtensions.AuthenticationScheme);
+        if (!string.IsNullOrEmpty(managedIdentity.UserAssignedClientId))
+            options.AcquireTokenOptions.ManagedIdentity = managedIdentity;
+
+        var authorizationHeader = await authorizationHeaderProvider.CreateAuthorizationHeaderForAppAsync(
+            "https://api.botframework.com/.default",
+            options,
+            cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(authorizationHeader))
+        {
+            throw new InvalidDataException(
+                "The authenticated Teams attachment download is unavailable.");
+        }
+
+        return authorizationHeader;
+    }
+
+    private static AuthenticationHeaderValue CreateBearerHeader(string authorizationHeader)
+    {
+        var token = authorizationHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+            ? authorizationHeader["Bearer ".Length..]
+            : authorizationHeader;
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            throw new InvalidDataException(
+                "The authenticated Teams attachment download is unavailable.");
+        }
+
+        return new AuthenticationHeaderValue("Bearer", token);
     }
 
     private void RemoveExpiredCaptures()
@@ -107,9 +160,9 @@ internal sealed class TeamsSdkAttachmentDownloader(
     private static bool TryGetDownloadUrl(
         TeamsAttachment attachment,
         TeamsInboundAttachmentKind kind,
-        out string downloadUrl)
+        out Uri downloadUri)
     {
-        downloadUrl = string.Empty;
+        downloadUri = null!;
         var candidate = kind == TeamsInboundAttachmentKind.PersonalFile
             ? TryGetPersonalDownloadUrl(attachment.Content) ?? attachment.ContentUrl?.ToString()
             : attachment.ContentUrl?.ToString();
@@ -123,9 +176,13 @@ internal sealed class TeamsSdkAttachmentDownloader(
             return false;
         }
 
-        downloadUrl = uri.AbsoluteUri;
+        downloadUri = uri;
         return true;
     }
+
+    private static bool RequiresBotConnectorAuthentication(Uri uri)
+        => uri.Host.Equals("smba.trafficmanager.net", StringComparison.OrdinalIgnoreCase)
+           || uri.Host.EndsWith(".botframework.com", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsTrustedAttachmentHost(string host)
         => host.EndsWith(".teams.microsoft.com", StringComparison.OrdinalIgnoreCase)
@@ -165,5 +222,5 @@ internal sealed class TeamsSdkAttachmentDownloader(
         DateTimeOffset ExpiresAt,
         ConcurrentDictionary<int, CapturedAttachment> Attachments);
 
-    private sealed record CapturedAttachment(string DownloadUrl);
+    private sealed record CapturedAttachment(string DownloadUrl, bool RequiresBotConnectorAuthentication);
 }

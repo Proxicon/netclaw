@@ -1,5 +1,32 @@
 # Microsoft Teams live validation evidence
 
+## Bot Connector attachment authentication (2026-09-04)
+
+Status: **OFFLINE IMPLEMENTATION COMPLETE; LIVE SMOKE PENDING**.
+
+The owner tenant received HTTP 401 from a `smba.trafficmanager.net` attachment
+GET. The existing Bot Framework conversation client acquired an app token after
+that failed GET. The attachment downloader did not use that authenticated client.
+
+The Teams daemon now uses the existing Bot Framework app-token provider for
+Bot Connector attachment hosts. It requests
+`https://api.botframework.com/.default` and adds the app bearer token to the
+GET. The daemon uses the unauthenticated attachment client for SharePoint,
+OneDrive, and other trusted signed URLs.
+
+The change adds no Microsoft Graph permission. It keeps the HTTPS host gate,
+redirect block, byte limit, staging, scanner, and raw URL boundary unchanged.
+The token remains at the Teams SDK boundary. The actor and persistence
+contracts do not receive it.
+
+Focused tests prove the Connector header and scope. They also prove that the
+token stays outside logs and actor contracts. The tests cover 200, 401, token
+failure, non-Connector URLs, byte limits, redirects, and raw URL boundaries.
+
+After deployment, the owner should send a mentioned PNG inline image. The owner
+should confirm one authenticated attachment GET and one verified image result.
+The owner must record only status, scope, and sanitized outcomes.
+
 ## Wildcard inline-image normalization (2026-09-04)
 
 Status: **OFFLINE IMPLEMENTATION COMPLETE; LIVE SMOKE PENDING**.

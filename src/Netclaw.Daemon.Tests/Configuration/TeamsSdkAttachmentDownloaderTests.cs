@@ -3,11 +3,20 @@
 //      Copyright (C) 2026 - 2026 Petabridge, LLC <https://petabridge.com>
 // </copyright>
 // -----------------------------------------------------------------------
+using System.Collections.Immutable;
 using System.Net;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
-using System.Collections.Immutable;
+using Akka.Event;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
+using Microsoft.Identity.Abstractions;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Schema;
 using Microsoft.Teams.Core.Schema;
@@ -16,8 +25,11 @@ using Netclaw.Channels;
 using Netclaw.Channels.Teams;
 using Netclaw.Configuration;
 using Netclaw.Daemon.Configuration;
+using Netclaw.Media;
+using Netclaw.Security;
 using Netclaw.Tests.Utilities;
 using Xunit;
+using MicrosoftLogLevel = Microsoft.Extensions.Logging.LogLevel;
 
 namespace Netclaw.Daemon.Tests.Configuration;
 
@@ -33,7 +45,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
         var handler = new RecordingHandler(_ => Success("content"));
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
 
@@ -54,7 +66,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
         var handler = new RecordingHandler(_ => Success("content"));
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
 
@@ -73,6 +85,146 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     }
 
     [Fact]
+    public async Task Bot_connector_download_uses_the_sdk_app_token_and_keeps_it_at_the_daemon_boundary()
+    {
+        const string token = "synthetic-bot-token";
+        var authorizationHeaders = new RecordingAuthorizationHeaderProvider($"Bearer {token}");
+        var logs = new CapturingLoggerProvider();
+        var handler = new RecordingHandler(
+            request =>
+            {
+                Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+                Assert.Equal(token, request.Headers.Authorization?.Parameter);
+                Assert.DoesNotContain(token, request.RequestUri!.AbsoluteUri, StringComparison.Ordinal);
+                return Success("content");
+            });
+        using var app = BuildBotConnectorDownloadHost(handler, authorizationHeaders, logs);
+        var downloader = app.Services.GetRequiredService<TeamsSdkAttachmentDownloader>();
+        var activity = CreateActivity();
+        var attachment = CreateAttachment();
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
+
+        using var temp = new DisposableTempDir();
+        var result = await downloader.DownloadAsync(
+            activity,
+            attachment,
+            temp.Path,
+            maximumBytes: 1_024,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(7, result.BytesWritten);
+        Assert.Equal(["https://api.botframework.com/.default"], authorizationHeaders.AppScopes);
+        Assert.Equal([TeamsActivityEndpointExtensions.AuthenticationScheme], authorizationHeaders.AppAuthenticationOptionNames);
+        Assert.Equal(1, handler.CallCount);
+        Assert.DoesNotContain(token, JsonSerializer.Serialize(new { activity, attachment, result }), StringComparison.Ordinal);
+        var ingress = new TeamsBindingIngress(activity, CancellationToken.None);
+        Assert.DoesNotContain(token, JsonSerializer.Serialize(ingress.Activity), StringComparison.Ordinal);
+        Assert.DoesNotContain(token, string.Join('\n', handler.RequestUris), StringComparison.Ordinal);
+        Assert.DoesNotContain(token, string.Join('\n', logs.Messages), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("https://contoso.sharepoint.com/sites/team/image")]
+    [InlineData("https://contoso.sharepoint.us/sites/team/image")]
+    [InlineData("https://contoso.onedrive.com/personal/user/image")]
+    public async Task Signed_non_bot_connector_urls_do_not_receive_the_bot_token(string url)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
+        var signedUrlHandler = new RecordingHandler(request =>
+        {
+            Assert.Null(request.Headers.Authorization);
+            return Success("content");
+        });
+        var clients = new TestHttpClientFactory(signedUrlHandler);
+        var authorizationHeaders = new RecordingAuthorizationHeaderProvider("Bearer synthetic-bot-token");
+        var downloader = CreateDownloader(clients, authorizationHeaders, clock);
+        var activity = CreateActivity();
+        var attachment = CreateAttachment();
+        downloader.Capture(CreateSdkMessage(url), activity);
+
+        using var temp = new DisposableTempDir();
+        await downloader.DownloadAsync(
+            activity,
+            attachment,
+            temp.Path,
+            maximumBytes: 1_024,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(["teams-attachments"], clients.CreatedClientNames);
+        Assert.Empty(authorizationHeaders.AppScopes);
+        Assert.Equal(1, signedUrlHandler.CallCount);
+    }
+
+    [Fact]
+    public async Task Bot_connector_401_uses_the_existing_stable_attachment_rejection()
+    {
+        var authorizationHeaders = new RecordingAuthorizationHeaderProvider("Bearer synthetic-bot-token");
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized));
+        using var app = BuildBotConnectorDownloadHost(handler, authorizationHeaders, new CapturingLoggerProvider());
+        var downloader = app.Services.GetRequiredService<TeamsSdkAttachmentDownloader>();
+        var activity = CreateActivity();
+        var attachment = CreateProvisionalAttachment();
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
+
+        using var inbox = new DisposableTempDir();
+        using var staging = new DisposableTempDir();
+        var outcome = await TeamsProvisionalInlineImageIngress.IngestAsync(
+            activity,
+            attachment,
+            TrustAudience.Public,
+            ImageAttachmentPolicy(),
+            inlineImages: true,
+            inbox.Path,
+            staging.Path,
+            TimeSpan.FromSeconds(10),
+            new NullContentScanner(),
+            NoLogger.Instance,
+            downloader,
+            TestContext.Current.CancellationToken);
+
+        var rejection = Assert.IsType<AttachmentIngestOutcome.Rejected>(outcome);
+        Assert.Equal("Couldn't download `attachment-1.png` — please try again later.", rejection.UserFacingReason);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task Bot_token_acquisition_failure_has_a_bounded_attachment_rejection()
+    {
+        const string token = "synthetic-bot-token";
+        var authorizationHeaders = new RecordingAuthorizationHeaderProvider(
+            $"Bearer {token}",
+            new InvalidOperationException($"Token acquisition failed for {token}."));
+        var handler = new RecordingHandler(_ => throw new Xunit.Sdk.XunitException("The request must not start after token acquisition fails."));
+        using var app = BuildBotConnectorDownloadHost(handler, authorizationHeaders, new CapturingLoggerProvider());
+        var downloader = app.Services.GetRequiredService<TeamsSdkAttachmentDownloader>();
+        var activity = CreateActivity();
+        var attachment = CreateProvisionalAttachment();
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
+
+        using var inbox = new DisposableTempDir();
+        using var staging = new DisposableTempDir();
+        var outcome = await TeamsProvisionalInlineImageIngress.IngestAsync(
+            activity,
+            attachment,
+            TrustAudience.Public,
+            ImageAttachmentPolicy(),
+            inlineImages: true,
+            inbox.Path,
+            staging.Path,
+            TimeSpan.FromSeconds(10),
+            new NullContentScanner(),
+            NoLogger.Instance,
+            downloader,
+            TestContext.Current.CancellationToken);
+
+        var rejection = Assert.IsType<AttachmentIngestOutcome.Rejected>(outcome);
+        Assert.Equal("Couldn't download `attachment-1.png` — please try again later.", rejection.UserFacingReason);
+        Assert.DoesNotContain(token, rejection.UserFacingReason, StringComparison.Ordinal);
+        Assert.Equal(["https://api.botframework.com/.default"], authorizationHeaders.AppScopes);
+        Assert.Equal(0, handler.CallCount);
+    }
+
+    [Fact]
     public async Task Download_does_not_follow_a_redirect()
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
@@ -80,7 +232,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         {
             Headers = { Location = new Uri("https://files.example.test/redirected") }
         });
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
         downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
@@ -100,7 +252,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
         var handler = new RecordingHandler(_ => Success("content"));
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
         downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
@@ -121,7 +273,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
         var handler = new RecordingHandler(_ => Success("content"));
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
         downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
@@ -141,7 +293,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     public void Capture_keeps_no_more_than_1024_activities()
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
-        var downloader = new TeamsSdkAttachmentDownloader(
+        var downloader = CreateDownloader(
             new TestHttpClientFactory(new RecordingHandler(_ => Success("content"))),
             clock);
 
@@ -162,7 +314,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
         var handler = new RecordingHandler(_ => Success("content"));
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
         var url = "https://smba.trafficmanager.net/" + new string('a', 4_097);
@@ -179,11 +331,11 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     }
 
     [Fact]
-    public async Task Download_removes_the_partial_file_when_the_stream_exceeds_the_limit()
+    public async Task Bot_connector_download_keeps_the_existing_streaming_byte_limit()
     {
         var clock = new FakeTimeProvider(DateTimeOffset.Parse("2026-09-02T10:00:00Z"));
         var handler = new RecordingHandler(_ => Success(new string('x', 1_025)));
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
         downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
@@ -207,7 +359,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         {
             Content = new StreamContent(stream)
         });
-        var downloader = new TeamsSdkAttachmentDownloader(new TestHttpClientFactory(handler), clock);
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
         var activity = CreateActivity();
         var attachment = CreateAttachment();
         downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
@@ -264,6 +416,18 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         SourceIndex = 0
     };
 
+    private static TeamsAttachmentMetadata CreateProvisionalAttachment() => new("attachment-1.png", "image/*", 7)
+    {
+        Kind = TeamsInboundAttachmentKind.InlineImage,
+        SourceIndex = 0
+    };
+
+    private static ChannelAttachmentPolicy ImageAttachmentPolicy() => new()
+    {
+        AllowedCategories = [AttachmentCategory.Image],
+        MaxFileBytes = 1_024
+    };
+
     private static MessageActivity CreateSdkMessage(string url)
     {
         var message = MessageActivity.FromActivity(CoreActivity.FromJsonString("{\"type\":\"message\"}"));
@@ -284,23 +448,140 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         Content = new StringContent(body, Encoding.UTF8, "application/octet-stream")
     };
 
-    private sealed class TestHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
+    private static TeamsSdkAttachmentDownloader CreateDownloader(
+        IHttpClientFactory httpClientFactory,
+        TimeProvider timeProvider) => CreateDownloader(
+        httpClientFactory,
+        new RecordingAuthorizationHeaderProvider("Bearer synthetic-bot-token"),
+        timeProvider);
+
+    private static TeamsSdkAttachmentDownloader CreateDownloader(
+        IHttpClientFactory httpClientFactory,
+        RecordingAuthorizationHeaderProvider authorizationHeaders,
+        TimeProvider timeProvider) => new(
+        httpClientFactory,
+        authorizationHeaders,
+        new StaticOptionsMonitor<ManagedIdentityOptions>(new ManagedIdentityOptions()),
+        timeProvider);
+
+    private static WebApplication BuildBotConnectorDownloadHost(
+        RecordingHandler botConnectorHandler,
+        RecordingAuthorizationHeaderProvider authorizationHeaders,
+        CapturingLoggerProvider logs)
     {
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(logs);
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Teams:Enabled"] = "true",
+            ["Teams:TenantId"] = "tenant",
+            ["Teams:ClientId"] = "client",
+            ["Teams:ClientSecret"] = "synthetic-secret"
+        });
+        builder.Services.AddChannelIntegrations(builder.Configuration);
+        builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+        builder.AddTeamsIngress();
+        builder.Services.RemoveAll<IAuthorizationHeaderProvider>();
+        builder.Services.AddSingleton<IAuthorizationHeaderProvider>(authorizationHeaders);
+        builder.Services.AddHttpClient("teams-attachments")
+            .ConfigurePrimaryHttpMessageHandler(() => botConnectorHandler);
+
+        return builder.Build();
+    }
+
+    private sealed class TestHttpClientFactory(HttpMessageHandler attachmentHandler) : IHttpClientFactory
+    {
+        public List<string> CreatedClientNames { get; } = [];
+
         public HttpClient CreateClient(string name)
         {
             Assert.Equal("teams-attachments", name);
-            return new HttpClient(handler, disposeHandler: false);
+            CreatedClientNames.Add(name);
+            return new HttpClient(attachmentHandler, disposeHandler: false);
         }
     }
 
-    private sealed class RecordingHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory) : HttpMessageHandler
+    private sealed class RecordingHandler(
+        Func<HttpRequestMessage, HttpResponseMessage> responseFactory,
+        Action<HttpRequestMessage>? inspectRequest = null) : HttpMessageHandler
     {
         public int CallCount { get; private set; }
+        public List<string> RequestUris { get; } = [];
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             CallCount++;
+            RequestUris.Add(request.RequestUri!.AbsoluteUri);
+            inspectRequest?.Invoke(request);
             return Task.FromResult(responseFactory(request));
+        }
+    }
+
+    private sealed class RecordingAuthorizationHeaderProvider(
+        string authorizationHeader,
+        Exception? failure = null) : IAuthorizationHeaderProvider
+    {
+        public List<string> AppScopes { get; } = [];
+        public List<string?> AppAuthenticationOptionNames { get; } = [];
+
+        public Task<string> CreateAuthorizationHeaderForUserAsync(
+            IEnumerable<string> scopes,
+            AuthorizationHeaderProviderOptions? authorizationHeaderProviderOptions = null,
+            ClaimsPrincipal? claimsPrincipal = null,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<string> CreateAuthorizationHeaderForAppAsync(
+            string scopes,
+            AuthorizationHeaderProviderOptions? downstreamApiOptions = null,
+            CancellationToken cancellationToken = default)
+        {
+            AppScopes.Add(scopes);
+            AppAuthenticationOptionNames.Add(downstreamApiOptions?.AcquireTokenOptions?.AuthenticationOptionsName);
+            return failure is null
+                ? Task.FromResult(authorizationHeader)
+                : Task.FromException<string>(failure);
+        }
+
+        public Task<string> CreateAuthorizationHeaderAsync(
+            IEnumerable<string> scopes,
+            AuthorizationHeaderProviderOptions? options = null,
+            ClaimsPrincipal? claimsPrincipal = null,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class StaticOptionsMonitor<TOptions>(TOptions value) : IOptionsMonitor<TOptions>
+        where TOptions : class
+    {
+        public TOptions CurrentValue => value;
+
+        public TOptions Get(string? name) => value;
+
+        public IDisposable? OnChange(Action<TOptions, string?> listener) => null;
+    }
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        private readonly List<string> _messages = [];
+
+        public IReadOnlyList<string> Messages => _messages;
+
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(_messages);
+
+        public void Dispose() { }
+
+        private sealed class CapturingLogger(List<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(MicrosoftLogLevel logLevel) => logLevel >= MicrosoftLogLevel.Debug;
+
+            public void Log<TState>(
+                MicrosoftLogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter) => messages.Add(formatter(state, exception));
         }
     }
 
