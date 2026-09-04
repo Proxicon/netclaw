@@ -40,6 +40,12 @@ formats remain path-only. A verified non-image remains rejected in Public
 channels. It accepts personal file cards. It defers normal channel and
 group-chat files.
 
+The adapter uses the existing Bot Framework app credential for a Bot Connector
+attachment URL. It uses the `https://api.botframework.com/.default` app scope.
+This applies only to `smba.trafficmanager.net` and `.botframework.com` hosts.
+SharePoint, OneDrive, and other trusted signed URLs do not receive that bearer
+token. The adapter does not log or persist the token.
+
 The package does not request message-write, `Chat.Read.All`,
 `ChatMessage.Read.All`, `Files.Read.All`, or `Sites.Read.All`. It does not
 enable private or shared channels, meetings, tabs, calling, or video.
