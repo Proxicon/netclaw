@@ -8,10 +8,11 @@ namespace Netclaw.Channels.Teams;
 internal static class TeamsIngressTimeouts
 {
     internal static readonly TimeSpan AttachmentOperation = TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan InlineImageDownload = TimeSpan.FromSeconds(60);
 
     // Each file has separate download and scan deadlines. The binding processes files in sequence.
     internal static TimeSpan BindingRoute(TeamsInboundActivity activity) =>
-        TimeSpan.FromSeconds(10) + AttachmentOperation * (2 * activity.Attachments.Length);
+        TimeSpan.FromSeconds(10) + (InlineImageDownload + AttachmentOperation) * activity.Attachments.Length;
 
     internal static TimeSpan ConversationRoute(TeamsInboundActivity activity) =>
         BindingRoute(activity) + TimeSpan.FromSeconds(5);

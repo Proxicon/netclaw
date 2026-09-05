@@ -1388,8 +1388,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
 
     [Theory]
     [InlineData(0, 10, 15, 20)]
-    [InlineData(1, 70, 75, 80)]
-    [InlineData(3, 190, 195, 200)]
+    [InlineData(1, 100, 105, 110)]
+    [InlineData(3, 280, 285, 290)]
     public void Teams_route_deadlines_cover_each_download_and_scan(
         int attachmentCount,
         int bindingSeconds,
@@ -1410,9 +1410,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Theory]
-    [InlineData("inspect this image")]
-    [InlineData("")]
-    public async Task Slow_inline_image_completes_the_host_route_once_in_an_established_thread(string text)
+    [InlineData("inspect this image", false)]
+    [InlineData("", false)]
+    [InlineData("inspect this image", true)]
+    [InlineData("", true)]
+    public async Task Slow_inline_image_completes_the_host_route_once_in_an_established_thread(string text, bool expireDeadline)
     {
         using var root = new DisposableTempDir();
         var paths = new NetclawPaths(root.Path);
@@ -1428,7 +1430,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         services.AddSingleton(options);
         services.AddSingleton(pipeline);
         services.AddSingleton<TimeProvider>(clock);
-        services.AddSingleton<ITeamsReplyClient>(new TestTeamsReplyClient());
+        var replyClient = new RecordingTeamsReplyClient();
+        services.AddSingleton<ITeamsReplyClient>(replyClient);
         services.AddSingleton<TeamsOutputRenderer>();
         services.AddSingleton<IPromptInjectionDetector>(SafeTeamsPromptInjectionDetector.Instance);
         services.AddSingleton<ITeamsAttachmentDownloader>(downloader);
@@ -1457,24 +1460,42 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             var route = host.SubmitAsync(activity, cancellationToken).AsTask();
             Assert.Same(downloader.Started.Task, await Task.WhenAny(downloader.Started.Task, route));
             await downloader.Started.Task.WaitAsync(cancellationToken);
-            clock.Advance(TimeSpan.FromSeconds(11));
+            clock.Advance(TimeSpan.FromSeconds(31));
             Assert.False(route.IsCompleted);
             Assert.False(downloader.DownloadToken.IsCancellationRequested);
-            downloader.Release.SetResult();
+            if (expireDeadline)
+                clock.Advance(TimeSpan.FromSeconds(29));
+            else
+                downloader.Release.SetResult();
 
             Assert.Equal(TeamsIngressRouteDisposition.Routed, (await route).Disposition);
-            ExpectMsg<JoinSession>(cancellationToken: cancellationToken);
-            var dispatched = ExpectMsg<SendUserMessage>(cancellationToken: cancellationToken);
-            Assert.Equal(CreateChannelSessionId(conversationId), dispatched.SessionId);
-            Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
-            Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
-            if (text.Length > 0)
-                Assert.Contains(text, dispatched.Content, StringComparison.Ordinal);
+            if (!expireDeadline || text.Length > 0)
+            {
+                ExpectMsg<JoinSession>(cancellationToken: cancellationToken);
+                var dispatched = ExpectMsg<SendUserMessage>(cancellationToken: cancellationToken);
+                Assert.Equal(CreateChannelSessionId(conversationId), dispatched.SessionId);
+                if (expireDeadline)
+                {
+                    Assert.Empty(dispatched.MediaReferences);
+                    Assert.Equal(text, dispatched.Content);
+                }
+                else
+                {
+                    Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
+                    Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+                    if (text.Length > 0)
+                        Assert.Contains(text, dispatched.Content, StringComparison.Ordinal);
+                }
+            }
+            if (expireDeadline)
+                Assert.Contains("Timed out downloading", Assert.Single(replyClient.Messages).Text, StringComparison.Ordinal);
+            else
+                Assert.Empty(replyClient.Messages);
 
             Assert.Equal(TeamsIngressRouteDisposition.Duplicate,
                 (await host.SubmitAsync(activity, cancellationToken)).Disposition);
             var observation = await observationActor.Ask<TeamsRouteObservation>(new ReadTeamsRouteObservation(), cancellationToken);
-            Assert.Equal(2, observation.DispatchedTurns);
+            Assert.Equal(expireDeadline && text.Length == 0 ? 1 : 2, observation.DispatchedTurns);
             Assert.Empty(observation.RouteDeadLetters);
         }
         finally

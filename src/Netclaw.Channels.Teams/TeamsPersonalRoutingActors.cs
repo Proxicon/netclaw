@@ -1513,7 +1513,6 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                     inlineImages,
                     inboxDirectory,
                     stagingDirectory,
-                    TeamsIngressTimeouts.AttachmentOperation,
                     _dependencies.TimeProvider,
                     _dependencies.ContentScanner,
                     _log,
