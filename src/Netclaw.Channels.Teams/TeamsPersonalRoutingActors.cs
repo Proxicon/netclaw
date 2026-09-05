@@ -551,7 +551,7 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         {
             var result = await conversation.Ask<TeamsBindingRouteResult>(
                 new TeamsConversationIngress(activity, cancellationToken),
-                RouteTimeout,
+                TeamsIngressTimeouts.ConversationRoute(activity),
                 cancellationToken);
             return result.Disposition switch
             {
@@ -588,7 +588,7 @@ public sealed class TeamsActorConversationIngressSink : ITeamsConversationIngres
         {
             var result = await conversation.Ask<TeamsBindingRouteResult>(
                 new TeamsConversationIngress(activity, cancellationToken),
-                RouteTimeout,
+                TeamsIngressTimeouts.ConversationRoute(activity),
                 cancellationToken);
             return result.Disposition switch
             {
@@ -741,7 +741,7 @@ public sealed class TeamsPersonalConversationActor : ReceiveActor
         {
             var result = await binding.Ask<TeamsBindingRouteResult>(
                 new TeamsBindingIngress(ingress.Activity, ingress.CancellationToken),
-                BindingRouteTimeout,
+                TeamsIngressTimeouts.BindingRoute(ingress.Activity),
                 ingress.CancellationToken);
             replyTo.Tell(result);
         }
@@ -1513,7 +1513,8 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                     inlineImages,
                     inboxDirectory,
                     stagingDirectory,
-                    TimeSpan.FromSeconds(10),
+                    TeamsIngressTimeouts.AttachmentOperation,
+                    _dependencies.TimeProvider,
                     _dependencies.ContentScanner,
                     _log,
                     _dependencies.AttachmentDownloader,
@@ -1528,7 +1529,7 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                     inlineImages,
                     inboxDirectory,
                     stagingDirectory,
-                    TimeSpan.FromSeconds(10),
+                    TeamsIngressTimeouts.AttachmentOperation,
                     _dependencies.ContentScanner,
                     _log,
                     (staging, maximumBytes, token) => _dependencies.AttachmentDownloader.DownloadAsync(

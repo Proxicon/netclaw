@@ -26,6 +26,7 @@ internal sealed class TeamsSdkAttachmentDownloader(
     IOptionsMonitor<ManagedIdentityOptions> managedIdentityOptions,
     TimeProvider timeProvider) : ITeamsAttachmentDownloader
 {
+    internal static readonly HttpRequestOptionsKey<Action<string>> StageObserver = new("TeamsAttachmentStage");
     private const int MaximumCaptures = 1_024;
     private const int MaximumUrlLength = 4_096;
     private static readonly TimeSpan CaptureLifetime = TimeSpan.FromMinutes(5);
@@ -93,18 +94,56 @@ internal sealed class TeamsSdkAttachmentDownloader(
         if (captured.Attachments.IsEmpty)
             _captures.TryRemove(CaptureKey.Create(activity), out _);
 
-        var authorizationHeader = source.RequiresBotConnectorAuthentication
-            ? await CreateBotConnectorAuthorizationHeaderAsync(cancellationToken).ConfigureAwait(false)
-            : null;
-        return await StreamingAttachmentDownloader.DownloadToFileAsync(
-            httpClientFactory.CreateClient("teams-attachments"),
-            source.DownloadUrl,
-            configureRequest: authorizationHeader is null
-                ? null
-                : request => request.Headers.Authorization = CreateBearerHeader(authorizationHeader),
-            targetDirectory: stagingDirectory,
-            maxBytes: maximumBytes,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var hostClass = source.RequiresBotConnectorAuthentication ? "bot_connector" : "signed_url";
+        var authenticated = false;
+        var stage = "token";
+        try
+        {
+            var authorizationHeader = source.RequiresBotConnectorAuthentication
+                ? await CreateBotConnectorAuthorizationHeaderAsync(cancellationToken).ConfigureAwait(false)
+                : null;
+            using var client = httpClientFactory.CreateClient("teams-attachments");
+            stage = "request";
+            return await StreamingAttachmentDownloader.DownloadToFileAsync(
+                client,
+                source.DownloadUrl,
+                configureRequest: request =>
+                {
+                    request.Options.Set(StageObserver, value => stage = value);
+                    if (authorizationHeader is not null)
+                    {
+                        request.Headers.Authorization = CreateBearerHeader(authorizationHeader);
+                        authenticated = true;
+                    }
+                },
+                targetDirectory: stagingDirectory,
+                maxBytes: maximumBytes,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (AttachmentTooLargeException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            // SDK and HTTP exceptions can contain credentials or URLs. Export only these bounded facts.
+            throw new TeamsAttachmentDownloadException(
+                hostClass, authenticated, stage,
+                exception is OperationCanceledException,
+                exception is HttpRequestException);
+        }
+    }
+
+    internal sealed class ResponseStageHandler : DelegatingHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (request.Options.TryGetValue(StageObserver, out var setStage))
+                setStage(response.IsSuccessStatusCode ? "body" : "response_headers");
+            return response;
+        }
     }
 
     private async Task<string> CreateBotConnectorAuthorizationHeaderAsync(CancellationToken cancellationToken)

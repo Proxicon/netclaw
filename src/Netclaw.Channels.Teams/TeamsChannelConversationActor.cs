@@ -209,7 +209,7 @@ public sealed class TeamsConversationActor : ReceivePersistentActor
                     route.Activity,
                     route.CancellationToken,
                     route.IsEstablishedThreadContinuation),
-                BindingRouteTimeout,
+                TeamsIngressTimeouts.BindingRoute(route.Activity),
                 route.CancellationToken);
             route.ReplyTo.Tell(result);
         }
