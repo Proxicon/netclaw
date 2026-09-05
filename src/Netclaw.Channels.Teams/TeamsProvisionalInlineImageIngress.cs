@@ -44,6 +44,7 @@ internal static class TeamsProvisionalInlineImageIngress
         string inboxDirectory,
         string stagingDirectory,
         TimeSpan operationTimeout,
+        TimeProvider timeProvider,
         IContentScanner scanner,
         ILoggingAdapter log,
         ITeamsAttachmentDownloader downloader,
@@ -73,11 +74,12 @@ internal static class TeamsProvisionalInlineImageIngress
             return Reject($"`{attachment.Name}` ({AttachmentIngressFormatting.FormatBytes(declaredSize)}) exceeds the {AttachmentIngressFormatting.FormatBytes(policy.MaxFileBytes)} per-file limit.");
         }
 
+        var startedAt = timeProvider.GetTimestamp();
+        using var deadlineCts = new CancellationTokenSource(operationTimeout, timeProvider);
+        using var downloadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadlineCts.Token);
         AttachmentDownloadResult download;
         try
         {
-            using var downloadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            downloadCts.CancelAfter(operationTimeout);
             download = await downloader.DownloadAsync(
                 activity,
                 attachment,
@@ -92,19 +94,27 @@ internal static class TeamsProvisionalInlineImageIngress
                 attachment.Name, declaredMime.Value, audience, exception.BytesReceived, exception.MaxBytes);
             return Reject($"`{attachment.Name}` ({AttachmentIngressFormatting.FormatBytes(exception.BytesReceived)}) exceeds the {AttachmentIngressFormatting.FormatBytes(exception.MaxBytes)} per-file limit.");
         }
-        catch (OperationCanceledException exception)
-        {
-            log.Warning(exception,
-                "attachment_rejected name={Name} mime={Mime} reason=download-timeout",
-                attachment.Name, declaredMime.Value);
-            return Reject($"Timed out downloading `{attachment.Name}`. Please try again.");
-        }
         catch (Exception exception)
         {
-            log.Warning(exception,
-                "attachment_rejected name={Name} mime={Mime} reason=download-failed",
-                attachment.Name, declaredMime.Value);
-            return Reject($"Couldn't download `{attachment.Name}` — please try again later.");
+            var diagnostic = exception as TeamsAttachmentDownloadException;
+            var cancelled = exception is OperationCanceledException || diagnostic?.Cancelled == true;
+            var reason = cancelled && cancellationToken.IsCancellationRequested
+                ? "ingress-cancelled"
+                : cancelled && deadlineCts.IsCancellationRequested
+                    ? "download-deadline"
+                    : exception is HttpRequestException || diagnostic?.HttpError == true
+                        ? "download-http-error"
+                        : "download-failed";
+            log.Warning(
+                $"attachment_rejected reason={reason} host_class={{HostClass}} authenticated={{Authenticated}} elapsed_ms={{ElapsedMs}} configured_deadline_ms={{ConfiguredDeadlineMs}} outer_cancellation_requested={{OuterCancellationRequested}} stage={{Stage}}",
+                diagnostic?.HostClass ?? "unknown", diagnostic?.Authenticated ?? false,
+                timeProvider.GetElapsedTime(startedAt).TotalMilliseconds, operationTimeout.TotalMilliseconds,
+                cancellationToken.IsCancellationRequested, diagnostic?.Stage ?? "request");
+            if (reason == "ingress-cancelled")
+                throw new OperationCanceledException("The Teams ingress was cancelled.", cancellationToken);
+            return reason == "download-deadline"
+                ? Reject($"Timed out downloading `{attachment.Name}`. Please try again.")
+                : Reject($"Couldn't download `{attachment.Name}` — please try again later.");
         }
 
         if (download.BytesWritten == 0)
@@ -116,7 +126,16 @@ internal static class TeamsProvisionalInlineImageIngress
             return Reject($"`{attachment.Name}` downloaded as zero bytes.");
         }
 
-        var detectedMime = await DetectMimeAsync(download.FilePath, cancellationToken).ConfigureAwait(false);
+        MimeType? detectedMime;
+        try
+        {
+            detectedMime = await DetectMimeAsync(download.FilePath, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            TryDeleteTemp(log, download.FilePath);
+            throw;
+        }
         if (detectedMime is null)
         {
             log.Warning(

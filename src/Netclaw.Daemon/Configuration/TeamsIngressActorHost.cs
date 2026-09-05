@@ -73,7 +73,7 @@ internal sealed class TeamsIngressActorHost(IServiceProvider serviceProvider) : 
         {
             return await actor.Ask<TeamsIngressRouteResult>(
                 new TeamsIngressReceived(activity, cancellationToken),
-                TimeSpan.FromSeconds(2),
+                TeamsIngressTimeouts.IngressRoute(activity),
                 cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

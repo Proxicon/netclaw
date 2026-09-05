@@ -49,7 +49,10 @@ internal static class TeamsActivityEndpointExtensions
                 policy.RequireAuthenticatedUser();
             });
         builder.Services.AddSingleton<TeamsSdkActivityTranslator>();
-        builder.Services.AddHttpClient("teams-attachments")
+        builder.Services.AddHttpClient("teams-attachments", client => client.Timeout = Timeout.InfiniteTimeSpan)
+            // Standard HTTP logs expose the short-lived URL. The Teams ingress emits safe failure facts.
+            .RemoveAllLoggers()
+            .AddHttpMessageHandler(() => new TeamsSdkAttachmentDownloader.ResponseStageHandler())
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
             {
                 AllowAutoRedirect = false

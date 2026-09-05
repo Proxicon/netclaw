@@ -10,6 +10,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Akka.Actor;
+using Akka.Event;
 using Akka.Hosting;
 using Akka.Hosting.TestKit;
 using Akka.Persistence;
@@ -26,6 +27,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Microsoft.Teams.Apps;
 using Microsoft.Teams.Apps.Schema;
 using Microsoft.Teams.Apps.Schema.Entities;
@@ -1382,6 +1384,105 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Contains("inspect this image", dispatched.Content, StringComparison.Ordinal);
         Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
         Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
+    }
+
+    [Theory]
+    [InlineData(0, 10, 15, 20)]
+    [InlineData(1, 70, 75, 80)]
+    [InlineData(3, 190, 195, 200)]
+    public void Teams_route_deadlines_cover_each_download_and_scan(
+        int attachmentCount,
+        int bindingSeconds,
+        int conversationSeconds,
+        int ingressSeconds)
+    {
+        var attachments = Enumerable.Range(0, attachmentCount)
+            .Select(index => CreateInboundAttachment("image.png", TeamsInboundAttachmentKind.InlineImage, index))
+            .ToImmutableArray();
+        var activity = CreateAttachmentActivity("deadline-ladder", "inspect", attachments);
+
+        Assert.Equal(TimeSpan.FromSeconds(30), TeamsIngressTimeouts.AttachmentOperation);
+        Assert.Equal(TimeSpan.FromSeconds(bindingSeconds), TeamsIngressTimeouts.BindingRoute(activity));
+        Assert.Equal(TimeSpan.FromSeconds(conversationSeconds), TeamsIngressTimeouts.ConversationRoute(activity));
+        Assert.Equal(TimeSpan.FromSeconds(ingressSeconds), TeamsIngressTimeouts.IngressRoute(activity));
+        Assert.True(TeamsIngressTimeouts.ConversationRoute(activity) > TeamsIngressTimeouts.BindingRoute(activity));
+        Assert.True(TeamsIngressTimeouts.IngressRoute(activity) > TeamsIngressTimeouts.ConversationRoute(activity));
+    }
+
+    [Theory]
+    [InlineData("inspect this image")]
+    [InlineData("")]
+    public async Task Slow_inline_image_completes_the_host_route_once_in_an_established_thread(string text)
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var clock = new FakeTimeProvider();
+        var downloader = new GatedTeamsAttachmentDownloader(PngBytes);
+        var observationActor = Sys.ActorOf(Props.Create(() => new TeamsRouteObservationActor(TestActor)));
+        Sys.EventStream.Subscribe(observationActor, typeof(DeadLetter));
+        var pipeline = CreatePipeline(observationActor);
+        var options = CreatePublicVerifiedAttachmentDependencies(pipeline, paths, PngBytes).Options;
+        var services = new ServiceCollection();
+        services.AddSingleton(Sys);
+        services.AddSingleton(options);
+        services.AddSingleton(pipeline);
+        services.AddSingleton<TimeProvider>(clock);
+        services.AddSingleton<ITeamsReplyClient>(new TestTeamsReplyClient());
+        services.AddSingleton<TeamsOutputRenderer>();
+        services.AddSingleton<IPromptInjectionDetector>(SafeTeamsPromptInjectionDetector.Instance);
+        services.AddSingleton<ITeamsAttachmentDownloader>(downloader);
+        services.AddSingleton<IContentScanner>(new MagicByteContentScanner(new ContentPolicy()));
+        services.AddSingleton(new ToolConfig { AudienceProfiles = ToolAudienceProfileDefaults.CreateProfiles() });
+        services.AddSingleton(ImageModelCapabilities);
+        services.AddSingleton(paths);
+        services.AddSingleton<ITeamsConversationIngressSink, TeamsActorConversationIngressSink>();
+        using var provider = services.BuildServiceProvider();
+        var host = new TeamsIngressActorHost(provider);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await host.StartAsync(cancellationToken);
+        try
+        {
+            const string conversationId = "slow-inline-thread;messageid=root-a";
+            Assert.Equal(TeamsIngressRouteDisposition.Routed,
+                (await host.SubmitAsync(CreateChannelActivity("root-a", conversationId), cancellationToken)).Disposition);
+            ReceiveDispatchedMessage();
+
+            var activity = CreateChannelActivity(
+                "slow-inline-reply",
+                conversationId,
+                isMentioned: false,
+                text: text,
+                attachments: [CreateInboundAttachment("attachment-1", TeamsInboundAttachmentKind.InlineImage, 0, "image/*")]);
+            var route = host.SubmitAsync(activity, cancellationToken).AsTask();
+            Assert.Same(downloader.Started.Task, await Task.WhenAny(downloader.Started.Task, route));
+            await downloader.Started.Task.WaitAsync(cancellationToken);
+            clock.Advance(TimeSpan.FromSeconds(11));
+            Assert.False(route.IsCompleted);
+            Assert.False(downloader.DownloadToken.IsCancellationRequested);
+            downloader.Release.SetResult();
+
+            Assert.Equal(TeamsIngressRouteDisposition.Routed, (await route).Disposition);
+            ExpectMsg<JoinSession>(cancellationToken: cancellationToken);
+            var dispatched = ExpectMsg<SendUserMessage>(cancellationToken: cancellationToken);
+            Assert.Equal(CreateChannelSessionId(conversationId), dispatched.SessionId);
+            Assert.Equal("image/png", Assert.Single(dispatched.MediaReferences).MimeType.Value);
+            Assert.Contains("[attachment]", dispatched.Content, StringComparison.Ordinal);
+            if (text.Length > 0)
+                Assert.Contains(text, dispatched.Content, StringComparison.Ordinal);
+
+            Assert.Equal(TeamsIngressRouteDisposition.Duplicate,
+                (await host.SubmitAsync(activity, cancellationToken)).Disposition);
+            var observation = await observationActor.Ask<TeamsRouteObservation>(new ReadTeamsRouteObservation(), cancellationToken);
+            Assert.Equal(2, observation.DispatchedTurns);
+            Assert.Empty(observation.RouteDeadLetters);
+        }
+        finally
+        {
+            downloader.Release.TrySetResult();
+            Sys.EventStream.Unsubscribe(observationActor);
+            await host.StopAsync(CancellationToken.None);
+        }
     }
 
     [Fact]
@@ -4337,6 +4438,54 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             var path = Path.Combine(stagingDirectory, $".teams-test-download-{Guid.NewGuid():N}.tmp");
             await File.WriteAllBytesAsync(path, _bytes, cancellationToken);
             return new AttachmentDownloadResult(path, _bytes.Length);
+        }
+    }
+
+    private sealed class GatedTeamsAttachmentDownloader(byte[] bytes) : ITeamsAttachmentDownloader
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public CancellationToken DownloadToken { get; private set; }
+
+        public async Task<AttachmentDownloadResult> DownloadAsync(
+            TeamsInboundActivity activity,
+            TeamsAttachmentMetadata attachment,
+            string stagingDirectory,
+            long maximumBytes,
+            CancellationToken cancellationToken)
+        {
+            DownloadToken = cancellationToken;
+            Started.SetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return await new BytesTeamsAttachmentDownloader(bytes).DownloadAsync(
+                activity, attachment, stagingDirectory, maximumBytes, cancellationToken);
+        }
+    }
+
+    private sealed record ReadTeamsRouteObservation;
+
+    private sealed record TeamsRouteObservation(int DispatchedTurns, ImmutableArray<object> RouteDeadLetters);
+
+    private sealed class TeamsRouteObservationActor : ReceiveActor
+    {
+        private int _dispatchedTurns;
+        private readonly List<object> _routeDeadLetters = [];
+
+        public TeamsRouteObservationActor(IActorRef observer)
+        {
+            Receive<JoinSession>(message => observer.Tell(message));
+            Receive<SendUserMessage>(message =>
+            {
+                _dispatchedTurns++;
+                observer.Tell(message);
+            });
+            Receive<DeadLetter>(message =>
+            {
+                if (message.Message is TeamsBindingRouteResult or TeamsIngressRouteResult)
+                    _routeDeadLetters.Add(message.Message);
+            });
+            Receive<ReadTeamsRouteObservation>(_ => Sender.Tell(
+                new TeamsRouteObservation(_dispatchedTurns, _routeDeadLetters.ToImmutableArray())));
         }
     }
 

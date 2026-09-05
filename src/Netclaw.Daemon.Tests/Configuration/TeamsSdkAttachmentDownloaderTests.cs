@@ -121,6 +121,8 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         Assert.DoesNotContain(token, JsonSerializer.Serialize(ingress.Activity), StringComparison.Ordinal);
         Assert.DoesNotContain(token, string.Join('\n', handler.RequestUris), StringComparison.Ordinal);
         Assert.DoesNotContain(token, string.Join('\n', logs.Messages), StringComparison.Ordinal);
+        Assert.DoesNotContain("smba.trafficmanager.net", string.Join('\n', logs.Messages), StringComparison.Ordinal);
+        Assert.Equal(Timeout.InfiniteTimeSpan, app.Services.GetRequiredService<IHttpClientFactory>().CreateClient("teams-attachments").Timeout);
     }
 
     [Theory]
@@ -168,6 +170,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
 
         using var inbox = new DisposableTempDir();
         using var staging = new DisposableTempDir();
+        var log = new AttachmentLog();
         var outcome = await TeamsProvisionalInlineImageIngress.IngestAsync(
             activity,
             attachment,
@@ -177,14 +180,17 @@ public sealed class TeamsSdkAttachmentDownloaderTests
             inbox.Path,
             staging.Path,
             TimeSpan.FromSeconds(10),
+            TimeProvider.System,
             new NullContentScanner(),
-            NoLogger.Instance,
+            log,
             downloader,
             TestContext.Current.CancellationToken);
 
         var rejection = Assert.IsType<AttachmentIngestOutcome.Rejected>(outcome);
         Assert.Equal("Couldn't download `attachment-1.png` — please try again later.", rejection.UserFacingReason);
         Assert.Equal(1, handler.CallCount);
+        Assert.Contains("reason=download-http-error", Assert.Single(log.Messages), StringComparison.Ordinal);
+        Assert.Contains("stage=response_headers", Assert.Single(log.Messages), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -203,6 +209,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
 
         using var inbox = new DisposableTempDir();
         using var staging = new DisposableTempDir();
+        var log = new AttachmentLog();
         var outcome = await TeamsProvisionalInlineImageIngress.IngestAsync(
             activity,
             attachment,
@@ -212,8 +219,9 @@ public sealed class TeamsSdkAttachmentDownloaderTests
             inbox.Path,
             staging.Path,
             TimeSpan.FromSeconds(10),
+            TimeProvider.System,
             new NullContentScanner(),
-            NoLogger.Instance,
+            log,
             downloader,
             TestContext.Current.CancellationToken);
 
@@ -222,6 +230,8 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         Assert.DoesNotContain(token, rejection.UserFacingReason, StringComparison.Ordinal);
         Assert.Equal(["https://api.botframework.com/.default"], authorizationHeaders.AppScopes);
         Assert.Equal(0, handler.CallCount);
+        Assert.Contains("stage=token", Assert.Single(log.Messages), StringComparison.Ordinal);
+        Assert.DoesNotContain(token, Assert.Single(log.Messages), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -238,7 +248,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
 
         using var temp = new DisposableTempDir();
-        await Assert.ThrowsAsync<HttpRequestException>(() => downloader.DownloadAsync(
+        await Assert.ThrowsAsync<TeamsAttachmentDownloadException>(() => downloader.DownloadAsync(
             activity,
             attachment,
             temp.Path,
@@ -374,7 +384,9 @@ public sealed class TeamsSdkAttachmentDownloaderTests
             cancellation.Token);
         await stream.WaitingForCancellation.Task.WaitAsync(TestContext.Current.CancellationToken);
         cancellation.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => download);
+        var failure = await Assert.ThrowsAsync<TeamsAttachmentDownloadException>(() => download);
+        Assert.True(failure.Cancelled);
+        Assert.Equal("body", failure.Stage);
         Assert.Empty(Directory.EnumerateFiles(temp.Path));
     }
 
@@ -391,6 +403,140 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         Assert.DoesNotContain(rawUrl, JsonSerializer.Serialize(activity), StringComparison.Ordinal);
         Assert.Same(activity, ingress.Activity);
         Assert.Same(activity, conversationIngress.Activity);
+    }
+
+    [Fact]
+    public async Task Authenticated_download_can_exceed_the_old_deadline_and_verify_png_bytes()
+    {
+        var clock = new FakeTimeProvider();
+        using var handler = new GatedHandler();
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
+        var attachment = CreateProvisionalAttachment();
+        var activity = CreateActivity(attachments: [attachment]);
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/private-id"), activity);
+        using var inbox = new DisposableTempDir();
+        using var staging = new DisposableTempDir();
+        var log = new AttachmentLog();
+        var ingest = TeamsProvisionalInlineImageIngress.IngestAsync(
+            activity, attachment, TrustAudience.Public, ImageAttachmentPolicy(), true,
+            inbox.Path, staging.Path, TeamsIngressTimeouts.AttachmentOperation, clock,
+            new MagicByteContentScanner(new ContentPolicy()), log, downloader, TestContext.Current.CancellationToken);
+        await handler.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(11));
+        Assert.False(handler.Token.IsCancellationRequested);
+        handler.Response.SetResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(TestImages.SmallPng())
+        });
+        Assert.IsType<AttachmentIngestOutcome.Accepted>(await ingest);
+        Assert.Single(Directory.GetFiles(inbox.Path));
+        Assert.Contains(log.Messages, message => message.Contains("verifiedMime=image/png", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false, false, "download-deadline")]
+    [InlineData(true, false, "ingress-cancelled")]
+    [InlineData(true, true, "ingress-cancelled")]
+    public async Task Download_cancellation_identifies_the_owner(bool cancelIngress, bool expireBoth, string reason)
+    {
+        var clock = new FakeTimeProvider();
+        using var handler = new GatedHandler();
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
+        var attachment = CreateProvisionalAttachment();
+        var activity = CreateActivity(attachments: [attachment]);
+        const string url = "https://smba.trafficmanager.net/amer/v3/attachments/private-id";
+        downloader.Capture(CreateSdkMessage(url), activity);
+        using var inbox = new DisposableTempDir();
+        using var staging = new DisposableTempDir();
+        using var outer = new CancellationTokenSource();
+        var log = new AttachmentLog();
+        var ingest = TeamsProvisionalInlineImageIngress.IngestAsync(
+            activity, attachment, TrustAudience.Public, ImageAttachmentPolicy(), true,
+            inbox.Path, staging.Path, TimeSpan.FromMilliseconds(30), clock,
+            new NullContentScanner(), log, downloader, outer.Token);
+        await handler.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        if (cancelIngress)
+            outer.Cancel();
+        if (!cancelIngress || expireBoth)
+            clock.Advance(TimeSpan.FromMilliseconds(30));
+        handler.ReleaseCancellation.SetResult();
+        if (cancelIngress)
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ingest);
+        else
+            Assert.IsType<AttachmentIngestOutcome.Rejected>(await ingest);
+        var message = Assert.Single(log.Messages);
+        Assert.Contains($"reason={reason}", message, StringComparison.Ordinal);
+        Assert.Contains("host_class=bot_connector", message, StringComparison.Ordinal);
+        Assert.Contains("authenticated=True", message, StringComparison.Ordinal);
+        Assert.Contains("configured_deadline_ms=30", message, StringComparison.Ordinal);
+        Assert.Contains($"outer_cancellation_requested={cancelIngress}", message, StringComparison.Ordinal);
+        Assert.Contains("stage=request", message, StringComparison.Ordinal);
+        Assert.DoesNotContain(url, message, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-id", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic-bot-token", message, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(staging.Path));
+        Assert.Empty(Directory.GetFiles(inbox.Path));
+    }
+
+    [Fact]
+    public async Task Unrelated_cancellation_exception_is_a_failure_not_a_deadline()
+    {
+        var clock = new FakeTimeProvider();
+        var handler = new RecordingHandler(_ => throw new OperationCanceledException("private-id synthetic-bot-token"));
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
+        var attachment = CreateProvisionalAttachment();
+        var activity = CreateActivity(attachments: [attachment]);
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/private-id"), activity);
+        using var inbox = new DisposableTempDir();
+        using var staging = new DisposableTempDir();
+        var log = new AttachmentLog();
+        var outcome = await TeamsProvisionalInlineImageIngress.IngestAsync(
+            activity, attachment, TrustAudience.Public, ImageAttachmentPolicy(), true,
+            inbox.Path, staging.Path, TeamsIngressTimeouts.AttachmentOperation, clock,
+            new NullContentScanner(), log, downloader, TestContext.Current.CancellationToken);
+        Assert.IsType<AttachmentIngestOutcome.Rejected>(outcome);
+        var message = Assert.Single(log.Messages);
+        Assert.Contains("reason=download-failed", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-id", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("synthetic-bot-token", message, StringComparison.Ordinal);
+    }
+
+    private sealed class GatedHandler : HttpMessageHandler
+    {
+        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<HttpResponseMessage> Response { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public CancellationToken Token { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Assert.Equal("synthetic-bot-token", request.Headers.Authorization?.Parameter);
+            Token = cancellationToken;
+            Started.SetResult();
+            try
+            {
+                return await Response.Task.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                await ReleaseCancellation.Task.WaitAsync(TestContext.Current.CancellationToken);
+                throw;
+            }
+        }
+    }
+
+    private sealed class AttachmentLog() : LoggingAdapterBase(SemanticLogMessageFormatter.Instance)
+    {
+        public List<string> Messages { get; } = [];
+        public override bool IsDebugEnabled => true;
+        public override bool IsInfoEnabled => true;
+        public override bool IsWarningEnabled => true;
+        public override bool IsErrorEnabled => true;
+        protected override void NotifyLog(Akka.Event.LogLevel logLevel, object message, Exception? cause = null)
+        {
+            Assert.Null(cause);
+            Messages.Add(message.ToString()!);
+        }
     }
 
     private static TeamsInboundActivity CreateActivity(
@@ -498,7 +644,10 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         {
             Assert.Equal("teams-attachments", name);
             CreatedClientNames.Add(name);
-            return new HttpClient(attachmentHandler, disposeHandler: false);
+            return new HttpClient(new TeamsSdkAttachmentDownloader.ResponseStageHandler { InnerHandler = attachmentHandler }, disposeHandler: false)
+            {
+                Timeout = Timeout.InfiniteTimeSpan
+            };
         }
     }
 
