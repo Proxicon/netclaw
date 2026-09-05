@@ -43,7 +43,6 @@ internal static class TeamsProvisionalInlineImageIngress
         bool inlineImages,
         string inboxDirectory,
         string stagingDirectory,
-        TimeSpan operationTimeout,
         TimeProvider timeProvider,
         IContentScanner scanner,
         ILoggingAdapter log,
@@ -75,7 +74,7 @@ internal static class TeamsProvisionalInlineImageIngress
         }
 
         var startedAt = timeProvider.GetTimestamp();
-        using var deadlineCts = new CancellationTokenSource(operationTimeout, timeProvider);
+        using var deadlineCts = new CancellationTokenSource(TeamsIngressTimeouts.InlineImageDownload, timeProvider);
         using var downloadCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadlineCts.Token);
         AttachmentDownloadResult download;
         try
@@ -108,7 +107,7 @@ internal static class TeamsProvisionalInlineImageIngress
             log.Warning(
                 $"attachment_rejected reason={reason} host_class={{HostClass}} authenticated={{Authenticated}} elapsed_ms={{ElapsedMs}} configured_deadline_ms={{ConfiguredDeadlineMs}} outer_cancellation_requested={{OuterCancellationRequested}} stage={{Stage}}",
                 diagnostic?.HostClass ?? "unknown", diagnostic?.Authenticated ?? false,
-                timeProvider.GetElapsedTime(startedAt).TotalMilliseconds, operationTimeout.TotalMilliseconds,
+                timeProvider.GetElapsedTime(startedAt).TotalMilliseconds, TeamsIngressTimeouts.InlineImageDownload.TotalMilliseconds,
                 cancellationToken.IsCancellationRequested, diagnostic?.Stage ?? "request");
             if (reason == "ingress-cancelled")
                 throw new OperationCanceledException("The Teams ingress was cancelled.", cancellationToken);
@@ -116,6 +115,11 @@ internal static class TeamsProvisionalInlineImageIngress
                 ? Reject($"Timed out downloading `{attachment.Name}`. Please try again.")
                 : Reject($"Couldn't download `{attachment.Name}` — please try again later.");
         }
+
+        log.Info(
+            "attachment_download_completed elapsed_ms={ElapsedMs} configured_deadline_ms={ConfiguredDeadlineMs} size={Size}",
+            timeProvider.GetElapsedTime(startedAt).TotalMilliseconds,
+            TeamsIngressTimeouts.InlineImageDownload.TotalMilliseconds, download.BytesWritten);
 
         if (download.BytesWritten == 0)
         {
@@ -155,7 +159,7 @@ internal static class TeamsProvisionalInlineImageIngress
                 verifiedName,
                 new DeclaredMimeType(detectedMime.Value.Value),
                 policy,
-                operationTimeout,
+                TeamsIngressTimeouts.AttachmentOperation,
                 cancellationToken).ConfigureAwait(false);
         }
         catch

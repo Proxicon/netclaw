@@ -1,6 +1,8 @@
 # Teams inline-image timeout correction
 
 This focused correction starts at `e52499d0`, after merged PR #59.
+This document records PR #60.
+The [subsequent slow-download correction](slow-inline-image-downloads.md) updates the provisional-image deadline after the deployed container retest.
 It retains the attachment and actor contracts from the Teams attachment change.
 See [the attachment specification](../../openspec/changes/complete-teams-groupchat-and-attachments/specs/microsoft-teams-channel/spec.md)
 and [the engineering glossary](../spec/GLOSSARY.md).
