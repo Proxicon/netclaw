@@ -1496,49 +1496,42 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         var inlineContents = new List<DataContent>();
         var rejections = new List<string>();
 
-        foreach (var attachment in activity.Attachments)
+        var results = new AttachmentIngestOutcome?[activity.Attachments.Length];
+        var inboxWriteGate = new object();
+        using var deadline = new CancellationTokenSource(TeamsIngressTimeouts.AttachmentBatch, _dependencies.TimeProvider);
+        using var batch = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+        try
         {
-            if (attachment.Kind == TeamsInboundAttachmentKind.Unknown)
+            // The shared non-image ingress assumes one inbox writer. Finish it before parallel image work.
+            foreach (var index in Enumerable.Range(0, activity.Attachments.Length))
             {
-                rejections.Add($"`{attachment.Name}` is not supported in this Teams conversation.");
-                continue;
+                if (!TeamsProvisionalInlineImageIngress.IsImage(activity.Attachments[index]))
+                    results[index] = await IngestAttachmentAsync(activity.Attachments[index], batch.Token).ConfigureAwait(false);
             }
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, activity.Attachments.Length)
+                    .Where(index => TeamsProvisionalInlineImageIngress.IsImage(activity.Attachments[index])),
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = TeamsIngressTimeouts.ConcurrentAttachments,
+                    CancellationToken = batch.Token
+                },
+                async (index, token) =>
+                {
+                    results[index] = await IngestAttachmentAsync(activity.Attachments[index], token).ConfigureAwait(false);
+                }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            _log.Warning("attachment_batch_rejected reason=batch-deadline configured_deadline_ms={ConfiguredDeadlineMs}",
+                TeamsIngressTimeouts.AttachmentBatch.TotalMilliseconds);
+            rejections.Add("Timed out processing some attachments. Please send those images again.");
+        }
+        cancellationToken.ThrowIfCancellationRequested();
 
-            var result = TeamsProvisionalInlineImageIngress.IsProvisionalInlineImage(attachment)
-                ? await TeamsProvisionalInlineImageIngress.IngestAsync(
-                    activity,
-                    attachment,
-                    audience,
-                    policy,
-                    inlineImages,
-                    inboxDirectory,
-                    stagingDirectory,
-                    _dependencies.TimeProvider,
-                    _dependencies.ContentScanner,
-                    _log,
-                    _dependencies.AttachmentDownloader,
-                    cancellationToken).ConfigureAwait(false)
-                : await AttachmentIngressPipeline.IngestAsync(
-                    new AttachmentIngressRequest(
-                        attachment.Name,
-                        attachment.ContentType ?? "application/octet-stream",
-                        attachment.DeclaredSizeBytes ?? 0),
-                    audience,
-                    policy,
-                    inlineImages,
-                    inboxDirectory,
-                    stagingDirectory,
-                    TeamsIngressTimeouts.AttachmentOperation,
-                    _dependencies.ContentScanner,
-                    _log,
-                    (staging, maximumBytes, token) => _dependencies.AttachmentDownloader.DownloadAsync(
-                        activity,
-                        attachment,
-                        staging,
-                        maximumBytes,
-                        token),
-                    cancellationToken).ConfigureAwait(false);
-
+        // Preserve attachment order. Only this continuation assembles the model input and user reply.
+        foreach (var result in results)
+        {
             switch (result)
             {
                 case AttachmentIngestOutcome.Accepted accepted:
@@ -1567,6 +1560,48 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
         }
 
         return acceptedLines.Count > 0;
+
+        async Task<AttachmentIngestOutcome> IngestAttachmentAsync(TeamsAttachmentMetadata attachment, CancellationToken token)
+        {
+            if (attachment.Kind == TeamsInboundAttachmentKind.Unknown)
+                return new AttachmentIngestOutcome.Rejected($"`{attachment.Name}` is not supported in this Teams conversation.");
+
+            return TeamsProvisionalInlineImageIngress.IsImage(attachment)
+                ? await TeamsProvisionalInlineImageIngress.IngestAsync(
+                    activity,
+                    attachment,
+                    audience,
+                    policy,
+                    inlineImages,
+                    inboxDirectory,
+                    stagingDirectory,
+                    inboxWriteGate,
+                    _dependencies.TimeProvider,
+                    _dependencies.ContentScanner,
+                    _log,
+                    _dependencies.AttachmentDownloader,
+                    token).ConfigureAwait(false)
+                : await AttachmentIngressPipeline.IngestAsync(
+                    new AttachmentIngressRequest(
+                        attachment.Name,
+                        attachment.ContentType ?? "application/octet-stream",
+                        attachment.DeclaredSizeBytes ?? 0),
+                    audience,
+                    policy,
+                    inlineImages,
+                    inboxDirectory,
+                    stagingDirectory,
+                    TeamsIngressTimeouts.AttachmentOperation,
+                    _dependencies.ContentScanner,
+                    _log,
+                    (staging, maximumBytes, token) => _dependencies.AttachmentDownloader.DownloadAsync(
+                        activity,
+                        attachment,
+                        staging,
+                        maximumBytes,
+                        token),
+                    token).ConfigureAwait(false);
+        }
     }
 
     private async Task SendAttachmentRejectionAsync(string message)

@@ -13,26 +13,28 @@ using Netclaw.Security;
 namespace Netclaw.Channels.Teams;
 
 /// <summary>
-/// Normalizes the Teams <c>image/*</c> inline transport shape before it enters
-/// the shared attachment projection path. This transport-only shape never
-/// changes generic MIME classification.
+/// Applies Teams image transfer budgets and normalizes the provisional <c>image/*</c> shape.
+/// Concrete MIME declarations retain the shared scanner checks.
 /// </summary>
 internal static class TeamsProvisionalInlineImageIngress
 {
     private const int HeaderReadSize = 64;
 
-    public static bool IsProvisionalInlineImage(TeamsAttachmentMetadata attachment)
+    public static bool IsImage(TeamsAttachmentMetadata attachment)
     {
         ArgumentNullException.ThrowIfNull(attachment);
 
-        if (attachment.Kind != TeamsInboundAttachmentKind.InlineImage
+        if (attachment.Kind is not (TeamsInboundAttachmentKind.InlineImage or TeamsInboundAttachmentKind.PersonalFile)
             || string.IsNullOrWhiteSpace(attachment.ContentType))
         {
             return false;
         }
 
         var mediaType = attachment.ContentType.Split(';', 2)[0].Trim();
-        return string.Equals(mediaType, "image/*", StringComparison.OrdinalIgnoreCase);
+        return (attachment.Kind == TeamsInboundAttachmentKind.InlineImage
+                && string.Equals(mediaType, "image/*", StringComparison.OrdinalIgnoreCase))
+            || MimeTypeCatalog.GetCategory(MimeTypeCatalog.NormalizeDeclaredForExtension(
+                attachment.ContentType, Path.GetExtension(attachment.Name))) == AttachmentCategory.Image;
     }
 
     public static async Task<AttachmentIngestOutcome> IngestAsync(
@@ -43,6 +45,7 @@ internal static class TeamsProvisionalInlineImageIngress
         bool inlineImages,
         string inboxDirectory,
         string stagingDirectory,
+        object inboxWriteGate,
         TimeProvider timeProvider,
         IContentScanner scanner,
         ILoggingAdapter log,
@@ -51,6 +54,7 @@ internal static class TeamsProvisionalInlineImageIngress
     {
         ArgumentNullException.ThrowIfNull(activity);
         ArgumentNullException.ThrowIfNull(attachment);
+        ArgumentNullException.ThrowIfNull(inboxWriteGate);
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(scanner);
         ArgumentNullException.ThrowIfNull(log);
@@ -101,9 +105,11 @@ internal static class TeamsProvisionalInlineImageIngress
                 ? "ingress-cancelled"
                 : cancelled && deadlineCts.IsCancellationRequested
                     ? "download-deadline"
-                    : exception is HttpRequestException || diagnostic?.HttpError == true
-                        ? "download-http-error"
-                        : "download-failed";
+                    : diagnostic?.BodyIdleTimeout == true
+                        ? "download-body-idle"
+                        : exception is HttpRequestException || diagnostic?.HttpError == true
+                            ? "download-http-error"
+                            : "download-failed";
             log.Warning(
                 $"attachment_rejected reason={reason} host_class={{HostClass}} authenticated={{Authenticated}} elapsed_ms={{ElapsedMs}} configured_deadline_ms={{ConfiguredDeadlineMs}} outer_cancellation_requested={{OuterCancellationRequested}} stage={{Stage}}",
                 diagnostic?.HostClass ?? "unknown", diagnostic?.Authenticated ?? false,
@@ -111,7 +117,7 @@ internal static class TeamsProvisionalInlineImageIngress
                 cancellationToken.IsCancellationRequested, diagnostic?.Stage ?? "request");
             if (reason == "ingress-cancelled")
                 throw new OperationCanceledException("The Teams ingress was cancelled.", cancellationToken);
-            return reason == "download-deadline"
+            return reason is "download-deadline" or "download-body-idle"
                 ? Reject($"Timed out downloading `{attachment.Name}`. Please try again.")
                 : Reject($"Couldn't download `{attachment.Name}` — please try again later.");
         }
@@ -149,7 +155,8 @@ internal static class TeamsProvisionalInlineImageIngress
             return Reject($"Content scanner rejected `{attachment.Name}`: a verified image signature is required.");
         }
 
-        var verifiedName = CreateVerifiedName(attachment, detectedMime.Value);
+        var provisional = string.Equals(declaredMime.Value.Split(';', 2)[0].Trim(), "image/*", StringComparison.OrdinalIgnoreCase);
+        var verifiedName = provisional ? CreateVerifiedName(attachment, detectedMime.Value) : FilenameSanitizer.Sanitize(attachment.Name);
         ContentVerificationResult verification;
         try
         {
@@ -157,7 +164,7 @@ internal static class TeamsProvisionalInlineImageIngress
                 scanner,
                 download.FilePath,
                 verifiedName,
-                new DeclaredMimeType(detectedMime.Value.Value),
+                provisional ? new DeclaredMimeType(detectedMime.Value.Value) : declaredMime,
                 policy,
                 TeamsIngressTimeouts.AttachmentOperation,
                 cancellationToken).ConfigureAwait(false);
@@ -179,7 +186,9 @@ internal static class TeamsProvisionalInlineImageIngress
         string inboxPath;
         try
         {
-            inboxPath = InboxWriter.SanitizeReserveAndMove(inboxDirectory, verifiedName, download.FilePath);
+            // The shared writer assumes serialized reservation and rename. This gate belongs to the Teams batch.
+            lock (inboxWriteGate)
+                inboxPath = InboxWriter.SanitizeReserveAndMove(inboxDirectory, verifiedName, download.FilePath);
         }
         catch (InboxWriter.CollisionExhaustedException exception)
         {

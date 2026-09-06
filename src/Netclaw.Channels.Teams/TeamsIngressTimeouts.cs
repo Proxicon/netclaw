@@ -8,11 +8,13 @@ namespace Netclaw.Channels.Teams;
 internal static class TeamsIngressTimeouts
 {
     internal static readonly TimeSpan AttachmentOperation = TimeSpan.FromSeconds(30);
-    internal static readonly TimeSpan InlineImageDownload = TimeSpan.FromSeconds(60);
+    internal static readonly TimeSpan InlineImageDownload = TimeSpan.FromSeconds(240);
+    internal static readonly TimeSpan AttachmentBatch = TimeSpan.FromSeconds(270);
+    internal const int ConcurrentAttachments = 3;
 
-    // Each file has separate download and scan deadlines. The binding processes files in sequence.
+    // One batch deadline bounds all downloads and scans below the SDK five-minute activity limit.
     internal static TimeSpan BindingRoute(TeamsInboundActivity activity) =>
-        TimeSpan.FromSeconds(10) + (InlineImageDownload + AttachmentOperation) * activity.Attachments.Length;
+        TimeSpan.FromSeconds(10) + (activity.Attachments.Length > 0 ? AttachmentBatch : TimeSpan.Zero);
 
     internal static TimeSpan ConversationRoute(TeamsInboundActivity activity) =>
         BindingRoute(activity) + TimeSpan.FromSeconds(5);
@@ -27,11 +29,13 @@ internal sealed class TeamsAttachmentDownloadException(
     bool authenticated,
     string stage,
     bool cancelled,
-    bool httpError) : Exception("The Teams attachment download failed.")
+    bool httpError,
+    bool bodyIdleTimeout) : Exception("The Teams attachment download failed.")
 {
     internal string HostClass { get; } = hostClass;
     internal bool Authenticated { get; } = authenticated;
     internal string Stage { get; } = stage;
     internal bool Cancelled { get; } = cancelled;
     internal bool HttpError { get; } = httpError;
+    internal bool BodyIdleTimeout { get; } = bodyIdleTimeout;
 }
