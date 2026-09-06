@@ -24,9 +24,10 @@ internal sealed class TeamsSdkAttachmentDownloader(
     IHttpClientFactory httpClientFactory,
     IAuthorizationHeaderProvider authorizationHeaderProvider,
     IOptionsMonitor<ManagedIdentityOptions> managedIdentityOptions,
-    TimeProvider timeProvider) : ITeamsAttachmentDownloader
+    TimeProvider timeProvider,
+    ILogger<TeamsSdkAttachmentDownloader> log) : ITeamsAttachmentDownloader
 {
-    internal static readonly HttpRequestOptionsKey<Action<string>> StageObserver = new("TeamsAttachmentStage");
+    internal static readonly HttpRequestOptionsKey<TeamsAttachmentTransfer> StageObserver = new("TeamsAttachmentStage");
     private const int MaximumCaptures = 1_024;
     private const int MaximumUrlLength = 4_096;
     private static readonly TimeSpan CaptureLifetime = TimeSpan.FromMinutes(5);
@@ -103,22 +104,56 @@ internal sealed class TeamsSdkAttachmentDownloader(
                 ? await CreateBotConnectorAuthorizationHeaderAsync(cancellationToken).ConfigureAwait(false)
                 : null;
             using var client = httpClientFactory.CreateClient("teams-attachments");
-            stage = "request";
-            return await StreamingAttachmentDownloader.DownloadToFileAsync(
-                client,
-                source.DownloadUrl,
-                configureRequest: request =>
+            for (var attempt = 1; ; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var transfer = new TeamsAttachmentTransfer(timeProvider);
+                stage = "request";
+                try
                 {
-                    request.Options.Set(StageObserver, value => stage = value);
-                    if (authorizationHeader is not null)
-                    {
-                        request.Headers.Authorization = CreateBearerHeader(authorizationHeader);
-                        authenticated = true;
-                    }
-                },
-                targetDirectory: stagingDirectory,
-                maxBytes: maximumBytes,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+                    var result = await StreamingAttachmentDownloader.DownloadToFileAsync(
+                        client,
+                        source.DownloadUrl,
+                        configureRequest: request =>
+                        {
+                            request.Options.Set(StageObserver, transfer);
+                            if (authorizationHeader is not null)
+                            {
+                                request.Headers.Authorization = CreateBearerHeader(authorizationHeader);
+                                authenticated = true;
+                            }
+                        },
+                        targetDirectory: stagingDirectory,
+                        maxBytes: maximumBytes,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    RecordAttempt("completed");
+                    return result;
+                }
+                catch (TeamsAttachmentReadTimeoutException) when (attempt == 1 && !cancellationToken.IsCancellationRequested)
+                {
+                    // Retry only a body idle timeout. Both attempts share the caller's absolute deadline.
+                    RecordAttempt("body-idle-retry");
+                }
+                catch (TeamsAttachmentReadTimeoutException)
+                {
+                    RecordAttempt("body-idle-exhausted");
+                    throw;
+                }
+                catch
+                {
+                    RecordAttempt("failed");
+                    throw;
+                }
+                finally
+                {
+                    stage = transfer.Stage;
+                }
+
+                void RecordAttempt(string outcome) => log.LogInformation(
+                    "attachment_transfer outcome={Outcome} attempt={Attempt} host_class={HostClass} authenticated={Authenticated} stage={Stage} bytes_received={BytesReceived} content_length={ContentLength} elapsed_ms={ElapsedMs} headers_ms={HeadersMs} last_read_age_ms={LastReadAgeMs}",
+                    outcome, attempt, hostClass, authenticated, transfer.Stage, transfer.BytesRead,
+                    transfer.ContentLength, transfer.ElapsedMilliseconds, transfer.HeadersMilliseconds, transfer.LastReadAgeMilliseconds);
+            }
         }
         catch (AttachmentTooLargeException)
         {
@@ -129,8 +164,9 @@ internal sealed class TeamsSdkAttachmentDownloader(
             // SDK and HTTP exceptions can contain credentials or URLs. Export only these bounded facts.
             throw new TeamsAttachmentDownloadException(
                 hostClass, authenticated, stage,
-                exception is OperationCanceledException,
-                exception is HttpRequestException);
+                exception is OperationCanceledException || cancellationToken.IsCancellationRequested,
+                exception is HttpRequestException,
+                exception is TeamsAttachmentReadTimeoutException);
         }
     }
 
@@ -140,8 +176,8 @@ internal sealed class TeamsSdkAttachmentDownloader(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            if (request.Options.TryGetValue(StageObserver, out var setStage))
-                setStage(response.IsSuccessStatusCode ? "body" : "response_headers");
+            if (request.Options.TryGetValue(StageObserver, out var transfer))
+                transfer.Observe(response);
             return response;
         }
     }

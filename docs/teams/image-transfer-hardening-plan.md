@@ -2,6 +2,8 @@
 
 ## Status and scope
 
+The September 6 correction follows in [image transfer progress and recovery](image-transfer-progress-and-recovery.md).
+
 This document records the September 5, 2026 investigation and the proposed repair sequence.
 It starts from `dev` commit `73f55025`, which includes PR #62.
 This PR changes documentation only.

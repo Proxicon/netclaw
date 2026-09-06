@@ -1388,8 +1388,9 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
 
     [Theory]
     [InlineData(0, 10, 15, 20)]
-    [InlineData(1, 100, 105, 110)]
+    [InlineData(1, 280, 285, 290)]
     [InlineData(3, 280, 285, 290)]
+    [InlineData(10, 280, 285, 290)]
     public void Teams_route_deadlines_cover_each_download_and_scan(
         int attachmentCount,
         int bindingSeconds,
@@ -1464,7 +1465,7 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             Assert.False(route.IsCompleted);
             Assert.False(downloader.DownloadToken.IsCancellationRequested);
             if (expireDeadline)
-                clock.Advance(TimeSpan.FromSeconds(29));
+                clock.Advance(TeamsIngressTimeouts.InlineImageDownload - TimeSpan.FromSeconds(31));
             else
                 downloader.Release.SetResult();
 
@@ -1504,6 +1505,120 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             Sys.EventStream.Unsubscribe(observationActor);
             await host.StopAsync(CancellationToken.None);
         }
+    }
+
+    [Theory]
+    [InlineData(false, false, "image/*", false, false)]
+    [InlineData(true, false, "image/png", false, false)]
+    [InlineData(false, true, "image/png", false, false)]
+    [InlineData(true, true, "image/*", false, false)]
+    [InlineData(true, false, "image/png", true, false)]
+    [InlineData(false, false, "image/png", false, true)]
+    public async Task Image_batch_bounds_parallel_work_preserves_order_and_recovers_after_its_deadline(
+        bool channel, bool expireBatch, string mime, bool sameName, bool personalFile)
+    {
+        using var root = new DisposableTempDir();
+        var paths = new NetclawPaths(root.Path);
+        paths.EnsureDirectoriesExist();
+        var clock = new FakeTimeProvider();
+        var downloader = new IndexedGatedTeamsAttachmentDownloader();
+        var replies = new RecordingTeamsReplyClient();
+        var observer = Sys.ActorOf(Props.Create(() => new TeamsRouteObservationActor(TestActor)));
+        var registry = ActorRegistry.For(Sys);
+        registry.Register<SessionManagerActorKey>(observer);
+        var pipeline = new SessionPipeline(Sys, new RequiredActor<SessionManagerActorKey>(registry), paths);
+        var dependencies = (channel
+            ? CreatePublicVerifiedAttachmentDependencies(pipeline, paths, PngBytes, replies)
+            : CreateVerifiedAttachmentDependencies(pipeline, paths, PngBytes, replies)) with
+        {
+            TimeProvider = clock,
+            AttachmentDownloader = downloader
+        };
+        const string conversation = "image-batch;messageid=root-a";
+        var actor = channel
+            ? Sys.ActorOf(TeamsConversationActor.CreateProps(CreateSessionId("tenant-a", conversation), dependencies))
+            : CreateBindingActor(CreateSessionId("tenant-a", "attachment-conversation"), dependencies, "teams-image-batch");
+        var attachments = Enumerable.Range(0, 4)
+            .Select(index => CreateInboundAttachment($"image-{(sameName ? 0 : index)}.png", personalFile ? TeamsInboundAttachmentKind.PersonalFile : TeamsInboundAttachmentKind.InlineImage, index, mime))
+            .ToImmutableArray();
+        var activity = MakeActivity("root-a", attachments);
+        var route = Route(activity);
+        var started = new HashSet<int>();
+        for (var index = 0; index < 3; index++)
+            started.Add(await ReadStarted());
+        Assert.Equal([0, 1, 2], started.Order().ToArray());
+        Assert.Equal(3, downloader.CallCount);
+
+        if (expireBatch)
+        {
+            clock.Advance(TeamsIngressTimeouts.AttachmentBatch);
+            downloader.ReleaseCancellation.SetResult();
+        }
+        else
+        {
+            downloader.Release(2);
+            Assert.Equal(3, await ReadStarted());
+            downloader.Release(3);
+            downloader.Release(1);
+            downloader.Release(0);
+        }
+
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await route).Disposition);
+        var dispatched = ReceiveDispatchedMessage();
+        Assert.Equal(3, downloader.MaximumActive);
+        Assert.Equal(expireBatch ? 3 : 4, downloader.CallCount);
+        if (expireBatch)
+        {
+            Assert.Equal("inspect these images", dispatched.Content);
+            Assert.Empty(dispatched.MediaReferences);
+            Assert.Contains("Timed out processing", Assert.Single(replies.Messages).Text, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.Equal(4, dispatched.MediaReferences.Count());
+            var previous = -1;
+            for (var index = 0; index < 4; index++)
+            {
+                if (!sameName)
+                {
+                    var position = dispatched.Content.IndexOf($"image-{index}.png", StringComparison.Ordinal);
+                    Assert.True(position > previous, "The model input must retain attachment order.");
+                    previous = position;
+                }
+                var mediaPath = Assert.Single(Directory.GetFiles(root.Path,
+                    Path.GetFileName(dispatched.MediaReferences[index].RelativePath), SearchOption.AllDirectories));
+                Assert.Equal(TestImages.Image(16 + index, 16),
+                    await File.ReadAllBytesAsync(mediaPath, TestContext.Current.CancellationToken));
+            }
+            Assert.Empty(replies.Messages);
+        }
+        Assert.Empty(Directory.GetFiles(root.Path, ".teams-test-download-*.tmp", SearchOption.AllDirectories));
+        Assert.Equal(TeamsBindingRouteDisposition.Duplicate, (await Route(activity)).Disposition);
+        Assert.Equal(expireBatch ? 3 : 4, downloader.CallCount);
+
+        downloader.Release(0);
+        var later = MakeActivity("later-image", [attachments[0]]);
+        Assert.Equal(TeamsBindingRouteDisposition.Accepted, (await Route(later)).Disposition);
+        ExpectMsg<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var next = ExpectMsg<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Single(next.MediaReferences);
+        var observation = await observer.Ask<TeamsRouteObservation>(new ReadTeamsRouteObservation(), TestContext.Current.CancellationToken);
+        Assert.Equal(2, observation.DispatchedTurns);
+        Assert.Equal(expireBatch ? 4 : 5, downloader.CallCount);
+
+        async Task<int> ReadStarted()
+        {
+            var read = downloader.Started.Reader.ReadAsync(TestContext.Current.CancellationToken).AsTask();
+            Assert.Same(read, await Task.WhenAny(read, route));
+            return await read;
+        }
+
+        TeamsInboundActivity MakeActivity(string id, ImmutableArray<TeamsAttachmentMetadata> files) => channel
+            ? CreateChannelActivity(id, conversation, text: "inspect these images", attachments: files)
+            : CreateAttachmentActivity(id, "inspect these images", files);
+        Task<TeamsBindingRouteResult> Route(TeamsInboundActivity input) => channel
+            ? RouteConversationAsync(actor, input)
+            : RouteAsync(actor, input);
     }
 
     [Fact]
@@ -4436,9 +4551,9 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             long maximumBytes,
             CancellationToken cancellationToken)
         {
-            var path = Path.Combine(stagingDirectory, ".teams-test-download.tmp");
-            await File.WriteAllBytesAsync(path, [1, 2, 3, 4], cancellationToken);
-            return new AttachmentDownloadResult(path, 4);
+            var path = Path.Combine(stagingDirectory, $".teams-test-download-{Guid.NewGuid():N}.tmp");
+            await File.WriteAllBytesAsync(path, PngBytes, cancellationToken);
+            return new AttachmentDownloadResult(path, PngBytes.Length);
         }
     }
 
@@ -4459,6 +4574,56 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             var path = Path.Combine(stagingDirectory, $".teams-test-download-{Guid.NewGuid():N}.tmp");
             await File.WriteAllBytesAsync(path, _bytes, cancellationToken);
             return new AttachmentDownloadResult(path, _bytes.Length);
+        }
+    }
+
+    private sealed class IndexedGatedTeamsAttachmentDownloader : ITeamsAttachmentDownloader
+    {
+        private readonly TaskCompletionSource[] _releases = Enumerable.Range(0, 4)
+            .Select(_ => new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).ToArray();
+        private readonly object _metricsLock = new();
+        private int _active;
+        public int CallCount { get; private set; }
+        public int MaximumActive { get; private set; }
+        public System.Threading.Channels.Channel<int> Started { get; } = System.Threading.Channels.Channel.CreateUnbounded<int>();
+        public TaskCompletionSource ReleaseCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Release(int index) => _releases[index].TrySetResult();
+
+        public async Task<AttachmentDownloadResult> DownloadAsync(
+            TeamsInboundActivity activity,
+            TeamsAttachmentMetadata attachment,
+            string stagingDirectory,
+            long maximumBytes,
+            CancellationToken cancellationToken)
+        {
+            lock (_metricsLock)
+            {
+                CallCount++;
+                MaximumActive = Math.Max(MaximumActive, ++_active);
+            }
+            try
+            {
+                await Started.Writer.WriteAsync(attachment.SourceIndex, cancellationToken);
+                try
+                {
+                    await _releases[attachment.SourceIndex].Task.WaitAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Hold the cancelled operation until the test advances the complete batch clock.
+                    await ReleaseCancellation.Task.WaitAsync(TestContext.Current.CancellationToken);
+                    throw;
+                }
+                var bytes = TestImages.Image(16 + attachment.SourceIndex, 16);
+                return await new BytesTeamsAttachmentDownloader(bytes).DownloadAsync(
+                    activity, attachment, stagingDirectory, maximumBytes, cancellationToken);
+            }
+            finally
+            {
+                lock (_metricsLock)
+                    _active--;
+            }
         }
     }
 

@@ -6,6 +6,7 @@
 using System.Collections.Immutable;
 using System.Net;
 using System.Security.Claims;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Akka.Event;
@@ -14,6 +15,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.Identity.Abstractions;
@@ -28,6 +30,7 @@ using Netclaw.Daemon.Configuration;
 using Netclaw.Media;
 using Netclaw.Security;
 using Netclaw.Tests.Utilities;
+using SkiaSharp;
 using Xunit;
 using MicrosoftLogLevel = Microsoft.Extensions.Logging.LogLevel;
 
@@ -179,6 +182,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
             inlineImages: true,
             inbox.Path,
             staging.Path,
+            new object(),
             TimeProvider.System,
             new NullContentScanner(),
             log,
@@ -217,6 +221,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
             inlineImages: true,
             inbox.Path,
             staging.Path,
+            new object(),
             TimeProvider.System,
             new NullContentScanner(),
             log,
@@ -356,6 +361,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
             maximumBytes: 1_024,
             TestContext.Current.CancellationToken));
         Assert.Empty(Directory.EnumerateFiles(temp.Path));
+        Assert.Equal(1, handler.CallCount);
     }
 
     [Fact]
@@ -385,6 +391,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         var failure = await Assert.ThrowsAsync<TeamsAttachmentDownloadException>(() => download);
         Assert.True(failure.Cancelled);
         Assert.Equal("body", failure.Stage);
+        Assert.Equal(1, handler.CallCount);
         Assert.Empty(Directory.EnumerateFiles(temp.Path));
     }
 
@@ -417,7 +424,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         var log = new AttachmentLog();
         var ingest = TeamsProvisionalInlineImageIngress.IngestAsync(
             activity, attachment, TrustAudience.Public, ImageAttachmentPolicy(), true,
-            inbox.Path, staging.Path, clock,
+            inbox.Path, staging.Path, new object(), clock,
             new MagicByteContentScanner(new ContentPolicy()), log, downloader, TestContext.Current.CancellationToken);
         await handler.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
         clock.Advance(TimeSpan.FromSeconds(31));
@@ -450,7 +457,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         var log = new AttachmentLog();
         var ingest = TeamsProvisionalInlineImageIngress.IngestAsync(
             activity, attachment, TrustAudience.Public, ImageAttachmentPolicy(), true,
-            inbox.Path, staging.Path, clock,
+            inbox.Path, staging.Path, new object(), clock,
             new NullContentScanner(), log, downloader, outer.Token);
         await handler.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
         if (cancelIngress)
@@ -466,7 +473,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         Assert.Contains($"reason={reason}", message, StringComparison.Ordinal);
         Assert.Contains("host_class=bot_connector", message, StringComparison.Ordinal);
         Assert.Contains("authenticated=True", message, StringComparison.Ordinal);
-        Assert.Contains("configured_deadline_ms=60000", message, StringComparison.Ordinal);
+        Assert.Contains("configured_deadline_ms=240000", message, StringComparison.Ordinal);
         Assert.Contains($"outer_cancellation_requested={cancelIngress}", message, StringComparison.Ordinal);
         Assert.Contains("stage=request", message, StringComparison.Ordinal);
         Assert.DoesNotContain(url, message, StringComparison.Ordinal);
@@ -490,7 +497,7 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         var log = new AttachmentLog();
         var outcome = await TeamsProvisionalInlineImageIngress.IngestAsync(
             activity, attachment, TrustAudience.Public, ImageAttachmentPolicy(), true,
-            inbox.Path, staging.Path, clock,
+            inbox.Path, staging.Path, new object(), clock,
             new NullContentScanner(), log, downloader, TestContext.Current.CancellationToken);
         Assert.IsType<AttachmentIngestOutcome.Rejected>(outcome);
         var message = Assert.Single(log.Messages);
@@ -500,10 +507,9 @@ public sealed class TeamsSdkAttachmentDownloaderTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task Slow_body_obeys_the_download_budget_and_cleans_up_on_cancellation(bool expireDeadline, bool cancelIngress)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Slow_body_obeys_the_download_budget_and_cleans_up_on_cancellation(bool cancelIngress)
     {
         var clock = new FakeTimeProvider();
         using var stream = new GatedPngStream(TestImages.SmallPng());
@@ -522,46 +528,42 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         var log = new AttachmentLog();
         var ingest = TeamsProvisionalInlineImageIngress.IngestAsync(
             activity, attachment, TrustAudience.Public, ImageAttachmentPolicy(), true,
-            inbox.Path, staging.Path, clock,
+            inbox.Path, staging.Path, new object(), clock,
             new MagicByteContentScanner(new ContentPolicy()), log, downloader, outer.Token);
 
         await stream.WaitingForBody.Task.WaitAsync(TestContext.Current.CancellationToken);
         Assert.Single(Directory.GetFiles(staging.Path));
-        clock.Advance(TimeSpan.FromSeconds(31));
+        clock.Advance(TimeSpan.FromSeconds(20));
         Assert.False(ingest.IsCompleted);
         Assert.False(stream.ReadToken.IsCancellationRequested);
 
         if (cancelIngress)
             outer.Cancel();
-        else if (expireDeadline)
-            clock.Advance(TimeSpan.FromSeconds(29));
         else
             stream.Release.SetResult();
 
         if (cancelIngress)
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ingest);
-        else if (expireDeadline)
-            Assert.Contains("Timed out downloading", Assert.IsType<AttachmentIngestOutcome.Rejected>(await ingest).UserFacingReason, StringComparison.Ordinal);
         else
             Assert.IsType<AttachmentIngestOutcome.Accepted>(await ingest);
 
         Assert.Equal(1, handler.CallCount);
         Assert.Empty(Directory.GetFiles(staging.Path));
-        if (expireDeadline || cancelIngress)
+        if (cancelIngress)
         {
             Assert.Empty(Directory.GetFiles(inbox.Path));
             var message = Assert.Single(log.Messages);
             Assert.Contains(cancelIngress ? "reason=ingress-cancelled" : "reason=download-deadline", message, StringComparison.Ordinal);
             Assert.Contains("stage=body", message, StringComparison.Ordinal);
             Assert.Contains($"outer_cancellation_requested={cancelIngress}", message, StringComparison.Ordinal);
-            Assert.Contains("configured_deadline_ms=60000", message, StringComparison.Ordinal);
+            Assert.Contains("configured_deadline_ms=240000", message, StringComparison.Ordinal);
             Assert.Contains("host_class=bot_connector authenticated=True", message, StringComparison.Ordinal);
         }
         else
         {
             var file = Assert.Single(Directory.GetFiles(inbox.Path));
             Assert.Equal(TestImages.SmallPng(), await File.ReadAllBytesAsync(file, TestContext.Current.CancellationToken));
-            Assert.Contains(log.Messages, message => message.Contains("attachment_download_completed elapsed_ms=31000 configured_deadline_ms=60000", StringComparison.Ordinal));
+            Assert.Contains(log.Messages, message => message.Contains("attachment_download_completed elapsed_ms=20000 configured_deadline_ms=240000", StringComparison.Ordinal));
             Assert.Contains(log.Messages, message => message.Contains("verifiedMime=image/png", StringComparison.Ordinal));
         }
         foreach (var message in log.Messages)
@@ -569,6 +571,193 @@ public sealed class TeamsSdkAttachmentDownloaderTests
             Assert.DoesNotContain(url, message, StringComparison.Ordinal);
             Assert.DoesNotContain("private-id", message, StringComparison.Ordinal);
             Assert.DoesNotContain("synthetic-bot-token", message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task Multi_megabyte_body_with_progress_survives_the_old_total_deadline()
+    {
+        var clock = new FakeTimeProvider();
+        var bytes = LargePng();
+        Assert.True(bytes.Length > 2 * 1_024 * 1_024);
+        using var stream = new ProgressGatedStream(bytes);
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream)
+        });
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
+        var attachment = new TeamsAttachmentMetadata("large.png", "image/*", bytes.Length)
+        {
+            Kind = TeamsInboundAttachmentKind.InlineImage,
+            SourceIndex = 0
+        };
+        var activity = CreateActivity(attachments: [attachment]);
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
+        using var staging = new DisposableTempDir();
+        using var inbox = new DisposableTempDir();
+        var policy = ImageAttachmentPolicy();
+        policy.MaxFileBytes = bytes.Length;
+        using var deadline = new CancellationTokenSource(TeamsIngressTimeouts.InlineImageDownload, clock);
+        var download = TeamsProvisionalInlineImageIngress.IngestAsync(
+            activity, attachment, TrustAudience.Personal, policy, true,
+            inbox.Path, staging.Path, new object(), clock,
+            new MagicByteContentScanner(new ContentPolicy()), new AttachmentLog(), downloader, deadline.Token);
+
+        for (var index = 0; index < 4; index++)
+        {
+            var release = await stream.Reads.Reader.ReadAsync(TestContext.Current.CancellationToken);
+            clock.Advance(TimeSpan.FromSeconds(20));
+            Assert.False(deadline.IsCancellationRequested);
+            Assert.False(download.IsCompleted);
+            release.SetResult();
+        }
+
+        Assert.IsType<AttachmentIngestOutcome.Accepted>(await download);
+        var file = Assert.Single(Directory.GetFiles(inbox.Path));
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(file, TestContext.Current.CancellationToken));
+        Assert.Empty(Directory.GetFiles(staging.Path));
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task Partial_body_stall_retries_once_and_discards_the_first_file()
+    {
+        var clock = new FakeTimeProvider();
+        var bytes = TestImages.SmallPng();
+        using var first = new GatedPngStream(bytes);
+        using var staging = new DisposableTempDir();
+        var attempts = 0;
+        var handler = new RecordingHandler(request =>
+        {
+            Assert.Equal("synthetic-bot-token", request.Headers.Authorization?.Parameter);
+            Assert.Empty(Directory.GetFiles(staging.Path));
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = ++attempts == 1 ? new StreamContent(first) : new ByteArrayContent(bytes)
+            };
+        });
+        var logs = new CapturingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddProvider(logs));
+        var downloader = new TeamsSdkAttachmentDownloader(
+            new TestHttpClientFactory(handler),
+            new RecordingAuthorizationHeaderProvider("Bearer synthetic-bot-token"),
+            new StaticOptionsMonitor<ManagedIdentityOptions>(new ManagedIdentityOptions()),
+            clock, loggerFactory.CreateLogger<TeamsSdkAttachmentDownloader>());
+        var activity = CreateActivity();
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
+        var download = downloader.DownloadAsync(activity, CreateAttachment(), staging.Path, 1_024, TestContext.Current.CancellationToken);
+
+        await first.WaitingForBody.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Single(Directory.GetFiles(staging.Path));
+        clock.Advance(TimeSpan.FromSeconds(30));
+        var result = await download;
+
+        Assert.Equal(2, logs.Messages.Count);
+        Assert.Contains("outcome=body-idle-retry attempt=1", logs.Messages[0], StringComparison.Ordinal);
+        Assert.Contains("bytes_received=8", logs.Messages[0], StringComparison.Ordinal);
+        Assert.Contains("outcome=completed attempt=2", logs.Messages[1], StringComparison.Ordinal);
+        Assert.Contains($"bytes_received={bytes.Length}", logs.Messages[1], StringComparison.Ordinal);
+        foreach (var message in logs.Messages)
+        {
+            Assert.DoesNotContain("smba.trafficmanager.net", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("synthetic-bot-token", message, StringComparison.Ordinal);
+            Assert.DoesNotContain("/attachments/image", message, StringComparison.Ordinal);
+        }
+        Assert.Equal(2, handler.CallCount);
+        Assert.Equal(handler.RequestUris[0], handler.RequestUris[1]);
+        Assert.Equal(bytes.Length, result.BytesWritten);
+        Assert.Equal(bytes, await File.ReadAllBytesAsync(result.FilePath, TestContext.Current.CancellationToken));
+        Assert.Single(Directory.GetFiles(staging.Path));
+        await Assert.ThrowsAsync<InvalidDataException>(() => downloader.DownloadAsync(
+            activity, CreateAttachment(), staging.Path, 1_024, TestContext.Current.CancellationToken));
+        Assert.Equal(2, handler.CallCount);
+    }
+
+    [Fact]
+    public async Task Two_body_stalls_stop_after_two_attempts_and_remove_partial_files()
+    {
+        var clock = new FakeTimeProvider();
+        using var first = new GatedPngStream(TestImages.SmallPng());
+        using var second = new GatedPngStream(TestImages.SmallPng());
+        using var staging = new DisposableTempDir();
+        var attempts = 0;
+        var handler = new RecordingHandler(_ =>
+        {
+            Assert.Empty(Directory.GetFiles(staging.Path));
+            Assert.True(++attempts <= 2, "A body stall permits only one retry.");
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(attempts == 1 ? first : second)
+            };
+        });
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
+        var activity = CreateActivity();
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
+        var download = downloader.DownloadAsync(activity, CreateAttachment(), staging.Path, 1_024, TestContext.Current.CancellationToken);
+
+        await first.WaitingForBody.Task.WaitAsync(TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        await second.WaitingForBody.Task.WaitAsync(TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        var failure = await Assert.ThrowsAsync<TeamsAttachmentDownloadException>(() => download);
+
+        Assert.Equal("body", failure.Stage);
+        Assert.Equal(2, handler.CallCount);
+        Assert.Empty(Directory.GetFiles(staging.Path));
+    }
+
+    [Fact]
+    public async Task Body_byte_limit_does_not_retry_an_attachment_without_a_length_header()
+    {
+        var clock = new FakeTimeProvider();
+        using var stream = new PartialThenCancellationStream();
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(stream)
+        });
+        var downloader = CreateDownloader(new TestHttpClientFactory(handler), clock);
+        var activity = CreateActivity();
+        downloader.Capture(CreateSdkMessage("https://smba.trafficmanager.net/amer/v3/attachments/image"), activity);
+        using var staging = new DisposableTempDir();
+
+        await Assert.ThrowsAsync<AttachmentTooLargeException>(() => downloader.DownloadAsync(
+            activity, CreateAttachment(), staging.Path, 1, TestContext.Current.CancellationToken));
+
+        Assert.Equal(1, handler.CallCount);
+        Assert.Empty(Directory.GetFiles(staging.Path));
+    }
+
+    private static byte[] LargePng()
+    {
+        const int size = 1_024;
+        var pixels = new byte[size * size * 4];
+        new Random(42).NextBytes(pixels);
+        for (var index = 3; index < pixels.Length; index += 4)
+            pixels[index] = 255;
+        using var bitmap = new SKBitmap(new SKImageInfo(size, size, SKColorType.Rgba8888, SKAlphaType.Opaque));
+        Marshal.Copy(pixels, 0, bitmap.GetPixels(), pixels.Length);
+        using var image = SKImage.FromBitmap(bitmap);
+        using var encoded = image.Encode(SKEncodedImageFormat.Png, 100);
+        return encoded.ToArray();
+    }
+
+    private sealed class ProgressGatedStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        private long _nextGate;
+        public System.Threading.Channels.Channel<TaskCompletionSource> Reads { get; } =
+            System.Threading.Channels.Channel.CreateUnbounded<TaskCompletionSource>();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (Position >= _nextGate && Position < Length)
+            {
+                _nextGate += (Length + 3) / 4;
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                await Reads.Writer.WriteAsync(release, cancellationToken);
+                await release.Task.WaitAsync(cancellationToken);
+            }
+
+            return await base.ReadAsync(buffer[..Math.Min(buffer.Length, 32 * 1_024)], cancellationToken);
         }
     }
 
@@ -701,7 +890,8 @@ public sealed class TeamsSdkAttachmentDownloaderTests
         httpClientFactory,
         authorizationHeaders,
         new StaticOptionsMonitor<ManagedIdentityOptions>(new ManagedIdentityOptions()),
-        timeProvider);
+        timeProvider,
+        NullLogger<TeamsSdkAttachmentDownloader>.Instance);
 
     private static WebApplication BuildBotConnectorDownloadHost(
         RecordingHandler botConnectorHandler,
