@@ -72,9 +72,9 @@ Wait+Screen@10s /Done adding channels/
 Escape
 Wait+Screen@10s /Microsoft Teams is configured/
 Wait+Screen@10s /Manage channels and permissions/
-Wait+Screen@10s /Manage allowed users/
-Wait+Screen@10s /Manage allowed groups/
-Wait+Screen@10s /Manage Group Chats/
+Wait+Screen@10s /Add a channel or Group Chat/
+Wait+Screen@10s /Add users or groups/
+Wait+Screen@10s /Manage users and groups/
 Wait+Screen@10s /Attachments/
 Wait+Screen@10s /Directory \/ Graph status/
 Wait+Screen@10s /Connection & credentials/
@@ -82,7 +82,7 @@ Wait+Screen@10s /Connection & credentials/
 # Exercise the configured connection form through the actual Termina input
 # path. Tab must wrap from the secret to tenant, and Shift+Tab must return to
 # the secret. These values replace the first-connect values above.
-Down 8
+Down 7
 Enter
 Wait+Screen@10s /Microsoft Teams > Connection & credentials/
 Wait+Screen@10s /Entra tenant ID/
@@ -112,7 +112,7 @@ Up 3
 Down 3
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/
-Down 8
+Down 7
 Enter
 Wait+Screen@10s /aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/
 Wait+Screen@10s /bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/
@@ -131,12 +131,15 @@ Enter
 Wait+Screen@10s /Microsoft Teams is configured/
 
 # Add one channel via the explicit manual canonical-ID path. Do not submit a
-# directory query; M moves directly from Team search to the local ID entry.
+# directory query. An empty search selects the advanced local ID entry.
+Up 20
 Down
 Enter
+Wait+Screen@10s /Microsoft Teams > Add a destination/
+Wait+Screen@10s /Channel/
+Enter
 Wait+Screen@10s /Microsoft Teams > Add channel/
-Wait+Screen@10s /Press M for the advanced canonical-ID path/
-Type "m"
+Enter
 Wait+Screen@10s /Advanced: canonical Teams channel IDs/
 Type "55555555-5555-5555-5555-555555555555"
 Enter
@@ -146,12 +149,14 @@ Wait+Screen@10s /at the Team default and saved/
 # Return to management and add an allowed user via its manual path.
 Escape
 Wait+Screen@10s /Microsoft Teams is configured/
-Down
+Up 20
+Down 2
+Enter
+Wait+Screen@10s /Microsoft Teams > Add users or groups/
+Wait+Screen@10s /User/
 Enter
 Wait+Screen@10s /Microsoft Teams > Allowed users/
-Wait+Screen@10s /Press M for the advanced canonical-ID path/
-Type "m"
-Wait+Screen@10s /Microsoft Teams > Allowed Users/
+Enter
 Wait+Screen@10s /Advanced path: enter canonical Entra user IDs/
 Type ",77777777-7777-7777-7777-777777777777"
 Enter
@@ -160,12 +165,20 @@ Wait+Screen@10s /Allowed users saved/
 
 # Repeat for allowed groups. This covers the real focused text-input route,
 # rather than a view-model-only persistence path.
+Escape
+Wait+Screen@10s /Which channels would you like to connect/
+Up 3
+Down 3
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+Up 20
+Down 2
+Enter
+Wait+Screen@10s /Microsoft Teams > Add users or groups/
 Down
 Enter
 Wait+Screen@10s /Microsoft Teams > Allowed groups/
-Wait+Screen@10s /Press M for the advanced canonical-ID path/
-Type "m"
-Wait+Screen@10s /Microsoft Teams > Allowed Groups/
+Enter
 Wait+Screen@10s /Advanced path: enter canonical Entra group IDs/
 Type ",99999999-9999-9999-9999-999999999999"
 Enter
@@ -174,7 +187,19 @@ Wait+Screen@10s /Allowed group settings saved/
 
 # Enable Group Chat ingress and save a canonical chat ID through the focused
 # text input. The display name never becomes an authorization value.
+Escape
+Wait+Screen@10s /Which channels would you like to connect/
+Up 3
+Down 3
+Enter
+Wait+Screen@10s /Microsoft Teams is configured/
+Up 20
 Down
+Enter
+Wait+Screen@10s /Microsoft Teams > Add a destination/
+Down
+Enter
+Wait+Screen@10s /Microsoft Teams > Find chats containing this user/
 Enter
 Wait+Screen@10s /Microsoft Teams > Group Chats/
 Wait+Screen@10s /Canonical Group Chat IDs/
@@ -185,7 +210,8 @@ Wait+Screen@10s /Microsoft Teams is configured/
 Wait+Screen@10s /Group Chat settings saved/
 
 # Enable supported Teams attachments through the dedicated management control.
-Down
+Up 20
+Down 4
 Enter
 Wait+Screen@10s /Microsoft Teams > Attachments/
 Wait+Screen@10s /Allow supported Teams attachments/

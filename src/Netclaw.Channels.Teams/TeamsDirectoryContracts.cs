@@ -51,6 +51,23 @@ public sealed record TeamsDirectoryChannel(
     string? Description);
 
 /// <summary>
+/// A display-only Group Chat record. The ID remains the only value that can
+/// enter Teams configuration or authorization.
+/// </summary>
+public sealed record TeamsDirectoryGroupChat(
+    string Id,
+    string? Topic,
+    IReadOnlyList<string> ParticipantPreview);
+
+/// <summary>
+/// One bounded Group Chat discovery page. Continuation is opaque to callers.
+/// It cannot be persisted or reused for a different selected user.
+/// </summary>
+public sealed record TeamsDirectoryGroupChatPage(
+    IReadOnlyList<TeamsDirectoryGroupChat> Chats,
+    string? Continuation);
+
+/// <summary>
 /// A safe, stable outcome classification for directory operations. Reason codes
 /// are deliberately non-diagnostic and never carry credentials or principal IDs.
 /// </summary>
@@ -129,6 +146,30 @@ public interface ITeamsDirectory
         string userId,
         IReadOnlyCollection<string> groupIds,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets one selected user's Group Chat metadata page. Implementations must
+    /// keep Graph continuation URLs private and validate opaque continuations.
+    /// </summary>
+    ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryGroupChatPage>> GetGroupChatsAsync(
+        string userId,
+        int maximumResults,
+        string? continuation = null,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(
+            TeamsDirectoryOperationResult<TeamsDirectoryGroupChatPage>.Unavailable(
+                "teams_directory_group_chat_discovery_unavailable"));
+
+    /// <summary>
+    /// Gets one saved Group Chat's display metadata. A missing permission only
+    /// affects presentation; it never changes the saved canonical authority.
+    /// </summary>
+    ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryGroupChat>> GetGroupChatAsync(
+        string chatId,
+        CancellationToken cancellationToken = default) =>
+        ValueTask.FromResult(
+            TeamsDirectoryOperationResult<TeamsDirectoryGroupChat>.Unavailable(
+                "teams_directory_group_chat_discovery_unavailable"));
 }
 
 /// <summary>

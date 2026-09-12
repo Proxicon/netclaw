@@ -135,6 +135,29 @@ public sealed class TeamsDirectoryDoctorCheckTests : IDisposable
         Assert.Contains("no global user or group", result.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Reports_optional_group_chat_metadata_consent()
+    {
+        WriteConfig(new
+        {
+            Teams = new
+            {
+                Enabled = true,
+                TenantId = "tenant-a",
+                ClientId = "client-a",
+                BotId = "bot-a",
+                AllowGroupChats = true,
+                AllowedGroupChatIds = new[] { "19:group-a@thread.v2" },
+                AllowedUserIds = new[] { "user-a" }
+            }
+        });
+
+        var result = await new TeamsDirectoryDoctorCheck(_paths).RunAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(DoctorSeverity.Pass, result.Severity);
+        Assert.Contains("Chat.ReadBasic.All is optional", result.Message, StringComparison.Ordinal);
+    }
+
     private void WriteConfig(object config)
         => File.WriteAllText(_paths.NetclawConfigPath,
             JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));

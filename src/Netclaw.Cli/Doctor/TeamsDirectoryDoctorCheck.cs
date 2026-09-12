@@ -89,7 +89,7 @@ public sealed class TeamsDirectoryDoctorCheck(NetclawPaths paths) : IDoctorCheck
         return Task.FromResult(DoctorCheckResult.Pass(
             "Teams directory",
             groupChatsEnabled
-                ? "Teams has explicit canonical Group Chat scope and global user authorization."
+                ? "Teams has explicit canonical Group Chat scope and global user authorization. Chat.ReadBasic.All is optional for Group Chat labels and discovery."
                 : "Teams has explicit canonical channel scope. Directory discovery remains optional for manual-ID configuration."));
     }
 

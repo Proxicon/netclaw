@@ -3194,8 +3194,10 @@ public sealed class TeamsSessionBindingActor : ReceivePersistentActor
                 kind: TeamsIngressActivityKind.AdaptiveCardAction,
                 teamId: persistedDestination.TeamId,
                 channelId: persistedDestination.ChannelId);
-            if (TeamsChannelAclPolicy.EvaluateAccess(trustedDestinationActivity, _dependencies.Options).Disposition
-                != TeamsChannelPolicyDisposition.Allowed)
+            var channelPolicy = TeamsPrincipalRequirements.Resolve(trustedDestinationActivity, _dependencies.Options).HasRestriction
+                ? TeamsChannelAclPolicy.EvaluateStructuralAccess(trustedDestinationActivity, _dependencies.Options)
+                : TeamsChannelAclPolicy.EvaluateAccess(trustedDestinationActivity, _dependencies.Options);
+            if (channelPolicy.Disposition != TeamsChannelPolicyDisposition.Allowed)
             {
                 return false;
             }

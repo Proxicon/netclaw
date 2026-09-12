@@ -30,6 +30,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
     private readonly Dictionary<string, TextInputNode> _credentialInputs = [];
     private ChannelType? _credentialInputAdapter;
     private readonly CompositeDisposable _stepSubs = [];
+    private bool _quitAfterCredentialSave;
 
     protected override void OnBound()
     {
@@ -49,7 +50,15 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             ResetTextInputs();
             InvalidateAll();
         }).DisposeWith(Subscriptions);
-        ViewModel.Status.Subscribe(_ => _contentNode?.Invalidate()).DisposeWith(Subscriptions);
+        ViewModel.Status.Subscribe(_ =>
+        {
+            _contentNode?.Invalidate();
+            if (_quitAfterCredentialSave && !ViewModel.IsCredentialSaveInProgress)
+            {
+                _quitAfterCredentialSave = false;
+                ViewModel.RequestQuit();
+            }
+        }).DisposeWith(Subscriptions);
         ViewModel.OnStepContentChanged = () =>
         {
             _contentNode?.Invalidate();
@@ -83,10 +92,17 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AdapterMenu => BuildAdapterMenu(),
                     ChannelsConfigScreen.ChannelPermissions => BuildChannelPermissions(),
                     ChannelsConfigScreen.AddChannel => BuildAddChannel(),
+                    ChannelsConfigScreen.TeamsDestinationAdd => BuildTeamsDestinationAdd(),
+                    ChannelsConfigScreen.TeamsPrincipalAdd => BuildTeamsPrincipalAdd(),
+                    ChannelsConfigScreen.TeamsPrincipalManagement => BuildTeamsPrincipalManagement(),
+                    ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => BuildTeamsPrincipalRemovalConfirm(),
+                    ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm => BuildTeamsChannelPrincipalRemovalConfirm(),
+                    ChannelsConfigScreen.TeamsDestinationRemovalConfirm => BuildTeamsDestinationRemovalConfirm(),
                     ChannelsConfigScreen.TeamsTeamSearch => BuildTeamsTeamSearch(),
                     ChannelsConfigScreen.TeamsChannelSearch => BuildTeamsChannelSearch(),
                     ChannelsConfigScreen.TeamsUserSearch => BuildTeamsUserSearch(),
                     ChannelsConfigScreen.TeamsGroupSearch => BuildTeamsGroupSearch(),
+                    ChannelsConfigScreen.TeamsGroupChatSearch => BuildTeamsGroupChatSearch(),
                     ChannelsConfigScreen.TeamsChannelAccess => BuildTeamsChannelAccess(),
                     ChannelsConfigScreen.AllowedUsers => BuildAllowedUsers(),
                     ChannelsConfigScreen.AllowedGroups => BuildAllowedGroups(),
@@ -175,6 +191,8 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 line = $"{FocusPrefix(focused)}{row.DisplayName}";
             else if (row.IsDirectMessage)
                 line = $"{FocusPrefix(focused)}{Column(row.DisplayName, displayNameWidth)} {AudienceCycle(row.Audience)}";
+            else if (row.IsGroupChat)
+                line = $"{FocusPrefix(focused)}{Column(row.DisplayName, displayNameWidth)} [Team audience]   Group Chat ingress";
             else
                 line = $"{FocusPrefix(focused)}{Column(row.DisplayName, displayNameWidth)} {AudienceCycle(row.Audience)}   {MentionField(row.MentionRequired)}";
 
@@ -197,6 +215,9 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         var row = rows[Math.Clamp(ViewModel.ChannelRowIndex, 0, rows.Count - 1)];
         if (row.IsAction)
             return Hint("  Audience controls which tools and data this channel can use.");
+
+        if (row.IsGroupChat)
+            return Hint("  Group Chats use Team audience and global principal rules. Delete removes this canonical chat ID.");
 
         var description = Layouts.Vertical()
             .WithChild(Hint($"  {AudienceLabel(row.Audience)} — {AudienceDescription(row.Audience)}"));
@@ -233,6 +254,23 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Hint("  Change its audience afterward with ←/→ on the channel list."));
     }
 
+    private ILayoutNode BuildTeamsDestinationAdd()
+    {
+        var options = new[] { "Channel", "Group Chat" };
+        var layout = Layouts.Vertical()
+            .WithChild(Header("  Microsoft Teams > Add a destination"))
+            .WithChild(Hint("  Select a channel or a Group Chat. Both paths save canonical identities."))
+            .WithChild(Layouts.Empty().Height(1));
+
+        for (var i = 0; i < options.Length; i++)
+        {
+            var focused = ViewModel.TeamsDestinationAddIndex == i;
+            layout = layout.WithChild(Row($"{FocusPrefix(focused)}{options[i]}", focused));
+        }
+
+        return layout;
+    }
+
     private ILayoutNode BuildTeamsTeamSearch()
     {
         var input = EnsureSingleInput(ChannelsConfigScreen.TeamsTeamSearch, "teams-search", ViewModel.DirectorySearchInput, "Search Teams by name");
@@ -248,7 +286,11 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             layout = layout.WithChild(Row($"{FocusPrefix(ViewModel.DirectoryResultIndex == index)}{label}", ViewModel.DirectoryResultIndex == index));
         }
 
-        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Press M for the advanced canonical-ID path."));
+        layout = layout.WithChild(Row(
+            $"{FocusPrefix(ViewModel.IsAdvancedTeamsDirectoryActionSelected())}Advanced canonical-ID entry",
+            ViewModel.IsAdvancedTeamsDirectoryActionSelected()));
+
+        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Advanced entry does not verify a channel exists."));
     }
 
     private ILayoutNode BuildTeamsChannelSearch()
@@ -267,7 +309,11 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             layout = layout.WithChild(Row($"{FocusPrefix(ViewModel.DirectoryResultIndex == index)}{teamLabel} / {label}", ViewModel.DirectoryResultIndex == index));
         }
 
-        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Press M for the advanced canonical-ID path."));
+        layout = layout.WithChild(Row(
+            $"{FocusPrefix(ViewModel.IsAdvancedTeamsDirectoryActionSelected())}Advanced canonical-ID entry",
+            ViewModel.IsAdvancedTeamsDirectoryActionSelected()));
+
+        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Use Advanced entry when directory search is unavailable."));
     }
 
     private ILayoutNode BuildTeamsUserSearch()
@@ -275,9 +321,11 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         var input = EnsureSingleInput(ChannelsConfigScreen.TeamsUserSearch, "teams-user-search", ViewModel.DirectorySearchInput, "Search users by name, UPN, or mail");
         input.OnFocused();
         var layout = Layouts.Vertical()
-            .WithChild(Header(ViewModel.EditingChannelAccess is null
-                ? "  Microsoft Teams > Allowed users"
-                : "  Microsoft Teams > Channel allowed users"))
+            .WithChild(Header(ViewModel.IsGroupChatDiscovery
+                ? "  Microsoft Teams > Find chats containing this user"
+                : ViewModel.EditingChannelAccess is null
+                    ? "  Microsoft Teams > Allowed users"
+                    : "  Microsoft Teams > Channel allowed users"))
             .WithChild(Hint("  Search identity metadata. Netclaw saves only the canonical Entra object ID."))
             .WithChild(WizardStepHelpers.BuildTextInputPanel(input, "User search"));
 
@@ -287,7 +335,11 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             layout = layout.WithChild(Row($"{FocusPrefix(ViewModel.DirectoryResultIndex == index)}{label}", ViewModel.DirectoryResultIndex == index));
         }
 
-        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Press M for the advanced canonical-ID path."));
+        layout = layout.WithChild(Row(
+            $"{FocusPrefix(ViewModel.IsAdvancedTeamsDirectoryActionSelected())}Advanced canonical-ID entry",
+            ViewModel.IsAdvancedTeamsDirectoryActionSelected()));
+
+        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Use Advanced entry to enter a canonical Entra user ID."));
     }
 
     private ILayoutNode BuildTeamsGroupSearch()
@@ -307,7 +359,138 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             layout = layout.WithChild(Row($"{FocusPrefix(ViewModel.DirectoryResultIndex == index)}{label}", ViewModel.DirectoryResultIndex == index));
         }
 
-        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Press M for the advanced canonical-ID path."));
+        layout = layout.WithChild(Row(
+            $"{FocusPrefix(ViewModel.IsAdvancedTeamsDirectoryActionSelected())}Advanced canonical-ID entry",
+            ViewModel.IsAdvancedTeamsDirectoryActionSelected()));
+
+        return layout.WithChild(Layouts.Empty().Height(1)).WithChild(Hint("  Use Advanced entry to enter a canonical Entra group ID."));
+    }
+
+    private ILayoutNode BuildTeamsGroupChatSearch()
+    {
+        var participant = ViewModel.SelectedGroupChatParticipant;
+        var participantLabel = participant is null ? "selected user" : FormatTeamsUser(participant);
+        var input = EnsureSingleInput(
+            ChannelsConfigScreen.TeamsGroupChatSearch,
+            "group-chat-search",
+            ViewModel.GroupChatSearchInput,
+            "Filter loaded chats by topic or participant");
+        input.OnFocused();
+        var layout = Layouts.Vertical()
+            .WithChild(Header("  Microsoft Teams > Find Group Chats"))
+            .WithChild(Hint($"  Find chats containing {participantLabel}. This selection does not grant access."))
+            .WithChild(Hint("  Discovery does not prove that the Netclaw app is installed in a chat."))
+            .WithChild(WizardStepHelpers.BuildTextInputPanel(input, "Loaded chat filter"))
+            .WithChild(Layouts.Empty().Height(1));
+
+        foreach (var (chat, index) in ViewModel.FilteredGroupChatSearchResults.Select((chat, index) => (chat, index)))
+        {
+            var label = string.IsNullOrWhiteSpace(chat.Topic)
+                ? chat.ParticipantPreview.Count > 0 ? string.Join(", ", chat.ParticipantPreview) : "Group Chat"
+                : chat.Topic;
+            var suffix = ChannelsConfigViewModel.GetGroupChatDisplaySuffix(chat.Id);
+            layout = layout.WithChild(Row(
+                $"{FocusPrefix(ViewModel.DirectoryResultIndex == index)}{label} · {suffix}",
+                ViewModel.DirectoryResultIndex == index));
+        }
+
+        if (ViewModel.HasGroupChatContinuation)
+        {
+            var focused = ViewModel.DirectoryResultIndex == ViewModel.FilteredGroupChatSearchResults.Count;
+            layout = layout.WithChild(Row($"{FocusPrefix(focused)}Load more", focused));
+        }
+
+        layout = layout.WithChild(Row(
+            $"{FocusPrefix(ViewModel.IsAdvancedTeamsDirectoryActionSelected())}Advanced canonical-ID entry",
+            ViewModel.IsAdvancedTeamsDirectoryActionSelected()));
+
+        return layout.WithChild(Hint("  Advanced entry does not verify chat type or app installation."));
+    }
+
+    private ILayoutNode BuildTeamsPrincipalAdd()
+    {
+        var options = new[] { "User", "Group" };
+        var layout = Layouts.Vertical()
+            .WithChild(Header("  Microsoft Teams > Add users or groups"))
+            .WithChild(Hint("  Search friendly identity data. Netclaw saves only canonical Entra object IDs."))
+            .WithChild(Layouts.Empty().Height(1));
+
+        for (var i = 0; i < options.Length; i++)
+            layout = layout.WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalManagementIndex == i)}{options[i]}", ViewModel.TeamsPrincipalManagementIndex == i));
+
+        return layout;
+    }
+
+    private ILayoutNode BuildTeamsPrincipalManagement()
+    {
+        var rows = ViewModel.GetTeamsPrincipalRows();
+        var layout = Layouts.Vertical()
+            .WithChild(Header("  Microsoft Teams > Manage users and groups"))
+            .WithChild(Hint($"  Filter: [< {ViewModel.TeamsPrincipalFilterLabel} >]. Existing channel rules remain separate."))
+            .WithChild(Layouts.Empty().Height(1));
+
+        if (rows.Count == 0)
+            layout = layout.WithChild(Hint("  No saved global principals match this filter."));
+
+        foreach (var (row, index) in rows.Select((row, index) => (row, index)))
+        {
+            var focused = ViewModel.TeamsPrincipalManagementIndex == index;
+            layout = layout.WithChild(Row($"{FocusPrefix(focused)}{row.Label} · {row.Scope}", focused));
+        }
+
+        var addIndex = rows.Count;
+        var doneIndex = addIndex + 1;
+        layout = layout.WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalManagementIndex == addIndex)}Add user or group", ViewModel.TeamsPrincipalManagementIndex == addIndex));
+        return layout.WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalManagementIndex == doneIndex)}Done", ViewModel.TeamsPrincipalManagementIndex == doneIndex));
+    }
+
+    private ILayoutNode BuildTeamsPrincipalRemovalConfirm()
+    {
+        var principal = ViewModel.PendingPrincipalRemoval;
+        if (principal is null)
+            return Layouts.Empty();
+
+        return Layouts.Vertical()
+            .WithChild(Header("  Remove global Teams principal?"))
+            .WithChild(Hint($"  {principal.Label}"))
+            .WithChild(Hint($"  Canonical ID: {principal.Id}"))
+            .WithChild(Hint($"  {ViewModel.TeamsPrincipalRemovalImpact}"))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalRemovalIndex == 0)}Cancel", ViewModel.TeamsPrincipalRemovalIndex == 0))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalRemovalIndex == 1)}Remove", ViewModel.TeamsPrincipalRemovalIndex == 1));
+    }
+
+    private ILayoutNode BuildTeamsChannelPrincipalRemovalConfirm()
+    {
+        var principal = ViewModel.PendingChannelPrincipalRemoval;
+        if (principal is null)
+            return Layouts.Empty();
+
+        return Layouts.Vertical()
+            .WithChild(Header("  Remove exact Teams channel principal?"))
+            .WithChild(Hint($"  Channel: {principal.TeamId} / {principal.ChannelId}"))
+            .WithChild(Hint($"  {principal.Label}"))
+            .WithChild(Hint($"  Canonical ID: {principal.PrincipalId}"))
+            .WithChild(Hint($"  {ViewModel.TeamsChannelPrincipalRemovalImpact}"))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsChannelPrincipalRemovalIndex == 0)}Cancel", ViewModel.TeamsChannelPrincipalRemovalIndex == 0))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsChannelPrincipalRemovalIndex == 1)}Remove", ViewModel.TeamsChannelPrincipalRemovalIndex == 1));
+    }
+
+    private ILayoutNode BuildTeamsDestinationRemovalConfirm()
+    {
+        var destination = ViewModel.PendingTeamsDestinationRemoval;
+        if (destination is null)
+            return Layouts.Empty();
+
+        return Layouts.Vertical()
+            .WithChild(Header("  Remove Teams destination?"))
+            .WithChild(Hint($"  {destination.DisplayName}"))
+            .WithChild(Hint($"  Canonical ID: {destination.Id}"))
+            .WithChild(Hint("  This removal affects only this configured destination after configuration activation."))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsDestinationRemovalIndex == 0)}Cancel", ViewModel.TeamsDestinationRemovalIndex == 0))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsDestinationRemovalIndex == 1)}Remove", ViewModel.TeamsDestinationRemovalIndex == 1));
     }
 
     private ILayoutNode BuildTeamsChannelAccess()
@@ -320,15 +503,12 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Header("  Microsoft Teams > Channel access"))
             .WithChild(Hint("  These restrictions union with global Teams users and groups."))
             .WithChild(Layouts.Empty().Height(1));
-        layout = layout.WithChild(Row(
-            $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == 0)}Allowed users ({access.AllowedUserIds.Length})",
-            ViewModel.ChannelAccessRowIndex == 0));
-        layout = layout.WithChild(Row(
-            $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == 1)}Allowed groups ({access.AllowedGroupIds.Length})",
-            ViewModel.ChannelAccessRowIndex == 1));
-        layout = layout.WithChild(Row(
-            $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == 2)}Done",
-            ViewModel.ChannelAccessRowIndex == 2));
+        foreach (var (row, index) in ViewModel.GetTeamsChannelAccessRows().Select((row, index) => (row, index)))
+        {
+            layout = layout.WithChild(Row(
+                $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == index)}{row.Label}",
+                ViewModel.ChannelAccessRowIndex == index));
+        }
         return layout;
     }
 
@@ -479,10 +659,17 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.ChannelPermissions when ViewModel.ActiveAdapterType == ChannelType.Teams => "  Left/right sets audience. Space toggles @mention for every selected Teams channel. Enter on Done finishes. a adds, Delete removes.",
                     ChannelsConfigScreen.ChannelPermissions => "  Left/right sets audience. Space toggles Require @mention. Enter on Done finishes. a adds, Delete removes.",
                     ChannelsConfigScreen.AddChannel => "  Enter applies the channel draft. Esc cancels.",
-                    ChannelsConfigScreen.TeamsTeamSearch => "  Enter searches, then selects the Team. M opens the advanced canonical-ID path.",
-                    ChannelsConfigScreen.TeamsChannelSearch => "  Enter saves the selected channel. M opens the advanced canonical-ID path.",
-                    ChannelsConfigScreen.TeamsUserSearch => "  Enter searches, then adds the selected user. M opens the advanced canonical-ID path.",
-                    ChannelsConfigScreen.TeamsGroupSearch => "  Enter searches, then adds the selected group. M opens the advanced canonical-ID path.",
+                    ChannelsConfigScreen.TeamsTeamSearch => "  Enter searches, then selects the Team. Type ordinary text in the search field.",
+                    ChannelsConfigScreen.TeamsChannelSearch => "  Enter saves the selected channel.",
+                    ChannelsConfigScreen.TeamsUserSearch => "  Enter searches, then adds the selected user. Type ordinary text in the search field.",
+                    ChannelsConfigScreen.TeamsGroupSearch => "  Enter searches, then adds the selected group. Type ordinary text in the search field.",
+                    ChannelsConfigScreen.TeamsDestinationAdd => "  Select Channel or Group Chat. Esc returns to the menu.",
+                    ChannelsConfigScreen.TeamsPrincipalAdd => "  Select a principal type, then search a friendly identity.",
+                    ChannelsConfigScreen.TeamsPrincipalManagement => "  Left/right changes the filter. Enter opens Add, Done, or removal confirmation.",
+                    ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => "  Confirm removal. This only removes the selected global grant.",
+                    ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm => "  Confirm removal. This can change the exact channel sender rule.",
+                    ChannelsConfigScreen.TeamsDestinationRemovalConfirm => "  Confirm removal. The destination becomes denied after configuration activation.",
+                    ChannelsConfigScreen.TeamsGroupChatSearch => "  Type to filter loaded chats. Enter selects, loads more, or opens advanced entry.",
                     ChannelsConfigScreen.TeamsChannelAccess => "  Enter edits a principal list. Channel rules only restrict this exact Team and channel.",
                     ChannelsConfigScreen.AllowedUsers => "  Use comma-separated user IDs. Blank means unrestricted users in allowed channels.",
                     ChannelsConfigScreen.AllowedGroups => "  Use comma-separated canonical Entra group IDs. Blank removes group-derived access.",
@@ -520,10 +707,17 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AdapterMenu => " [↑/↓] Navigate  [Enter] Select  [Esc] Channels  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.ChannelPermissions => " [↑/↓] Navigate  [←/→] Audience  [Space] @mention  [Enter] Done  [Del] Remove  [Esc] Menu",
                     ChannelsConfigScreen.AddChannel => " [Type] Channel  [Enter] Resolve & add  [Esc] Channels  [Ctrl+Q] Quit",
-                    ChannelsConfigScreen.TeamsTeamSearch => " [Type] Search  [Enter] Search/select  [↑/↓] Select  [M] Manual ID  [Esc] Channels",
-                    ChannelsConfigScreen.TeamsChannelSearch => " [↑/↓] Select  [Enter] Save channel  [M] Manual ID  [Esc] Teams",
-                    ChannelsConfigScreen.TeamsUserSearch => " [Type] Search  [Enter] Search/add  [↑/↓] Select  [M] Manual ID  [Esc] Menu",
-                    ChannelsConfigScreen.TeamsGroupSearch => " [Type] Search  [Enter] Search/add  [↑/↓] Select  [M] Manual ID  [Esc] Menu",
+                    ChannelsConfigScreen.TeamsDestinationAdd => " [↑/↓] Navigate  [Enter] Select  [Esc] Menu",
+                    ChannelsConfigScreen.TeamsPrincipalAdd => " [↑/↓] Navigate  [Enter] Select  [Esc] Menu",
+                    ChannelsConfigScreen.TeamsPrincipalManagement => " [↑/↓] Select  [←/→] Filter  [Enter] Remove/open  [Esc] Menu",
+                    ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
+                    ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
+                    ChannelsConfigScreen.TeamsDestinationRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
+                    ChannelsConfigScreen.TeamsTeamSearch => " [Type] Search  [Enter] Search/select  [↑/↓] Select  [Esc] Channels",
+                    ChannelsConfigScreen.TeamsChannelSearch => " [↑/↓] Select  [Enter] Save channel  [Esc] Teams",
+                    ChannelsConfigScreen.TeamsUserSearch => " [Type] Search  [Enter] Search/add  [↑/↓] Select  [Esc] Menu",
+                    ChannelsConfigScreen.TeamsGroupSearch => " [Type] Search  [Enter] Search/add  [↑/↓] Select  [Esc] Menu",
+                    ChannelsConfigScreen.TeamsGroupChatSearch => " [Type] Filter  [↑/↓] Select  [Enter] Review/load more/advanced  [Esc] Back",
                     ChannelsConfigScreen.TeamsChannelAccess => " [↑/↓] Select  [Enter] Edit  [Esc] Channels",
                     ChannelsConfigScreen.AllowedUsers => " [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
                     ChannelsConfigScreen.AllowedGroups => " [Enter] Apply  [Esc] Menu  [Ctrl+Q] Quit",
@@ -554,15 +748,17 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
     private bool HandleKeyInfo(ConsoleKeyInfo keyInfo)
     {
-        if (keyInfo.Key == ConsoleKey.Q && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            ViewModel.RequestQuit();
-            return true;
-        }
-
         if (ViewModel.Screen.Value == ChannelsConfigScreen.RotateCredentials
             && ViewModel.IsCredentialSaveInProgress)
         {
+            _quitAfterCredentialSave |= keyInfo.Key == ConsoleKey.Q
+                                      && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control);
+            return true;
+        }
+
+        if (keyInfo.Key == ConsoleKey.Q && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control))
+        {
+            ViewModel.RequestQuit();
             return true;
         }
 
@@ -601,7 +797,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
     private void HandlePaste(PasteEvent paste)
     {
-        if (ViewModel.Screen.Value is ChannelsConfigScreen.AddChannel or ChannelsConfigScreen.TeamsTeamSearch or ChannelsConfigScreen.TeamsUserSearch or ChannelsConfigScreen.TeamsGroupSearch or ChannelsConfigScreen.AllowedUsers or ChannelsConfigScreen.AllowedGroups or ChannelsConfigScreen.GroupChats)
+        if (ViewModel.Screen.Value is ChannelsConfigScreen.AddChannel or ChannelsConfigScreen.TeamsTeamSearch or ChannelsConfigScreen.TeamsUserSearch or ChannelsConfigScreen.TeamsGroupSearch or ChannelsConfigScreen.TeamsGroupChatSearch or ChannelsConfigScreen.AllowedUsers or ChannelsConfigScreen.AllowedGroups or ChannelsConfigScreen.GroupChats)
         {
             _singleInput?.HandlePaste(paste);
             StageSingleInput();
@@ -655,6 +851,24 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             case ChannelsConfigScreen.AddChannel:
                 HandleAddChannelKey(keyInfo);
                 break;
+            case ChannelsConfigScreen.TeamsDestinationAdd:
+                HandleTeamsDestinationAddKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.TeamsPrincipalAdd:
+                HandleTeamsPrincipalAddKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.TeamsPrincipalManagement:
+                HandleTeamsPrincipalManagementKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.TeamsPrincipalRemovalConfirm:
+                HandleTeamsPrincipalRemovalConfirmKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm:
+                HandleTeamsChannelPrincipalRemovalConfirmKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.TeamsDestinationRemovalConfirm:
+                HandleTeamsDestinationRemovalConfirmKey(keyInfo);
+                break;
             case ChannelsConfigScreen.TeamsTeamSearch:
                 HandleTeamsTeamSearchKey(keyInfo);
                 break;
@@ -666,6 +880,9 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 break;
             case ChannelsConfigScreen.TeamsGroupSearch:
                 HandleTeamsGroupSearchKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.TeamsGroupChatSearch:
+                HandleTeamsGroupChatSearchKey(keyInfo);
                 break;
             case ChannelsConfigScreen.TeamsChannelAccess:
                 HandleTeamsChannelAccessKey(keyInfo);
@@ -743,7 +960,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 ViewModel.BeginAddChannel();
                 break;
             case ConsoleKey.Delete:
-                ViewModel.RemoveSelectedChannel();
+                if (ViewModel.ActiveAdapterType == ChannelType.Teams)
+                    ViewModel.BeginTeamsDestinationRemoval();
+                else
+                    ViewModel.RemoveSelectedChannel();
                 break;
         }
     }
@@ -763,14 +983,110 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         StageSingleInput();
     }
 
+    private void HandleTeamsDestinationAddKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsDestinationAdd(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsDestinationAdd(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ActivateTeamsDestinationAdd();
+                break;
+        }
+    }
+
+    private void HandleTeamsPrincipalAddKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsPrincipalAdd(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsPrincipalAdd(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ActivateTeamsPrincipalAdd();
+                break;
+        }
+    }
+
+    private void HandleTeamsPrincipalManagementKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsPrincipalManagement(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsPrincipalManagement(1);
+                break;
+            case ConsoleKey.LeftArrow:
+                ViewModel.ChangeTeamsPrincipalFilter(-1);
+                break;
+            case ConsoleKey.RightArrow:
+                ViewModel.ChangeTeamsPrincipalFilter(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ActivateTeamsPrincipalManagement();
+                break;
+        }
+    }
+
+    private void HandleTeamsPrincipalRemovalConfirmKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsPrincipalRemoval(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsPrincipalRemoval(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ConfirmTeamsPrincipalRemoval(ViewModel.TeamsPrincipalRemovalIndex == 1);
+                break;
+        }
+    }
+
+    private void HandleTeamsChannelPrincipalRemovalConfirmKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsChannelPrincipalRemoval(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsChannelPrincipalRemoval(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ConfirmTeamsChannelPrincipalRemoval(ViewModel.TeamsChannelPrincipalRemovalIndex == 1);
+                break;
+        }
+    }
+
+    private void HandleTeamsDestinationRemovalConfirmKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsDestinationRemoval(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsDestinationRemoval(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ConfirmTeamsDestinationRemoval(ViewModel.TeamsDestinationRemovalIndex == 1);
+                break;
+        }
+    }
+
     private void HandleTeamsTeamSearchKey(ConsoleKeyInfo keyInfo)
     {
-        if (keyInfo.Key == ConsoleKey.M)
-        {
-            ViewModel.BeginManualTeamsChannelEntry();
-            return;
-        }
-
         if (keyInfo.Key == ConsoleKey.UpArrow)
         {
             ViewModel.MoveDirectoryResult(-1);
@@ -786,8 +1102,13 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         if (keyInfo.Key == ConsoleKey.Enter)
         {
             StageSingleInput();
-            if (ViewModel.TeamSearchResults.Count == 0)
+            if (ViewModel.IsAdvancedTeamsDirectoryActionSelected()
+                && string.IsNullOrWhiteSpace(ViewModel.DirectorySearchInput))
+                ViewModel.BeginManualTeamsChannelEntry();
+            else if (ViewModel.TeamSearchResults.Count == 0)
                 _ = ViewModel.SearchTeamsFromInputAsync();
+            else if (ViewModel.IsAdvancedTeamsDirectoryActionSelected())
+                ViewModel.BeginManualTeamsChannelEntry();
             else
                 _ = ViewModel.SelectTeamAndSearchChannelsAsync();
             return;
@@ -802,9 +1123,6 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
     {
         switch (keyInfo.Key)
         {
-            case ConsoleKey.M:
-                ViewModel.BeginManualTeamsChannelEntry();
-                break;
             case ConsoleKey.UpArrow:
                 ViewModel.MoveDirectoryResult(-1);
                 break;
@@ -819,12 +1137,6 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
     private void HandleTeamsUserSearchKey(ConsoleKeyInfo keyInfo)
     {
-        if (keyInfo.Key == ConsoleKey.M)
-        {
-            ViewModel.BeginManualTeamsUserEntry();
-            return;
-        }
-
         if (keyInfo.Key == ConsoleKey.UpArrow)
         {
             ViewModel.MoveDirectoryResult(-1);
@@ -840,7 +1152,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         if (keyInfo.Key == ConsoleKey.Enter)
         {
             StageSingleInput();
-            if (ViewModel.UserSearchResults.Count == 0)
+            if (ViewModel.IsAdvancedTeamsDirectoryActionSelected()
+                && string.IsNullOrWhiteSpace(ViewModel.DirectorySearchInput))
+                ViewModel.BeginAdvancedTeamsUserEntry();
+            else if (ViewModel.UserSearchResults.Count == 0)
                 _ = ViewModel.SearchUsersFromInputAsync();
             else
                 ViewModel.AddSelectedTeamsUser();
@@ -854,12 +1169,6 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
     private void HandleTeamsGroupSearchKey(ConsoleKeyInfo keyInfo)
     {
-        if (keyInfo.Key == ConsoleKey.M)
-        {
-            ViewModel.BeginManualTeamsGroupEntry();
-            return;
-        }
-
         if (keyInfo.Key == ConsoleKey.UpArrow)
         {
             ViewModel.MoveDirectoryResult(-1);
@@ -875,7 +1184,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         if (keyInfo.Key == ConsoleKey.Enter)
         {
             StageSingleInput();
-            if (ViewModel.GroupSearchResults.Count == 0)
+            if (ViewModel.IsAdvancedTeamsDirectoryActionSelected()
+                && string.IsNullOrWhiteSpace(ViewModel.DirectorySearchInput))
+                ViewModel.BeginManualTeamsGroupEntry();
+            else if (ViewModel.GroupSearchResults.Count == 0)
                 _ = ViewModel.SearchGroupsFromInputAsync();
             else
                 ViewModel.AddSelectedTeamsGroup();
@@ -885,6 +1197,36 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         ViewModel.ResetTeamsPrincipalSearchResults();
         _singleInput?.HandleInput(keyInfo);
         StageSingleInput();
+    }
+
+    private void HandleTeamsGroupChatSearchKey(ConsoleKeyInfo keyInfo)
+    {
+        if (keyInfo.Key == ConsoleKey.UpArrow)
+        {
+            ViewModel.MoveDirectoryResult(-1);
+            return;
+        }
+
+        if (keyInfo.Key == ConsoleKey.DownArrow)
+        {
+            ViewModel.MoveDirectoryResult(1);
+            return;
+        }
+
+        if (keyInfo.Key != ConsoleKey.Enter)
+        {
+            _singleInput?.HandleInput(keyInfo);
+            StageSingleInput();
+            return;
+        }
+
+        if (ViewModel.DirectoryResultIndex < ViewModel.FilteredGroupChatSearchResults.Count)
+            ViewModel.SelectGroupChatForReview();
+        else if (ViewModel.DirectoryResultIndex == ViewModel.FilteredGroupChatSearchResults.Count
+                 && ViewModel.HasGroupChatContinuation)
+            ViewModel.LoadMoreGroupChats();
+        else
+            ViewModel.BeginManualGroupChatEntry();
     }
 
     private void HandleTeamsChannelAccessKey(ConsoleKeyInfo keyInfo)
@@ -1048,7 +1390,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         string placeholder)
     {
         if (_singleInput is not null && _singleInputScreen == screen && string.Equals(_singleInputKey, key, StringComparison.Ordinal))
+        {
+            WizardStepHelpers.SyncInputToViewModel(_singleInput, StageSingleInput, CreateCallbacks());
             return _singleInput;
+        }
 
         _singleInput = new TextInputNode().WithPlaceholder(placeholder);
         _singleInput.Text = seed ?? string.Empty;
@@ -1056,6 +1401,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             _singleInput.HandleInput(new ConsoleKeyInfo('\0', ConsoleKey.End, shift: false, alt: false, control: false));
         _singleInputScreen = screen;
         _singleInputKey = key;
+        WizardStepHelpers.SyncInputToViewModel(_singleInput, StageSingleInput, CreateCallbacks());
         return _singleInput;
     }
 
@@ -1068,7 +1414,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         }
 
         if (_credentialInputs.TryGetValue(field.Key, out var existing))
+        {
+            WizardStepHelpers.SyncInputToViewModel(existing, () => StageCredentialInput(field), CreateCallbacks());
             return existing;
+        }
 
         var input = new TextInputNode().WithPlaceholder(field.Placeholder);
         if (field.IsSecret)
@@ -1079,6 +1428,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             input.HandleInput(new ConsoleKeyInfo('\0', ConsoleKey.End, shift: false, alt: false, control: false));
 
         _credentialInputs[field.Key] = input;
+        WizardStepHelpers.SyncInputToViewModel(input, () => StageCredentialInput(field), CreateCallbacks());
         return input;
     }
 
@@ -1087,9 +1437,11 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         if (_singleInputScreen == ChannelsConfigScreen.AddChannel)
             ViewModel.AddChannelInput = _singleInput?.Text;
         else if (_singleInputScreen == ChannelsConfigScreen.TeamsTeamSearch)
-            ViewModel.DirectorySearchInput = _singleInput?.Text;
+            ViewModel.StageTeamsDirectorySearchInput(_singleInput?.Text);
         else if (_singleInputScreen is ChannelsConfigScreen.TeamsUserSearch or ChannelsConfigScreen.TeamsGroupSearch)
-            ViewModel.DirectorySearchInput = _singleInput?.Text;
+            ViewModel.StageTeamsDirectorySearchInput(_singleInput?.Text);
+        else if (_singleInputScreen == ChannelsConfigScreen.TeamsGroupChatSearch)
+            ViewModel.GroupChatSearchInput = _singleInput?.Text;
         else if (_singleInputScreen == ChannelsConfigScreen.AllowedUsers)
             ViewModel.AllowedUsersInput = _singleInput?.Text;
         else if (_singleInputScreen == ChannelsConfigScreen.AllowedGroups)

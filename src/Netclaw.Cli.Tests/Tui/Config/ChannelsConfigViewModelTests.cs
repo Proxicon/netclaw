@@ -74,6 +74,302 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Cancelled_global_user_entry_does_not_redirect_channel_user_entry()
+    {
+        WriteTeamsConfig(enabled: true, groupChats: []);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginTeamsPrincipalAdd();
+        vm.ActivateTeamsPrincipalAdd();
+        vm.BeginManualTeamsUserEntry();
+        vm.GoBack();
+        Assert.Equal(ChannelsConfigScreen.AdapterMenu, vm.Screen.Value);
+
+        vm.ActivateManagementMenuItem();
+        vm.ActivateSelectedChannelRow();
+        vm.ActivateChannelAccessRow();
+        vm.GoBack();
+        Assert.Equal(ChannelsConfigScreen.TeamsChannelAccess, vm.Screen.Value);
+
+        vm.ActivateChannelAccessRow();
+        vm.AddDiscoveredTeamsUser(new TeamsDirectoryUser(
+            "22222222-2222-2222-2222-222222222222", "Ada Lovelace", "ada@example.test", null));
+        await vm.PendingConfigWrite;
+
+        var teams = vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        Assert.Null(teams.AllowedUserIdsInput);
+        Assert.Equal(
+            ["22222222-2222-2222-2222-222222222222"],
+            Assert.Single(teams.ChannelAccessOverrides).AllowedUserIds);
+    }
+
+    [Fact]
+    public async Task Cancelled_global_group_entry_does_not_redirect_channel_group_entry()
+    {
+        WriteTeamsConfig(enabled: true, groupChats: []);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginTeamsPrincipalAdd();
+        vm.MoveTeamsPrincipalAdd(1);
+        vm.ActivateTeamsPrincipalAdd();
+        vm.BeginManualTeamsGroupEntry();
+        vm.GoBack();
+        Assert.Equal(ChannelsConfigScreen.AdapterMenu, vm.Screen.Value);
+
+        vm.ActivateManagementMenuItem();
+        vm.ActivateSelectedChannelRow();
+        vm.MoveChannelAccessRow(1);
+        vm.ActivateChannelAccessRow();
+        vm.GoBack();
+        Assert.Equal(ChannelsConfigScreen.TeamsChannelAccess, vm.Screen.Value);
+
+        vm.ActivateChannelAccessRow();
+        vm.AddDiscoveredTeamsGroup(new TeamsDirectoryGroup(
+            "33333333-3333-3333-3333-333333333333", "Operations", "ops@example.test", TeamsDirectoryGroupKind.Security));
+        await vm.PendingConfigWrite;
+
+        var teams = vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        Assert.Null(teams.AllowedGroupIdsInput);
+        Assert.Equal(
+            ["33333333-3333-3333-3333-333333333333"],
+            Assert.Single(teams.ChannelAccessOverrides).AllowedGroupIds);
+    }
+
+    [Fact]
+    public async Task Group_chat_discovery_ends_before_a_later_global_user_entry()
+    {
+        WriteTeamsConfig(enabled: true, groupChats: []);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginGroupChatDiscovery();
+        vm.BeginManualGroupChatEntry();
+        vm.AllowedGroupChatsInput = "19:operations@thread.v2";
+        vm.ApplyGroupChats();
+        await vm.PendingConfigWrite;
+
+        vm.BeginTeamsPrincipalAdd();
+        vm.ActivateTeamsPrincipalAdd();
+        vm.BeginAdvancedTeamsUserEntry();
+
+        Assert.Equal(ChannelsConfigScreen.AllowedUsers, vm.Screen.Value);
+        Assert.False(vm.IsGroupChatDiscovery);
+    }
+
+    [Fact]
+    public async Task Disabled_Teams_destination_removal_persists_after_reopen()
+    {
+        WriteTeamsConfig(enabled: false, groupChats: ["19:operations@thread.v2"]);
+        using (var vm = CreateViewModel())
+        {
+            vm.OpenAdapterManagement(ChannelType.Teams);
+            vm.ActivateManagementMenuItem();
+            vm.MoveChannelRow(1);
+            vm.BeginTeamsDestinationRemoval();
+            vm.MoveTeamsDestinationRemoval(1);
+            vm.ConfirmTeamsDestinationRemoval(remove: true);
+            Assert.Null(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedGroupChatIdsInput);
+            await vm.PendingConfigWrite;
+        }
+
+        using var reopened = CreateViewModel();
+        var teams = reopened.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        Assert.False(reopened.Step.IsAdapterEnabled(ChannelType.Teams));
+        Assert.Null(teams.AllowedGroupChatIdsInput);
+    }
+
+    [Fact]
+    public async Task Disabled_Teams_channel_removal_persists_destination_and_exact_access_changes_after_reopen()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": false,
+                "TenantId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ClientId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "BotId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+                "ChannelAccessOverrides": [{
+                  "TeamId": "team-a",
+                  "ChannelId": "channel-a",
+                  "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"]
+                }]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-test-secret" } }""");
+
+        using (var vm = CreateViewModel())
+        {
+            vm.OpenAdapterManagement(ChannelType.Teams);
+            vm.ActivateManagementMenuItem();
+            vm.BeginTeamsDestinationRemoval();
+            vm.MoveTeamsDestinationRemoval(1);
+            vm.ConfirmTeamsDestinationRemoval(remove: true);
+            await vm.PendingConfigWrite;
+        }
+
+        var saved = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.False(ConfigFileHelper.TryGetPathValue(saved, "Teams.AllowedChannelIds", out _));
+        Assert.False(ConfigFileHelper.TryGetPathValue(saved, "Teams.ChannelAccessOverrides", out _));
+
+        using var reopened = CreateViewModel();
+        Assert.DoesNotContain(reopened.GetChannelRows(), row => row.Id == "channel-a");
+        Assert.Empty(reopened.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelAccessOverrides);
+    }
+
+    [Fact]
+    public async Task Final_exact_channel_principal_removal_requires_confirmation_and_cancel_preserves_the_draft_and_disk()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ClientId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "BotId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+                "ChannelAccessOverrides": [{
+                  "TeamId": "team-a",
+                  "ChannelId": "channel-a",
+                  "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"]
+                }]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-test-secret" } }""");
+        var configBefore = File.ReadAllText(_paths.NetclawConfigPath);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        vm.ActivateSelectedChannelRow();
+        vm.MoveChannelAccessRow(2);
+        vm.ActivateChannelAccessRow();
+
+        Assert.Equal(ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm, vm.Screen.Value);
+        Assert.Equal("team-a", vm.PendingChannelPrincipalRemoval!.TeamId);
+        Assert.Equal("channel-a", vm.PendingChannelPrincipalRemoval.ChannelId);
+        Assert.Contains("final principal restriction", vm.TeamsChannelPrincipalRemovalImpact, StringComparison.Ordinal);
+
+        vm.ConfirmTeamsChannelPrincipalRemoval(remove: false);
+
+        Assert.Equal(ChannelsConfigScreen.TeamsChannelAccess, vm.Screen.Value);
+        Assert.Equal(configBefore, File.ReadAllText(_paths.NetclawConfigPath));
+        Assert.Equal(
+            ["11111111-1111-1111-1111-111111111111"],
+            Assert.Single(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelAccessOverrides).AllowedUserIds);
+    }
+
+    [Fact]
+    public async Task Manual_Teams_principal_ids_are_normalized_before_persistence()
+    {
+        WriteTeamsConfig(enabled: true, groupChats: []);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginTeamsPrincipalAdd();
+        vm.ActivateTeamsPrincipalAdd();
+        vm.BeginManualTeamsUserEntry();
+        vm.AllowedUsersInput = "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}";
+        vm.ApplyAllowedUsers();
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var values));
+        Assert.Equal(["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"], ToStringArray(values));
+    }
+
+    [Fact]
+    public async Task Teams_principal_management_removes_only_the_confirmed_global_principal()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"],
+                "AllowedGroupIds": ["22222222-2222-2222-2222-222222222222"],
+                "ChannelAccessOverrides": [{
+                  "TeamId": "team-a",
+                  "ChannelId": "channel-a",
+                  "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"]
+                }]
+              }
+            }
+            """);
+        using var vm = CreateViewModel();
+
+        vm.BeginTeamsPrincipalManagement();
+        var user = Assert.Single(vm.GetTeamsPrincipalRows(), row => row.Kind == TeamsPrincipalKind.User);
+        Assert.Equal("Global Teams access", user.Scope);
+
+        vm.ActivateTeamsPrincipalManagement();
+        Assert.Equal(ChannelsConfigScreen.TeamsPrincipalRemovalConfirm, vm.Screen.Value);
+        vm.ConfirmTeamsPrincipalRemoval(remove: false);
+        Assert.Single(vm.GetTeamsPrincipalRows(), row => row.Kind == TeamsPrincipalKind.User);
+
+        vm.ActivateTeamsPrincipalManagement();
+        vm.MoveTeamsPrincipalRemoval(1);
+        vm.ConfirmTeamsPrincipalRemoval(remove: true);
+        await vm.PendingConfigWrite;
+
+        Assert.DoesNotContain(vm.GetTeamsPrincipalRows(), row => row.Kind == TeamsPrincipalKind.User);
+        var access = Assert.Single(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelAccessOverrides);
+        Assert.Equal(["11111111-1111-1111-1111-111111111111"], access.AllowedUserIds);
+    }
+
+    [Fact]
+    public async Task Teams_destination_removal_requires_confirmation()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+                "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"]
+              }
+            }
+            """);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        vm.BeginTeamsDestinationRemoval();
+
+        Assert.Equal(ChannelsConfigScreen.TeamsDestinationRemovalConfirm, vm.Screen.Value);
+        vm.ConfirmTeamsDestinationRemoval(remove: false);
+        Assert.Contains(vm.GetChannelRows(), row => row.Id == "channel-a");
+
+        vm.BeginTeamsDestinationRemoval();
+        vm.MoveTeamsDestinationRemoval(1);
+        vm.ConfirmTeamsDestinationRemoval(remove: true);
+        await vm.PendingConfigWrite;
+
+        Assert.DoesNotContain(vm.GetChannelRows(), row => row.Id == "channel-a");
+    }
+
+    [Fact]
     public async Task Teams_attachments_toggle_autosaves_and_reloads()
     {
         File.WriteAllText(_paths.NetclawConfigPath,
@@ -248,13 +544,13 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
 
         vm.BeginTeamsUserSearch();
         vm.BeginManualTeamsUserEntry();
-        vm.AllowedUsersInput = "user-a";
+        vm.AllowedUsersInput = "11111111-1111-1111-1111-111111111111";
         vm.ApplyAllowedUsers();
         await vm.PendingConfigWrite;
 
         vm.BeginTeamsGroupSearch();
         vm.BeginManualTeamsGroupEntry();
-        vm.AllowedGroupsInput = "group-a";
+        vm.AllowedGroupsInput = "22222222-2222-2222-2222-222222222222";
         vm.ApplyAllowedGroups();
         await vm.PendingConfigWrite;
 
@@ -264,9 +560,46 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedChannelIds", out var channels));
         Assert.Equal(["channel-a"], ToStringArray(channels));
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var users));
-        Assert.Equal(["user-a"], ToStringArray(users));
+        Assert.Equal(["11111111-1111-1111-1111-111111111111"], ToStringArray(users));
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupIds", out var groups));
-        Assert.Equal(["group-a"], ToStringArray(groups));
+        Assert.Equal(["22222222-2222-2222-2222-222222222222"], ToStringArray(groups));
+    }
+
+    [Fact]
+    public async Task Advanced_Group_Chat_path_does_not_add_a_global_user()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginGroupChatDiscovery();
+        vm.BeginAdvancedTeamsUserEntry();
+
+        Assert.Equal(ChannelsConfigScreen.GroupChats, vm.Screen.Value);
+        Assert.Null(vm.AllowedUsersInput);
+
+        vm.AllowedGroupChatsInput = "19:offline-group-chat@thread.v2";
+        vm.ToggleGroupChats();
+        vm.ApplyGroupChats();
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupChatIds", out var groupChats));
+        Assert.Equal(["19:offline-group-chat@thread.v2"], ToStringArray(groupChats));
+        Assert.False(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out _));
     }
 
     [Fact]
@@ -2479,6 +2812,32 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
 
     private void WriteFreshConfig()
         => File.WriteAllText(_paths.NetclawConfigPath, """{ "configVersion": 1 }""");
+
+    private void WriteTeamsConfig(bool enabled, IReadOnlyList<string> groupChats)
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            $$"""
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": {{enabled.ToString().ToLowerInvariant()}},
+                "TenantId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ClientId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "BotId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+                "AllowedGroupChatIds": [{{string.Join(',', groupChats.Select(id => $"\"{id}\""))}}]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": { "ClientSecret": "teams-test-secret" }
+            }
+            """);
+    }
 
     private string[] PersistedChannels(ChannelType type)
     {
