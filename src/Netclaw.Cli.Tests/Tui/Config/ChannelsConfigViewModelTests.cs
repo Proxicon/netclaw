@@ -117,6 +117,42 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Teams_destination_removal_requires_confirmation()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+                "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"]
+              }
+            }
+            """);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.ActivateManagementMenuItem();
+        vm.BeginTeamsDestinationRemoval();
+
+        Assert.Equal(ChannelsConfigScreen.TeamsDestinationRemovalConfirm, vm.Screen.Value);
+        vm.ConfirmTeamsDestinationRemoval(remove: false);
+        Assert.Contains(vm.GetChannelRows(), row => row.Id == "channel-a");
+
+        vm.BeginTeamsDestinationRemoval();
+        vm.MoveTeamsDestinationRemoval(1);
+        vm.ConfirmTeamsDestinationRemoval(remove: true);
+        await vm.PendingConfigWrite;
+
+        Assert.DoesNotContain(vm.GetChannelRows(), row => row.Id == "channel-a");
+    }
+
+    [Fact]
     public async Task Teams_attachments_toggle_autosaves_and_reloads()
     {
         File.WriteAllText(_paths.NetclawConfigPath,
