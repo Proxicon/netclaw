@@ -30,6 +30,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
     private readonly Dictionary<string, TextInputNode> _credentialInputs = [];
     private ChannelType? _credentialInputAdapter;
     private readonly CompositeDisposable _stepSubs = [];
+    private bool _quitAfterCredentialSave;
 
     protected override void OnBound()
     {
@@ -49,7 +50,15 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             ResetTextInputs();
             InvalidateAll();
         }).DisposeWith(Subscriptions);
-        ViewModel.Status.Subscribe(_ => _contentNode?.Invalidate()).DisposeWith(Subscriptions);
+        ViewModel.Status.Subscribe(_ =>
+        {
+            _contentNode?.Invalidate();
+            if (_quitAfterCredentialSave && !ViewModel.IsCredentialSaveInProgress)
+            {
+                _quitAfterCredentialSave = false;
+                ViewModel.RequestQuit();
+            }
+        }).DisposeWith(Subscriptions);
         ViewModel.OnStepContentChanged = () =>
         {
             _contentNode?.Invalidate();
@@ -87,6 +96,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsPrincipalAdd => BuildTeamsPrincipalAdd(),
                     ChannelsConfigScreen.TeamsPrincipalManagement => BuildTeamsPrincipalManagement(),
                     ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => BuildTeamsPrincipalRemovalConfirm(),
+                    ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm => BuildTeamsChannelPrincipalRemovalConfirm(),
                     ChannelsConfigScreen.TeamsDestinationRemovalConfirm => BuildTeamsDestinationRemovalConfirm(),
                     ChannelsConfigScreen.TeamsTeamSearch => BuildTeamsTeamSearch(),
                     ChannelsConfigScreen.TeamsChannelSearch => BuildTeamsChannelSearch(),
@@ -450,6 +460,23 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalRemovalIndex == 1)}Remove", ViewModel.TeamsPrincipalRemovalIndex == 1));
     }
 
+    private ILayoutNode BuildTeamsChannelPrincipalRemovalConfirm()
+    {
+        var principal = ViewModel.PendingChannelPrincipalRemoval;
+        if (principal is null)
+            return Layouts.Empty();
+
+        return Layouts.Vertical()
+            .WithChild(Header("  Remove exact Teams channel principal?"))
+            .WithChild(Hint($"  Channel: {principal.TeamId} / {principal.ChannelId}"))
+            .WithChild(Hint($"  {principal.Label}"))
+            .WithChild(Hint($"  Canonical ID: {principal.PrincipalId}"))
+            .WithChild(Hint($"  {ViewModel.TeamsChannelPrincipalRemovalImpact}"))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsChannelPrincipalRemovalIndex == 0)}Cancel", ViewModel.TeamsChannelPrincipalRemovalIndex == 0))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsChannelPrincipalRemovalIndex == 1)}Remove", ViewModel.TeamsChannelPrincipalRemovalIndex == 1));
+    }
+
     private ILayoutNode BuildTeamsDestinationRemovalConfirm()
     {
         var destination = ViewModel.PendingTeamsDestinationRemoval;
@@ -640,6 +667,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsPrincipalAdd => "  Select a principal type, then search a friendly identity.",
                     ChannelsConfigScreen.TeamsPrincipalManagement => "  Left/right changes the filter. Enter opens Add, Done, or removal confirmation.",
                     ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => "  Confirm removal. This only removes the selected global grant.",
+                    ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm => "  Confirm removal. This can change the exact channel sender rule.",
                     ChannelsConfigScreen.TeamsDestinationRemovalConfirm => "  Confirm removal. The destination becomes denied after configuration activation.",
                     ChannelsConfigScreen.TeamsGroupChatSearch => "  Type to filter loaded chats. Enter selects, loads more, or opens advanced entry.",
                     ChannelsConfigScreen.TeamsChannelAccess => "  Enter edits a principal list. Channel rules only restrict this exact Team and channel.",
@@ -683,6 +711,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsPrincipalAdd => " [↑/↓] Navigate  [Enter] Select  [Esc] Menu",
                     ChannelsConfigScreen.TeamsPrincipalManagement => " [↑/↓] Select  [←/→] Filter  [Enter] Remove/open  [Esc] Menu",
                     ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
+                    ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
                     ChannelsConfigScreen.TeamsDestinationRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
                     ChannelsConfigScreen.TeamsTeamSearch => " [Type] Search  [Enter] Search/select  [↑/↓] Select  [Esc] Channels",
                     ChannelsConfigScreen.TeamsChannelSearch => " [↑/↓] Select  [Enter] Save channel  [Esc] Teams",
@@ -719,15 +748,17 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
 
     private bool HandleKeyInfo(ConsoleKeyInfo keyInfo)
     {
-        if (keyInfo.Key == ConsoleKey.Q && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            ViewModel.RequestQuit();
-            return true;
-        }
-
         if (ViewModel.Screen.Value == ChannelsConfigScreen.RotateCredentials
             && ViewModel.IsCredentialSaveInProgress)
         {
+            _quitAfterCredentialSave |= keyInfo.Key == ConsoleKey.Q
+                                      && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control);
+            return true;
+        }
+
+        if (keyInfo.Key == ConsoleKey.Q && keyInfo.Modifiers.HasFlag(ConsoleModifiers.Control))
+        {
+            ViewModel.RequestQuit();
             return true;
         }
 
@@ -831,6 +862,9 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 break;
             case ChannelsConfigScreen.TeamsPrincipalRemovalConfirm:
                 HandleTeamsPrincipalRemovalConfirmKey(keyInfo);
+                break;
+            case ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm:
+                HandleTeamsChannelPrincipalRemovalConfirmKey(keyInfo);
                 break;
             case ChannelsConfigScreen.TeamsDestinationRemovalConfirm:
                 HandleTeamsDestinationRemovalConfirmKey(keyInfo);
@@ -1015,6 +1049,22 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 break;
             case ConsoleKey.Enter:
                 ViewModel.ConfirmTeamsPrincipalRemoval(ViewModel.TeamsPrincipalRemovalIndex == 1);
+                break;
+        }
+    }
+
+    private void HandleTeamsChannelPrincipalRemovalConfirmKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsChannelPrincipalRemoval(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsChannelPrincipalRemoval(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ConfirmTeamsChannelPrincipalRemoval(ViewModel.TeamsChannelPrincipalRemovalIndex == 1);
                 break;
         }
     }
@@ -1340,7 +1390,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         string placeholder)
     {
         if (_singleInput is not null && _singleInputScreen == screen && string.Equals(_singleInputKey, key, StringComparison.Ordinal))
+        {
+            WizardStepHelpers.SyncInputToViewModel(_singleInput, StageSingleInput, CreateCallbacks());
             return _singleInput;
+        }
 
         _singleInput = new TextInputNode().WithPlaceholder(placeholder);
         _singleInput.Text = seed ?? string.Empty;
@@ -1348,6 +1401,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             _singleInput.HandleInput(new ConsoleKeyInfo('\0', ConsoleKey.End, shift: false, alt: false, control: false));
         _singleInputScreen = screen;
         _singleInputKey = key;
+        WizardStepHelpers.SyncInputToViewModel(_singleInput, StageSingleInput, CreateCallbacks());
         return _singleInput;
     }
 
@@ -1360,7 +1414,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         }
 
         if (_credentialInputs.TryGetValue(field.Key, out var existing))
+        {
+            WizardStepHelpers.SyncInputToViewModel(existing, () => StageCredentialInput(field), CreateCallbacks());
             return existing;
+        }
 
         var input = new TextInputNode().WithPlaceholder(field.Placeholder);
         if (field.IsSecret)
@@ -1371,6 +1428,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             input.HandleInput(new ConsoleKeyInfo('\0', ConsoleKey.End, shift: false, alt: false, control: false));
 
         _credentialInputs[field.Key] = input;
+        WizardStepHelpers.SyncInputToViewModel(input, () => StageCredentialInput(field), CreateCallbacks());
         return input;
     }
 

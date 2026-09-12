@@ -77,6 +77,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     private int _teamsPrincipalFilterIndex;
     private int _teamsPrincipalRemovalIndex;
     private TeamsPrincipalRow? _pendingPrincipalRemoval;
+    private TeamsChannelPrincipalRemoval? _pendingChannelPrincipalRemoval;
     private ChannelPermissionRow? _pendingTeamsDestinationRemoval;
     private int _teamsDestinationRemovalIndex;
     private ChannelsConfigScreen? _teamsPrincipalSearchReturnScreen;
@@ -195,7 +196,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         set
         {
             _groupChatSearchInput = value;
-            _directoryResultIndex = Clamp(_directoryResultIndex, GetGroupChatSearchResultCount());
+            _directoryResultIndex = 0;
         }
     }
     internal IReadOnlyList<TeamsDirectoryGroupChat> FilteredGroupChatSearchResults
@@ -236,6 +237,32 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 return "Other global grants remain. Channel-specific grants can also authorize this person.";
 
             return "After activation, channels without exact grants accept any verified sender. Personal and Group Chat ingress deny until you add a global user or group.";
+        }
+    }
+
+    internal TeamsChannelPrincipalRemoval? PendingChannelPrincipalRemoval => _pendingChannelPrincipalRemoval;
+    internal int TeamsChannelPrincipalRemovalIndex => _teamsPrincipalRemovalIndex;
+    internal string TeamsChannelPrincipalRemovalImpact
+    {
+        get
+        {
+            var pending = _pendingChannelPrincipalRemoval;
+            var access = _editingChannelAccess;
+            if (pending is null || access is null)
+                return string.Empty;
+
+            var hasOtherExactPrincipal = pending.Kind == TeamsPrincipalKind.User
+                ? access.AllowedUserIds.Any(id => !string.Equals(id, pending.PrincipalId, StringComparison.Ordinal))
+                  || access.AllowedGroupIds.Length > 0
+                : access.AllowedUserIds.Length > 0
+                  || access.AllowedGroupIds.Any(id => !string.Equals(id, pending.PrincipalId, StringComparison.Ordinal));
+            if (hasOtherExactPrincipal)
+                return "Other exact channel principals remain after this removal.";
+
+            if (GetAllowedUserIds(ChannelType.Teams).Count > 0 || GetAllowedGroupIds(ChannelType.Teams).Count > 0)
+                return "Global principal rules remain after this removal.";
+
+            return "This is the final principal restriction. After activation, this channel accepts any verified Teams sender.";
         }
     }
 
@@ -1451,10 +1478,12 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     internal void BeginTeamsPrincipalManagement()
     {
+        ClearTeamsEditContext();
         _teamsPrincipalManagementIndex = 0;
         _teamsPrincipalFilterIndex = 0;
         Screen.Value = ChannelsConfigScreen.TeamsPrincipalManagement;
         Status.Value = new ConfigStatusMessage("Saved identities remain removable when directory labels are unavailable.", ConfigStatusTone.Neutral);
+        StartChannelLabelResolution(ChannelType.Teams);
         NotifyContentChanged();
     }
 
@@ -1631,6 +1660,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     private void BeginTeamsChannelAccess(string channelId)
     {
+        _teamsPrincipalSearchReturnScreen = null;
         var matches = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelAccessOverrides
             .Where(accessOverride => string.Equals(accessOverride.ChannelId, channelId, StringComparison.Ordinal))
             .ToArray();
@@ -1703,7 +1733,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 break;
             case TeamsChannelAccessRowKind.RemoveUser:
             case TeamsChannelAccessRowKind.RemoveGroup:
-                RemoveTeamsChannelPrincipal(row);
+                BeginTeamsChannelPrincipalRemoval(row);
                 break;
             case TeamsChannelAccessRowKind.Done:
                 _editingChannelAccess = null;
@@ -1714,17 +1744,47 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         NotifyContentChanged();
     }
 
-    private void RemoveTeamsChannelPrincipal(TeamsChannelAccessRow row)
+    private void BeginTeamsChannelPrincipalRemoval(TeamsChannelAccessRow row)
     {
         if (_editingChannelAccess is null || row.Id is null)
             return;
 
-        var replacement = row.Kind == TeamsChannelAccessRowKind.RemoveUser
+        _pendingChannelPrincipalRemoval = new TeamsChannelPrincipalRemoval(
+            _editingChannelAccess.TeamId,
+            _editingChannelAccess.ChannelId,
+            row.Id,
+            row.Kind == TeamsChannelAccessRowKind.RemoveUser ? TeamsPrincipalKind.User : TeamsPrincipalKind.Group,
+            row.Label);
+        _teamsPrincipalRemovalIndex = 0;
+        Screen.Value = ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm;
+        Status.Value = new ConfigStatusMessage(
+            "Confirm removal. This exact channel grant can change the sender access rule.",
+            ConfigStatusTone.Warning);
+    }
+
+    internal void MoveTeamsChannelPrincipalRemoval(int delta)
+    {
+        _teamsPrincipalRemovalIndex = Clamp(_teamsPrincipalRemovalIndex + delta, 2);
+        NotifyContentChanged();
+    }
+
+    internal void ConfirmTeamsChannelPrincipalRemoval(bool remove)
+    {
+        var pending = _pendingChannelPrincipalRemoval;
+        _pendingChannelPrincipalRemoval = null;
+        if (!remove || pending is null || _editingChannelAccess is null)
+        {
+            Screen.Value = ChannelsConfigScreen.TeamsChannelAccess;
+            NotifyContentChanged();
+            return;
+        }
+
+        var replacement = pending.Kind == TeamsPrincipalKind.User
             ? new TeamsChannelAccessOverride
             {
                 TeamId = _editingChannelAccess.TeamId,
                 ChannelId = _editingChannelAccess.ChannelId,
-                AllowedUserIds = [.. _editingChannelAccess.AllowedUserIds.Where(id => !string.Equals(id, row.Id, StringComparison.Ordinal))],
+                AllowedUserIds = [.. _editingChannelAccess.AllowedUserIds.Where(id => !string.Equals(id, pending.PrincipalId, StringComparison.Ordinal))],
                 AllowedGroupIds = _editingChannelAccess.AllowedGroupIds
             }
             : new TeamsChannelAccessOverride
@@ -1732,11 +1792,13 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                 TeamId = _editingChannelAccess.TeamId,
                 ChannelId = _editingChannelAccess.ChannelId,
                 AllowedUserIds = _editingChannelAccess.AllowedUserIds,
-                AllowedGroupIds = [.. _editingChannelAccess.AllowedGroupIds.Where(id => !string.Equals(id, row.Id, StringComparison.Ordinal))]
+                AllowedGroupIds = [.. _editingChannelAccess.AllowedGroupIds.Where(id => !string.Equals(id, pending.PrincipalId, StringComparison.Ordinal))]
             };
         ReplaceEditingChannelAccess(replacement);
         _channelAccessRowIndex = Clamp(_channelAccessRowIndex, GetTeamsChannelAccessRows().Count);
-        AutosaveCompletedAction($"Removed {row.Id} from channel-specific Teams access and saved.");
+        Screen.Value = ChannelsConfigScreen.TeamsChannelAccess;
+        AutosaveCompletedAction($"Removed {pending.PrincipalId} from channel-specific Teams access and saved.");
+        NotifyContentChanged();
     }
 
     private void ReplaceEditingChannelAccess(TeamsChannelAccessOverride replacement)
@@ -3127,6 +3189,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (Screen.Value == ChannelsConfigScreen.TeamsPrincipalRemovalConfirm)
             _pendingPrincipalRemoval = null;
 
+        if (Screen.Value == ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm)
+            _pendingChannelPrincipalRemoval = null;
+
         if (Screen.Value == ChannelsConfigScreen.TeamsDestinationRemovalConfirm)
             _pendingTeamsDestinationRemoval = null;
 
@@ -3139,6 +3204,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             _teamsDirectorySearch?.Invalidate();
         }
 
+        if (Screen.Value is ChannelsConfigScreen.AllowedUsers or ChannelsConfigScreen.AllowedGroups)
+            _teamsPrincipalSearchReturnScreen = null;
+
         Screen.Value = Screen.Value switch
         {
             ChannelsConfigScreen.AdapterMenu => ChannelsConfigScreen.Picker,
@@ -3146,13 +3214,14 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             ChannelsConfigScreen.TeamsPrincipalAdd => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.TeamsPrincipalManagement => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => ChannelsConfigScreen.TeamsPrincipalManagement,
+            ChannelsConfigScreen.TeamsChannelPrincipalRemovalConfirm => ChannelsConfigScreen.TeamsChannelAccess,
             ChannelsConfigScreen.TeamsDestinationRemovalConfirm => ChannelsConfigScreen.ChannelPermissions,
             ChannelsConfigScreen.ChannelPermissions => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.AddChannel => ChannelsConfigScreen.ChannelPermissions,
             ChannelsConfigScreen.TeamsTeamSearch => ChannelsConfigScreen.ChannelPermissions,
             ChannelsConfigScreen.TeamsChannelSearch => ChannelsConfigScreen.TeamsTeamSearch,
-            ChannelsConfigScreen.TeamsUserSearch when _isGroupChatDiscovery == false && _teamsPrincipalSearchReturnScreen is { } returnScreen => ClearTeamsPrincipalSearchReturnScreen(returnScreen),
-            ChannelsConfigScreen.TeamsGroupSearch when _teamsPrincipalSearchReturnScreen is { } returnScreen => ClearTeamsPrincipalSearchReturnScreen(returnScreen),
+            ChannelsConfigScreen.TeamsUserSearch when _editingChannelAccess is null && _isGroupChatDiscovery == false && _teamsPrincipalSearchReturnScreen is { } returnScreen => ClearTeamsPrincipalSearchReturnScreen(returnScreen),
+            ChannelsConfigScreen.TeamsGroupSearch when _editingChannelAccess is null && _teamsPrincipalSearchReturnScreen is { } returnScreen => ClearTeamsPrincipalSearchReturnScreen(returnScreen),
             ChannelsConfigScreen.TeamsUserSearch => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
             ChannelsConfigScreen.TeamsGroupSearch => _editingChannelAccess is null ? ChannelsConfigScreen.AdapterMenu : ChannelsConfigScreen.TeamsChannelAccess,
             ChannelsConfigScreen.TeamsGroupChatSearch => ChannelsConfigScreen.TeamsUserSearch,
@@ -3776,11 +3845,12 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (!_teamsGroupChatsById.TryGetValue(chatId, out var chat))
             return GetGroupChatDisplaySuffix(chatId);
 
-        return !string.IsNullOrWhiteSpace(chat.Topic)
+        var display = !string.IsNullOrWhiteSpace(chat.Topic)
             ? chat.Topic
             : chat.ParticipantPreview.Count > 0
                 ? string.Join(", ", chat.ParticipantPreview)
-                : GetGroupChatDisplaySuffix(chatId);
+                : "Group Chat";
+        return $"{display} · {GetGroupChatDisplaySuffix(chatId)}";
     }
 
     private static int AudienceIndex(TrustAudience audience)
@@ -4096,6 +4166,7 @@ internal enum ChannelsConfigScreen
     TeamsPrincipalAdd,
     TeamsPrincipalManagement,
     TeamsPrincipalRemovalConfirm,
+    TeamsChannelPrincipalRemovalConfirm,
     TeamsDestinationRemovalConfirm,
     TeamsTeamSearch,
     TeamsChannelSearch,
@@ -4147,6 +4218,13 @@ internal sealed record TeamsPrincipalRow(
     TeamsPrincipalKind Kind,
     string Label,
     string Scope);
+
+internal sealed record TeamsChannelPrincipalRemoval(
+    string TeamId,
+    string ChannelId,
+    string PrincipalId,
+    TeamsPrincipalKind Kind,
+    string Label);
 
 internal sealed record ChannelPermissionRow(
     string Id,
@@ -4563,6 +4641,8 @@ internal sealed class ChannelsConfigPersistenceMapper
         {
             if (knownProvider)
                 fields.Add(new SectionFieldAction("Teams.Enabled", SectionFieldActionKind.Set, false));
+            SetArrayOrDelete(fields, "Teams.AllowedTeamIds", ChannelCsv.ParseCsv(vm.TeamIdsInput, trimHash: false));
+            SetArrayOrDelete(fields, "Teams.AllowedChannelIds", ChannelCsv.ParseCsv(vm.ChannelIdsInput, trimHash: false));
             SetArrayOrDelete(fields, "Teams.AllowedGroupChatIds", ChannelCsv.ParseCsv(vm.AllowedGroupChatIdsInput, trimHash: false));
             SetArrayOrDelete(fields, "Teams.AllowedUserIds", ChannelCsv.ParseCsv(vm.AllowedUserIdsInput, trimHash: false));
             SetArrayOrDelete(fields, "Teams.AllowedGroupIds", ChannelCsv.ParseCsv(vm.AllowedGroupIdsInput, trimHash: false));

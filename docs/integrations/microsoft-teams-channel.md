@@ -176,6 +176,8 @@ from an authenticated source.
 
 The management screens show global and exact channel user/group grants.
 Select a `Remove user` or `Remove group` row to remove an exact grant.
+The TUI asks for confirmation before it removes an exact grant. It names the
+channel and explains the sender rule that will apply after activation.
 Netclaw saves the access-list change even when the Teams adapter is disabled.
 Netclaw preserves its connection credentials in that case.
 

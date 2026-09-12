@@ -3,7 +3,7 @@ name: netclaw-operations
 description: "REQUIRED when the user asks about scheduling, reminders, cron jobs, timers, background jobs, diagnostics, troubleshooting, MCP tools, daemon health, identity updates, or Netclaw capabilities and self-maintenance."
 metadata:
   author: netclaw
-  version: "2.65.4"
+  version: "2.65.5"
 ---
 
 # Netclaw Operations
@@ -51,6 +51,9 @@ permission is optional. Manual Group Chat IDs still work without it.
 When you remove the final global Teams user or group, explain the result.
 Allowed channels without exact grants accept verified senders. Personal and
 Group Chat ingress remains denied until a global principal exists.
+
+The TUI asks for confirmation before it removes an exact channel principal.
+It names the channel and explains the effective sender rule after activation.
 
 ## File and Shell Selection
 

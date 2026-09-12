@@ -289,7 +289,10 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
 
         var result = await ExecuteAsync(
             async token => ToGroupChat(
-                await _graphClient.Chats[canonicalChatId].GetAsync(cancellationToken: token).ConfigureAwait(false)),
+                await _graphClient.Chats[canonicalChatId].GetAsync(request =>
+                {
+                    request.QueryParameters.Expand = ["members"];
+                }, token).ConfigureAwait(false)),
             cancellationToken).ConfigureAwait(false);
 
         return CacheResult(key, result, DirectoryRecordTtl);

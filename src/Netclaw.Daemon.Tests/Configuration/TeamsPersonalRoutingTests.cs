@@ -351,8 +351,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         Assert.Empty(terminalCard.GetProperty("actions").EnumerateArray());
     }
 
-    [Fact]
-    public async Task Http_channel_approval_action_without_channel_data_accepts_a_sender_with_exact_channel_access()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Http_channel_approval_action_without_channel_data_accepts_a_sender_with_exact_channel_principal_access(
+        bool useExactChannelGroupAccess)
     {
         var requestLifetime = new RequestLifetimeProbe();
         var replyClient = new RequestIndependentReplyClient(requestLifetime);
@@ -362,7 +365,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             replyClient,
             sessionManager.Ref,
             includeChannel: true,
-            useExactChannelUserAccess: true);
+            useExactChannelUserAccess: !useExactChannelGroupAccess,
+            useExactChannelGroupAccess: useExactChannelGroupAccess);
         const string conversationId = "request-channel-approval;messageid=request-channel-approval-root";
         Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel(
             "tenant-a",
@@ -4236,7 +4240,8 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         RequestIndependentReplyClient replyClient,
         IActorRef? sessionManager = null,
         bool includeChannel = false,
-        bool useExactChannelUserAccess = false)
+        bool useExactChannelUserAccess = false,
+        bool useExactChannelGroupAccess = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -4255,10 +4260,18 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         };
         if (useExactChannelUserAccess)
         {
-            settings.Remove("Teams:AllowedUserIds:0");
+            settings["Teams:AllowedUserIds:0"] = "user-b";
             settings["Teams:ChannelAccessOverrides:0:TeamId"] = "team-a";
             settings["Teams:ChannelAccessOverrides:0:ChannelId"] = "channel-a";
             settings["Teams:ChannelAccessOverrides:0:AllowedUserIds:0"] = "user-a";
+        }
+        else if (useExactChannelGroupAccess)
+        {
+            settings["Teams:AllowedUserIds:0"] = "user-b";
+            settings["Teams:AllowedGroupIds:0"] = "group-b";
+            settings["Teams:ChannelAccessOverrides:0:TeamId"] = "team-a";
+            settings["Teams:ChannelAccessOverrides:0:ChannelId"] = "channel-a";
+            settings["Teams:ChannelAccessOverrides:0:AllowedGroupIds:0"] = "group-a";
         }
 
         builder.Configuration.AddInMemoryCollection(settings);
@@ -4269,6 +4282,11 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         builder.Services.AddSingleton<IPromptInjectionDetector>(SafeTeamsPromptInjectionDetector.Instance);
         builder.Services.AddSingleton(requestLifetime);
         builder.Services.AddScoped<RequestScopeSentinel>();
+        if (useExactChannelGroupAccess)
+        {
+            builder.Services.RemoveAll<ITeamsDirectory>();
+            builder.Services.AddSingleton<ITeamsDirectory>(new ExactGroupTeamsDirectory());
+        }
         builder.AddTeamsIngress();
         builder.Services
             .AddAuthentication(TestTeamsAuthenticationHandler.SchemeName)
@@ -4766,6 +4784,61 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             string sourceContext,
             CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("detector unavailable");
+    }
+
+    private sealed class ExactGroupTeamsDirectory : ITeamsDirectory
+    {
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>> SearchTeamsAsync(
+            string query,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryTeam>> GetTeamAsync(
+            string teamId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryTeam>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>> GetChannelsAsync(
+            string teamId,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryChannel>> GetChannelAsync(
+            string teamId,
+            string channelId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryChannel>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryUser>>> SearchUsersAsync(
+            string query,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryUser>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryGroup>>> SearchGroupsAsync(
+            string query,
+            int maximumResults,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryGroup>>.Available([]));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryGroup>> GetGroupAsync(
+            string groupId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryGroup>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryUser>> GetUserAsync(
+            string userId,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryUser>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlySet<string>>> CheckUserGroupMembershipAsync(
+            string userId,
+            IReadOnlyCollection<string> groupIds,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlySet<string>>.Available(
+                new HashSet<string>(["group-a"], StringComparer.Ordinal)));
     }
 
     private sealed class RequestLifetimeProbe

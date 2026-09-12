@@ -141,6 +141,26 @@ public sealed class TeamsGraphDirectoryClientTests
         Assert.Equal("teams_directory_invalid_continuation", invalid.ReasonCode);
     }
 
+    [Fact]
+    public async Task Saved_group_chat_lookup_loads_member_display_names_for_the_management_label()
+    {
+        using var handler = new TeamsDirectoryHttpHandler();
+        using var httpClient = new HttpClient(handler);
+        using var graphClient = new GraphServiceClient(
+            httpClient,
+            new AnonymousAuthenticationProvider(),
+            "https://graph.test/v1.0");
+        using var cache = new MemoryCache(new MemoryCacheOptions { SizeLimit = 16 });
+        using var directory = new TeamsGraphDirectoryClient(graphClient, "tenant-a", cache, TimeProvider.System);
+
+        var result = await directory.GetGroupChatAsync("19:saved-chat@thread.v2", TestContext.Current.CancellationToken);
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal(["Maya King", "Ari Stone"], result.Value!.ParticipantPreview);
+        Assert.NotNull(handler.GroupChatRecordRequestUri);
+        Assert.Contains("expand=members", handler.GroupChatRecordRequestUri.Query, StringComparison.OrdinalIgnoreCase);
+    }
+
     private sealed class StatusCodeHandler(HttpStatusCode statusCode) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -156,6 +176,8 @@ public sealed class TeamsGraphDirectoryClientTests
         public Uri? ChannelListRequestUri { get; private set; }
 
         public Uri? GroupChatListRequestUri { get; private set; }
+
+        public Uri? GroupChatRecordRequestUri { get; private set; }
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -189,6 +211,13 @@ public sealed class TeamsGraphDirectoryClientTests
 
                 return Task.FromResult(Json(
                     """{ "value": [{ "id": "19:group-one@thread.v2", "chatType": "group", "topic": "Operations", "members": [{ "displayName": "Maya King" }] }, { "id": "19:one-to-one@thread.v2", "chatType": "oneOnOne" }], "@odata.nextLink": "https://graph.test/v1.0/users/user-1/chats?$skiptoken=next" }"""));
+            }
+
+            if (path.Contains("/chats/", StringComparison.Ordinal))
+            {
+                GroupChatRecordRequestUri = request.RequestUri;
+                return Task.FromResult(Json(
+                    """{ "id": "19:saved-chat@thread.v2", "chatType": "group", "members": [{ "displayName": "Maya King" }, { "displayName": "Ari Stone" }] }"""));
             }
 
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
