@@ -174,6 +174,15 @@ channels and Group Chats. Use `Add a channel or Group Chat` for the picker or
 the advanced canonical-ID path. Display names are labels only. Copy each ID
 from an authenticated source.
 
+The management screens show global and exact channel user/group grants.
+Select a `Remove user` or `Remove group` row to remove an exact grant.
+Netclaw saves the access-list change even when the Teams adapter is disabled.
+Netclaw preserves its connection credentials in that case.
+
+If the last global user or group is removed, an allowed channel without an
+exact grant accepts any verified sender after configuration activation.
+Personal and Group Chat ingress deny until a global user or group exists.
+
 Attachments remain disabled until `AllowAttachments` is true. Netclaw stages
 each accepted file, checks its size and content, then removes unsafe input.
 It never accepts a normal channel or group-chat file without safe access.
@@ -280,6 +289,10 @@ tenant/resource data and contain neither secrets nor raw typed search text.
 Approval card callbacks do not issue a new Graph request just to enrich a
 display label: they use the Teams callback name, an already-cached profile, or
 `Authorized operator`.
+
+The status screen marks `Chat.ReadBasic.All` as optional. Without it, Netclaw
+still permits manual Group Chat IDs and local removal. It cannot show Group
+Chat topics or participant preview data.
 
 `netclaw doctor` reports offline, non-secret Teams configuration diagnostics
 and lists the consent required for configured group authorization. It never

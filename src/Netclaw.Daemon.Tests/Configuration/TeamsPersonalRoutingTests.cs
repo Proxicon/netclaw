@@ -352,6 +352,61 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
     }
 
     [Fact]
+    public async Task Http_channel_approval_action_without_channel_data_accepts_a_sender_with_exact_channel_access()
+    {
+        var requestLifetime = new RequestLifetimeProbe();
+        var replyClient = new RequestIndependentReplyClient(requestLifetime);
+        var sessionManager = CreateTestProbe();
+        await using var app = await BuildRequestIndependenceHostAsync(
+            requestLifetime,
+            replyClient,
+            sessionManager.Ref,
+            includeChannel: true,
+            useExactChannelUserAccess: true);
+        const string conversationId = "request-channel-approval;messageid=request-channel-approval-root";
+        Assert.True(TeamsSessionIdentifierCodec.TryCreateChannel(
+            "tenant-a",
+            conversationId,
+            "request-channel-approval-root",
+            out var sessionId,
+            out _));
+
+        using (var request = CreateTeamsActivityRequest(CreateSdkChannelRootMessage(
+                   conversationId,
+                   "request-channel-approval-root")))
+        using (var response = await app.GetTestClient().SendAsync(request, TestContext.Current.CancellationToken))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        await sessionManager.ExpectMsgAsync<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        var subscription = await sessionManager.ExpectMsgAsync<JoinSession>(cancellationToken: TestContext.Current.CancellationToken);
+        await sessionManager.ExpectMsgAsync<SendUserMessage>(cancellationToken: TestContext.Current.CancellationToken);
+        subscription.Subscriber.Tell(CreateApprovalRequest(sessionId, "request-channel-exact-call", CreateStandardApprovalOptions()));
+        await AwaitAssertAsync(
+            () => Assert.Single(replyClient.Messages),
+            cancellationToken: TestContext.Current.CancellationToken);
+        var approvalCard = Assert.IsType<TeamsApprovalCard>(Assert.Single(replyClient.Messages).ApprovalCard);
+        var approve = Assert.Single(approvalCard.Actions, action => action.Action == ApprovalOptionKeys.ApproveOnce);
+
+        using var approvalRequest = CreateTeamsActivityRequest(CreateSdkChannelApprovalAction(
+            conversationId,
+            "request-independent-activity",
+            approve.CorrelationId,
+            approve.Nonce,
+            approve.Action));
+        var approvalResponseTask = app.GetTestClient().SendAsync(approvalRequest, TestContext.Current.CancellationToken);
+
+        var feedback = await sessionManager.ExpectMsgAsync<ToolInteractionResponse>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(sessionId, feedback.SessionId);
+        Assert.Equal(ApprovalOptionKeys.ApproveOnce, feedback.SelectedKey.Value);
+        sessionManager.LastSender.Tell(new CommandAck(sessionId));
+
+        using var approvalResponse = await approvalResponseTask;
+        Assert.Equal(HttpStatusCode.OK, approvalResponse.StatusCode);
+    }
+
+    [Fact]
     public async Task Http_channel_root_capture_survives_request_scope_disposal_without_a_top_level_fallback()
     {
         var requestLifetime = new RequestLifetimeProbe();
@@ -4180,11 +4235,12 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
         RequestLifetimeProbe requestLifetime,
         RequestIndependentReplyClient replyClient,
         IActorRef? sessionManager = null,
-        bool includeChannel = false)
+        bool includeChannel = false,
+        bool useExactChannelUserAccess = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        var settings = new Dictionary<string, string?>
         {
             ["Teams:Enabled"] = "true",
             ["Teams:TenantId"] = "tenant-a",
@@ -4196,7 +4252,16 @@ public sealed class TeamsPersonalRoutingTests(ITestOutputHelper output) : Persis
             ["Teams:BotId"] = "bot",
             ["Teams:AllowedTeamIds:0"] = "team-a",
             ["Teams:AllowedChannelIds:0"] = "channel-a"
-        });
+        };
+        if (useExactChannelUserAccess)
+        {
+            settings.Remove("Teams:AllowedUserIds:0");
+            settings["Teams:ChannelAccessOverrides:0:TeamId"] = "team-a";
+            settings["Teams:ChannelAccessOverrides:0:ChannelId"] = "channel-a";
+            settings["Teams:ChannelAccessOverrides:0:AllowedUserIds:0"] = "user-a";
+        }
+
+        builder.Configuration.AddInMemoryCollection(settings);
         builder.Services.AddChannelIntegrations(builder.Configuration);
         builder.Services.AddSingleton<ActorSystem>(Sys);
         builder.Services.AddSingleton<ISessionPipeline>(CreatePipeline(sessionManager ?? TestActor));

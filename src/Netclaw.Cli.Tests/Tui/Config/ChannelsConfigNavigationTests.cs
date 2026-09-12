@@ -246,6 +246,34 @@ public sealed class ChannelsConfigNavigationTests : IDisposable
     }
 
     [Fact]
+    public async Task Channels_Teams_user_search_accepts_typed_and_pasted_query_input()
+    {
+        WriteTeamsChannelFiles();
+        var app = CreateHeadlessApp(out var input, out var dashboardVm, out var getChannelsVm);
+        OpenChannels(dashboardVm);
+
+        input.EnqueueKey(ConsoleKey.DownArrow);
+        input.EnqueueKey(ConsoleKey.DownArrow);
+        input.EnqueueKey(ConsoleKey.DownArrow);
+        input.EnqueueKey(ConsoleKey.Enter); // Microsoft Teams management.
+        input.EnqueueKey(ConsoleKey.DownArrow);
+        input.EnqueueKey(ConsoleKey.DownArrow);
+        input.EnqueueKey(ConsoleKey.Enter); // Add users or groups.
+        input.EnqueueKey(ConsoleKey.Enter); // User search.
+        input.EnqueueString("Ada");
+        input.EnqueuePaste(" Lovelace");
+        input.EnqueueKey(ConsoleKey.Q, false, false, true);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await app.RunAsync(cts.Token);
+
+        var channelsVm = Assert.IsType<ChannelsConfigViewModel>(getChannelsVm());
+        Assert.Equal(ChannelsConfigScreen.TeamsUserSearch, channelsVm.Screen.Value);
+        Assert.Equal("Ada Lovelace", channelsVm.DirectorySearchInput);
+        Assert.Empty(channelsVm.UserSearchResults);
+    }
+
+    [Fact]
     public async Task Channels_ChannelPermissions_DoesNotRemoveSelectedChannelWithDoneKey()
     {
         var app = CreateHeadlessApp(out var input, out var dashboardVm, out var getChannelsVm);
@@ -645,6 +673,28 @@ public sealed class ChannelsConfigNavigationTests : IDisposable
             {
               "configVersion": 1
             }
+            """);
+    }
+
+    private void WriteTeamsChannelFiles()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ClientId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "BotId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """
+            { "configVersion": 1, "Teams": { "ClientSecret": "teams-test-secret" } }
             """);
     }
 

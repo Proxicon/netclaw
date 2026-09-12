@@ -378,7 +378,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             var label = string.IsNullOrWhiteSpace(chat.Topic)
                 ? chat.ParticipantPreview.Count > 0 ? string.Join(", ", chat.ParticipantPreview) : "Group Chat"
                 : chat.Topic;
-            var suffix = chat.Id.Length <= 8 ? chat.Id : chat.Id[^8..];
+            var suffix = ChannelsConfigViewModel.GetGroupChatDisplaySuffix(chat.Id);
             layout = layout.WithChild(Row(
                 $"{FocusPrefix(ViewModel.DirectoryResultIndex == index)}{label} · {suffix}",
                 ViewModel.DirectoryResultIndex == index));
@@ -444,7 +444,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Header("  Remove global Teams principal?"))
             .WithChild(Hint($"  {principal.Label}"))
             .WithChild(Hint($"  Canonical ID: {principal.Id}"))
-            .WithChild(Hint("  Channel-specific grants remain unchanged. Other grants can still authorize this person."))
+            .WithChild(Hint($"  {ViewModel.TeamsPrincipalRemovalImpact}"))
             .WithChild(Layouts.Empty().Height(1))
             .WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalRemovalIndex == 0)}Cancel", ViewModel.TeamsPrincipalRemovalIndex == 0))
             .WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalRemovalIndex == 1)}Remove", ViewModel.TeamsPrincipalRemovalIndex == 1));
@@ -476,15 +476,12 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Header("  Microsoft Teams > Channel access"))
             .WithChild(Hint("  These restrictions union with global Teams users and groups."))
             .WithChild(Layouts.Empty().Height(1));
-        layout = layout.WithChild(Row(
-            $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == 0)}Allowed users ({access.AllowedUserIds.Length})",
-            ViewModel.ChannelAccessRowIndex == 0));
-        layout = layout.WithChild(Row(
-            $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == 1)}Allowed groups ({access.AllowedGroupIds.Length})",
-            ViewModel.ChannelAccessRowIndex == 1));
-        layout = layout.WithChild(Row(
-            $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == 2)}Done",
-            ViewModel.ChannelAccessRowIndex == 2));
+        foreach (var (row, index) in ViewModel.GetTeamsChannelAccessRows().Select((row, index) => (row, index)))
+        {
+            layout = layout.WithChild(Row(
+                $"{FocusPrefix(ViewModel.ChannelAccessRowIndex == index)}{row.Label}",
+                ViewModel.ChannelAccessRowIndex == index));
+        }
         return layout;
     }
 
@@ -1382,9 +1379,9 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         if (_singleInputScreen == ChannelsConfigScreen.AddChannel)
             ViewModel.AddChannelInput = _singleInput?.Text;
         else if (_singleInputScreen == ChannelsConfigScreen.TeamsTeamSearch)
-            ViewModel.DirectorySearchInput = _singleInput?.Text;
+            ViewModel.StageTeamsDirectorySearchInput(_singleInput?.Text);
         else if (_singleInputScreen is ChannelsConfigScreen.TeamsUserSearch or ChannelsConfigScreen.TeamsGroupSearch)
-            ViewModel.DirectorySearchInput = _singleInput?.Text;
+            ViewModel.StageTeamsDirectorySearchInput(_singleInput?.Text);
         else if (_singleInputScreen == ChannelsConfigScreen.TeamsGroupChatSearch)
             ViewModel.GroupChatSearchInput = _singleInput?.Text;
         else if (_singleInputScreen == ChannelsConfigScreen.AllowedUsers)

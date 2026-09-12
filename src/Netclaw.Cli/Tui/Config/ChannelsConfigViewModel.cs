@@ -42,6 +42,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     private readonly Dictionary<string, TeamsDirectoryTeam> _teamsById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TeamsDirectoryChannel> _teamsChannelsByIdentity = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _teamsChannelTeamIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TeamsDirectoryUser> _teamsUsersById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TeamsDirectoryGroup> _teamsGroupsById = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TeamsDirectoryGroupChat> _teamsGroupChatsById = new(StringComparer.Ordinal);
     private ChannelType _activeAdapterType = ChannelType.Slack;
     private int _managementMenuIndex;
     private int _channelRowIndex;
@@ -186,7 +189,15 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal bool IsGroupChatDiscovery => _isGroupChatDiscovery;
     internal TeamsDirectoryUser? SelectedGroupChatParticipant => _selectedGroupChatParticipant;
     internal IReadOnlyList<TeamsDirectoryGroupChat> GroupChatSearchResults => _groupChatSearchResults;
-    internal string? GroupChatSearchInput { get => _groupChatSearchInput; set => _groupChatSearchInput = value; }
+    internal string? GroupChatSearchInput
+    {
+        get => _groupChatSearchInput;
+        set
+        {
+            _groupChatSearchInput = value;
+            _directoryResultIndex = Clamp(_directoryResultIndex, GetGroupChatSearchResultCount());
+        }
+    }
     internal IReadOnlyList<TeamsDirectoryGroupChat> FilteredGroupChatSearchResults
     {
         get
@@ -209,6 +220,24 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal int TeamsPrincipalFilterIndex => _teamsPrincipalFilterIndex;
     internal TeamsPrincipalRow? PendingPrincipalRemoval => _pendingPrincipalRemoval;
     internal int TeamsPrincipalRemovalIndex => _teamsPrincipalRemovalIndex;
+    internal string TeamsPrincipalRemovalImpact
+    {
+        get
+        {
+            var pending = _pendingPrincipalRemoval;
+            if (pending is null)
+                return string.Empty;
+
+            var users = GetAllowedUserIds(ChannelType.Teams)
+                .Where(id => pending.Kind != TeamsPrincipalKind.User || !string.Equals(id, pending.Id, StringComparison.Ordinal));
+            var groups = GetAllowedGroupIds(ChannelType.Teams)
+                .Where(id => pending.Kind != TeamsPrincipalKind.Group || !string.Equals(id, pending.Id, StringComparison.Ordinal));
+            if (users.Any() || groups.Any())
+                return "Other global grants remain. Channel-specific grants can also authorize this person.";
+
+            return "After activation, channels without exact grants accept any verified sender. Personal and Group Chat ingress deny until you add a global user or group.";
+        }
+    }
 
     internal static IReadOnlyList<TrustAudience> AudienceOptions { get; } =
     [
@@ -441,6 +470,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     internal void OpenAdapterManagement(ChannelType type)
     {
+        ClearTeamsEditContext();
         _activeAdapterType = type;
         _managementMenuIndex = 0;
         Screen.Value = ChannelsConfigScreen.AdapterMenu;
@@ -756,7 +786,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             {
                 rows.Add(new ChannelPermissionRow(
                     chatId,
-                    $"Group chat · {AbbreviateIdentifier(chatId)}",
+                    $"Group chat · {FormatTeamsGroupChatLabel(chatId)}",
                     TrustAudience.Team,
                     IsDirectMessage: false,
                     IsAddAction: false,
@@ -998,6 +1028,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     internal void BeginGroupChatDiscovery()
     {
+        ClearTeamsEditContext();
         _isGroupChatDiscovery = true;
         _selectedGroupChatParticipant = null;
         _groupChatSearchResults = [];
@@ -1305,7 +1336,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal void ApplyAllowedUsers()
     {
         var userIds = ChannelCsv.ParseCsv(AllowedUsersInput, trimHash: false);
-        if (_activeAdapterType == ChannelType.Teams && !AreCanonicalEntraObjectIds(userIds))
+        if (_activeAdapterType == ChannelType.Teams
+            && !TryNormalizeEntraObjectIds(userIds, out userIds))
         {
             Status.Value = new ConfigStatusMessage("Each Teams user ID must be a canonical Entra object ID.", ConfigStatusTone.Error);
             NotifyContentChanged();
@@ -1329,6 +1361,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         SetAllowedUserIds(_activeAdapterType, userIds);
         UpdateAdapterPickerSummary(_activeAdapterType);
+        _teamsPrincipalSearchReturnScreen = null;
         Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction("Allowed users saved.");
         NotifyContentChanged();
@@ -1349,6 +1382,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     internal void BeginTeamsPrincipalAdd()
     {
+        ClearTeamsEditContext();
         _teamsPrincipalManagementIndex = 0;
         Screen.Value = ChannelsConfigScreen.TeamsPrincipalAdd;
         Status.Value = new ConfigStatusMessage("Select a user or group to add to the global Teams access list.", ConfigStatusTone.Neutral);
@@ -1378,7 +1412,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             rows.AddRange(GetAllowedUserIds(ChannelType.Teams).Select(id => new TeamsPrincipalRow(
                 id,
                 TeamsPrincipalKind.User,
-                $"User · {AbbreviateIdentifier(id)}",
+                $"User · {FormatTeamsUserLabel(id)}",
                 "Global Teams access")));
         }
 
@@ -1387,7 +1421,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             rows.AddRange(GetAllowedGroupIds(ChannelType.Teams).Select(id => new TeamsPrincipalRow(
                 id,
                 TeamsPrincipalKind.Group,
-                $"Group · {AbbreviateIdentifier(id)}",
+                $"Group · {FormatTeamsGroupLabel(id)}",
                 "Global Teams access")));
         }
 
@@ -1481,7 +1515,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal void ApplyAllowedGroups()
     {
         var groupIds = ChannelCsv.ParseCsv(AllowedGroupsInput, trimHash: false);
-        if (_activeAdapterType == ChannelType.Teams && !AreCanonicalEntraObjectIds(groupIds))
+        if (_activeAdapterType == ChannelType.Teams
+            && !TryNormalizeEntraObjectIds(groupIds, out groupIds))
         {
             Status.Value = new ConfigStatusMessage("Each Teams group ID must be a canonical Entra object ID.", ConfigStatusTone.Error);
             NotifyContentChanged();
@@ -1505,6 +1540,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         SetAllowedGroupIds(_activeAdapterType, groupIds);
         UpdateAdapterPickerSummary(_activeAdapterType);
+        _teamsPrincipalSearchReturnScreen = null;
         Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction("Allowed group settings saved.");
         NotifyContentChanged();
@@ -1568,6 +1604,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         }
 
         _groupChatDetailsId = null;
+        EndGroupChatDiscovery();
         UpdateAdapterPickerSummary(ChannelType.Teams);
         Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction("Microsoft Teams Group Chat settings saved.");
@@ -1625,8 +1662,25 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     internal void MoveChannelAccessRow(int delta)
     {
-        _channelAccessRowIndex = Clamp(_channelAccessRowIndex + delta, 3);
+        _channelAccessRowIndex = Clamp(_channelAccessRowIndex + delta, GetTeamsChannelAccessRows().Count);
         NotifyContentChanged();
+    }
+
+    internal IReadOnlyList<TeamsChannelAccessRow> GetTeamsChannelAccessRows()
+    {
+        if (_editingChannelAccess is null)
+            return [];
+
+        return
+        [
+            new TeamsChannelAccessRow("Add allowed user", TeamsChannelAccessRowKind.AddUser, null),
+            new TeamsChannelAccessRow("Add allowed group", TeamsChannelAccessRowKind.AddGroup, null),
+            .. _editingChannelAccess.AllowedUserIds.Select(id => new TeamsChannelAccessRow(
+                $"Remove user · {FormatTeamsUserLabel(id)}", TeamsChannelAccessRowKind.RemoveUser, id)),
+            .. _editingChannelAccess.AllowedGroupIds.Select(id => new TeamsChannelAccessRow(
+                $"Remove group · {FormatTeamsGroupLabel(id)}", TeamsChannelAccessRowKind.RemoveGroup, id)),
+            new TeamsChannelAccessRow("Done", TeamsChannelAccessRowKind.Done, null)
+        ];
     }
 
     internal void ActivateChannelAccessRow()
@@ -1634,21 +1688,55 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (_editingChannelAccess is null)
             return;
 
-        switch (_channelAccessRowIndex)
+        var rows = GetTeamsChannelAccessRows();
+        if (_channelAccessRowIndex >= rows.Count)
+            return;
+
+        var row = rows[_channelAccessRowIndex];
+        switch (row.Kind)
         {
-            case 0:
+            case TeamsChannelAccessRowKind.AddUser:
                 BeginTeamsUserSearch();
                 break;
-            case 1:
+            case TeamsChannelAccessRowKind.AddGroup:
                 BeginTeamsGroupSearch();
                 break;
-            default:
+            case TeamsChannelAccessRowKind.RemoveUser:
+            case TeamsChannelAccessRowKind.RemoveGroup:
+                RemoveTeamsChannelPrincipal(row);
+                break;
+            case TeamsChannelAccessRowKind.Done:
                 _editingChannelAccess = null;
                 Screen.Value = ChannelsConfigScreen.ChannelPermissions;
                 break;
         }
 
         NotifyContentChanged();
+    }
+
+    private void RemoveTeamsChannelPrincipal(TeamsChannelAccessRow row)
+    {
+        if (_editingChannelAccess is null || row.Id is null)
+            return;
+
+        var replacement = row.Kind == TeamsChannelAccessRowKind.RemoveUser
+            ? new TeamsChannelAccessOverride
+            {
+                TeamId = _editingChannelAccess.TeamId,
+                ChannelId = _editingChannelAccess.ChannelId,
+                AllowedUserIds = [.. _editingChannelAccess.AllowedUserIds.Where(id => !string.Equals(id, row.Id, StringComparison.Ordinal))],
+                AllowedGroupIds = _editingChannelAccess.AllowedGroupIds
+            }
+            : new TeamsChannelAccessOverride
+            {
+                TeamId = _editingChannelAccess.TeamId,
+                ChannelId = _editingChannelAccess.ChannelId,
+                AllowedUserIds = _editingChannelAccess.AllowedUserIds,
+                AllowedGroupIds = [.. _editingChannelAccess.AllowedGroupIds.Where(id => !string.Equals(id, row.Id, StringComparison.Ordinal))]
+            };
+        ReplaceEditingChannelAccess(replacement);
+        _channelAccessRowIndex = Clamp(_channelAccessRowIndex, GetTeamsChannelAccessRows().Count);
+        AutosaveCompletedAction($"Removed {row.Id} from channel-specific Teams access and saved.");
     }
 
     private void ReplaceEditingChannelAccess(TeamsChannelAccessOverride replacement)
@@ -1723,6 +1811,29 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         _userSearchResults = [];
         _groupSearchResults = [];
         _directoryResultIndex = 0;
+    }
+
+    internal void StageTeamsDirectorySearchInput(string? value)
+    {
+        if (string.Equals(DirectorySearchInput, value, StringComparison.Ordinal))
+            return;
+
+        DirectorySearchInput = value;
+        _teamsDirectorySearch?.Invalidate();
+        _directoryResultIndex = 0;
+
+        switch (Screen.Value)
+        {
+            case ChannelsConfigScreen.TeamsTeamSearch:
+                _teamSearchResults = [];
+                break;
+            case ChannelsConfigScreen.TeamsUserSearch:
+                _userSearchResults = [];
+                break;
+            case ChannelsConfigScreen.TeamsGroupSearch:
+                _groupSearchResults = [];
+                break;
+        }
     }
 
     internal Task SearchUsersFromInputAsync()
@@ -1929,11 +2040,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         _groupChatSearchResults =
         [
-            .. _groupChatSearchResults
-                .Concat(response.Result.Value.Chats)
+            .. response.Result.Value.Chats
                 .GroupBy(static chat => chat.Id, StringComparer.Ordinal)
                 .Select(static group => group.First())
-                .Take(TeamsGraphSearchLimits.MaximumResults)
         ];
         _groupChatContinuation = response.Result.Value.Continuation;
         _directoryResultIndex = 0;
@@ -2038,6 +2147,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         SetAllowedUserIds(ChannelType.Teams, [.. users, user.Id]);
         UpdateAdapterPickerSummary(ChannelType.Teams);
+        _teamsPrincipalSearchReturnScreen = null;
+        Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction($"Added {FormatTeamsUserLabel(user)} and saved.");
         NotifyContentChanged();
     }
@@ -2091,6 +2202,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         SetAllowedGroupIds(ChannelType.Teams, [.. groups, group.Id]);
         UpdateAdapterPickerSummary(ChannelType.Teams);
+        _teamsPrincipalSearchReturnScreen = null;
+        Screen.Value = ChannelsConfigScreen.AdapterMenu;
         AutosaveCompletedAction($"Added {FormatTeamsGroupLabel(group)} and saved.");
         NotifyContentChanged();
     }
@@ -2116,6 +2229,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             graphCredentialsConfigured ? "Graph app credentials: configured; access not yet verified" : "Graph app credentials: incomplete",
             "Required Graph application permissions: Team.ReadBasic.All, Channel.ReadBasic.All",
             "Required Graph application permissions: User.Read.All, GroupMember.Read.All",
+            "Optional Graph application permission: Chat.ReadBasic.All for Group Chat labels and discovery",
             "Admin consent: required for Graph application permissions",
             _teamsDirectoryLabelsAvailable switch
             {
@@ -3001,14 +3115,13 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (Screen.Value == ChannelsConfigScreen.TeamsChannelAccess)
             _editingChannelAccess = null;
 
+        if (Screen.Value == ChannelsConfigScreen.GroupChats && _isGroupChatDiscovery)
+            EndGroupChatDiscovery();
+
         if (Screen.Value == ChannelsConfigScreen.TeamsUserSearch && _isGroupChatDiscovery)
         {
-            _isGroupChatDiscovery = false;
             _teamsPrincipalSearchReturnScreen = ChannelsConfigScreen.TeamsDestinationAdd;
-            _selectedGroupChatParticipant = null;
-            _groupChatSearchResults = [];
-            _groupChatContinuation = null;
-            _groupChatSearchInput = null;
+            EndGroupChatDiscovery();
         }
 
         if (Screen.Value == ChannelsConfigScreen.TeamsPrincipalRemovalConfirm)
@@ -3057,6 +3170,22 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
         Status.Value = new ConfigStatusMessage(string.Empty, ConfigStatusTone.Neutral);
         NotifyContentChanged();
+    }
+
+    private void ClearTeamsEditContext()
+    {
+        _editingChannelAccess = null;
+        _teamsPrincipalSearchReturnScreen = null;
+        EndGroupChatDiscovery();
+    }
+
+    private void EndGroupChatDiscovery()
+    {
+        _isGroupChatDiscovery = false;
+        _selectedGroupChatParticipant = null;
+        _groupChatSearchResults = [];
+        _groupChatContinuation = null;
+        _groupChatSearchInput = null;
     }
 
     private ChannelsConfigScreen ClearTeamsPrincipalSearchReturnScreen(ChannelsConfigScreen returnScreen)
@@ -3569,8 +3698,25 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
 
     private static string TeamsChannelIdentity(string teamId, string channelId) => teamId + "\n" + channelId;
 
-    private static bool AreCanonicalEntraObjectIds(IReadOnlyList<string> ids) =>
-        ids.All(static id => Guid.TryParse(id, out _));
+    private static bool TryNormalizeEntraObjectIds(IReadOnlyList<string> ids, out List<string> normalized)
+    {
+        normalized = [];
+        var unique = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in ids)
+        {
+            if (!Guid.TryParse(id, out var parsed))
+                return false;
+
+            var canonical = parsed.ToString("D");
+            if (unique.Add(canonical))
+                normalized.Add(canonical);
+        }
+
+        return true;
+    }
+
+    private int GetGroupChatSearchResultCount()
+        => FilteredGroupChatSearchResults.Count + (HasGroupChatContinuation ? 2 : 1);
 
     internal bool IsAdvancedTeamsDirectoryActionSelected() => Screen.Value switch
     {
@@ -3594,6 +3740,13 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             : $"{trimmed[..visibleLength]}…{trimmed[^visibleLength..]}";
     }
 
+    internal static string GetGroupChatDisplaySuffix(string chatId)
+    {
+        var separator = chatId.IndexOf('@', StringComparison.Ordinal);
+        var opaqueId = separator < 0 ? chatId : chatId[..separator];
+        return opaqueId.Length <= 8 ? opaqueId : opaqueId[^8..];
+    }
+
     private static string FormatTeamsUserLabel(TeamsDirectoryUser user)
     {
         var principal = user.UserPrincipalName ?? user.Mail;
@@ -3602,10 +3755,32 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             : principal ?? user.DisplayName ?? "selected user";
     }
 
+    private string FormatTeamsUserLabel(string userId)
+        => _teamsUsersById.TryGetValue(userId, out var user)
+            ? FormatTeamsUserLabel(user)
+            : AbbreviateIdentifier(userId);
+
     private static string FormatTeamsGroupLabel(TeamsDirectoryGroup group)
     {
         var label = group.DisplayName ?? group.Mail ?? "selected group";
         return $"{label} ({group.Kind})";
+    }
+
+    private string FormatTeamsGroupLabel(string groupId)
+        => _teamsGroupsById.TryGetValue(groupId, out var group)
+            ? FormatTeamsGroupLabel(group)
+            : AbbreviateIdentifier(groupId);
+
+    private string FormatTeamsGroupChatLabel(string chatId)
+    {
+        if (!_teamsGroupChatsById.TryGetValue(chatId, out var chat))
+            return GetGroupChatDisplaySuffix(chatId);
+
+        return !string.IsNullOrWhiteSpace(chat.Topic)
+            ? chat.Topic
+            : chat.ParticipantPreview.Count > 0
+                ? string.Join(", ", chat.ParticipantPreview)
+                : GetGroupChatDisplaySuffix(chatId);
     }
 
     private static int AudienceIndex(TrustAudience audience)
@@ -3707,11 +3882,29 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             .Except(mappings.Select(static mapping => mapping.ChannelId), StringComparer.Ordinal)
             .ToHashSet(StringComparer.Ordinal);
         var configuredTeamIds = GetTeamIds();
-        if (mappings.Length == 0 && (unmappedChannelIds.Count == 0 || configuredTeamIds.Count == 0))
+        var teamsDraft = Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        var allowedUsers = GetAllowedUserIds(ChannelType.Teams)
+            .Concat(teamsDraft.ChannelAccessOverrides.SelectMany(static access => access.AllowedUserIds))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var allowedGroups = GetAllowedGroupIds(ChannelType.Teams)
+            .Concat(teamsDraft.ChannelAccessOverrides.SelectMany(static access => access.AllowedGroupIds))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var groupChatIds = ChannelCsv.ParseCsv(teamsDraft.AllowedGroupChatIdsInput,
+            trimHash: false);
+        if (mappings.Length == 0
+            && (unmappedChannelIds.Count == 0 || configuredTeamIds.Count == 0)
+            && allowedUsers.Length == 0
+            && allowedGroups.Length == 0
+            && groupChatIds.Count == 0)
             return;
 
         var teams = new ConcurrentDictionary<string, TeamsDirectoryTeam>(StringComparer.Ordinal);
         var channels = new ConcurrentDictionary<string, TeamsDirectoryChannel>(StringComparer.Ordinal);
+        var users = new ConcurrentDictionary<string, TeamsDirectoryUser>(StringComparer.Ordinal);
+        var groups = new ConcurrentDictionary<string, TeamsDirectoryGroup>(StringComparer.Ordinal);
+        var groupChats = new ConcurrentDictionary<string, TeamsDirectoryGroupChat>(StringComparer.Ordinal);
         var legacyCandidates = new ConcurrentDictionary<string, ConcurrentDictionary<string, TeamsDirectoryChannel>>(StringComparer.Ordinal);
         var directoryRequestCount = 0;
         var availableRequestCount = 0;
@@ -3779,6 +3972,48 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                         channels[TeamsChannelIdentity(result.Value.TeamId, result.Value.Id)] = result.Value;
                     }
                 }).ConfigureAwait(false);
+
+            await Parallel.ForEachAsync(
+                allowedUsers,
+                new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = 4 },
+                async (userId, token) =>
+                {
+                    Interlocked.Increment(ref directoryRequestCount);
+                    var result = await directory.GetUserAsync(userId, token).ConfigureAwait(false);
+                    if (result.IsAvailable && result.Value is not null)
+                    {
+                        Interlocked.Increment(ref availableRequestCount);
+                        users[result.Value.Id] = result.Value;
+                    }
+                }).ConfigureAwait(false);
+
+            await Parallel.ForEachAsync(
+                allowedGroups,
+                new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = 4 },
+                async (groupId, token) =>
+                {
+                    Interlocked.Increment(ref directoryRequestCount);
+                    var result = await directory.GetGroupAsync(groupId, token).ConfigureAwait(false);
+                    if (result.IsAvailable && result.Value is not null)
+                    {
+                        Interlocked.Increment(ref availableRequestCount);
+                        groups[result.Value.Id] = result.Value;
+                    }
+                }).ConfigureAwait(false);
+
+            await Parallel.ForEachAsync(
+                groupChatIds,
+                new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = 4 },
+                async (chatId, token) =>
+                {
+                    Interlocked.Increment(ref directoryRequestCount);
+                    var result = await directory.GetGroupChatAsync(chatId, token).ConfigureAwait(false);
+                    if (result.IsAvailable && result.Value is not null)
+                    {
+                        Interlocked.Increment(ref availableRequestCount);
+                        groupChats[result.Value.Id] = result.Value;
+                    }
+                }).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -3799,6 +4034,12 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
                     _teamsById[teamId] = team;
                 foreach (var (identity, channel) in channels)
                     _teamsChannelsByIdentity[identity] = channel;
+                foreach (var (userId, user) in users)
+                    _teamsUsersById[userId] = user;
+                foreach (var (groupId, group) in groups)
+                    _teamsGroupsById[groupId] = group;
+                foreach (var (chatId, groupChat) in groupChats)
+                    _teamsGroupChatsById[chatId] = groupChat;
                 foreach (var candidate in legacyCandidates.Where(static candidate => candidate.Value.Count == 1))
                     _teamsChannelTeamIds[candidate.Key] = candidate.Value.Single().Key;
                 NotifyContentChanged();
@@ -4322,6 +4563,11 @@ internal sealed class ChannelsConfigPersistenceMapper
         {
             if (knownProvider)
                 fields.Add(new SectionFieldAction("Teams.Enabled", SectionFieldActionKind.Set, false));
+            SetArrayOrDelete(fields, "Teams.AllowedGroupChatIds", ChannelCsv.ParseCsv(vm.AllowedGroupChatIdsInput, trimHash: false));
+            SetArrayOrDelete(fields, "Teams.AllowedUserIds", ChannelCsv.ParseCsv(vm.AllowedUserIdsInput, trimHash: false));
+            SetArrayOrDelete(fields, "Teams.AllowedGroupIds", ChannelCsv.ParseCsv(vm.AllowedGroupIdsInput, trimHash: false));
+            SetTeamsChannelAudienceOverridesOrDelete(fields, vm.ChannelAudienceOverrides);
+            SetTeamsChannelAccessOverridesOrDelete(fields, vm.ChannelAccessOverrides);
             AddSecretPreserveOrSet(secrets, "Teams.ClientSecret", vm.ClientSecret, vm.HasPersistedClientSecret);
             return;
         }
@@ -4759,6 +5005,17 @@ internal sealed class TeamsChannelDraft : ChannelProviderDraft
     public IReadOnlyList<TeamsChannelAudienceOverride> ChannelAudienceOverrides { get; init; } = [];
     public IReadOnlyList<TeamsChannelAccessOverride> ChannelAccessOverrides { get; init; } = [];
 }
+
+internal enum TeamsChannelAccessRowKind
+{
+    AddUser,
+    AddGroup,
+    RemoveUser,
+    RemoveGroup,
+    Done
+}
+
+internal sealed record TeamsChannelAccessRow(string Label, TeamsChannelAccessRowKind Kind, string? Id);
 
 /// <summary>
 /// Shared parsing for the comma-separated channel/user lists in the Channels editor. One copy

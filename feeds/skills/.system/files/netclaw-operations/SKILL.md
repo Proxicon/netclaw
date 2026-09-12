@@ -3,7 +3,7 @@ name: netclaw-operations
 description: "REQUIRED when the user asks about scheduling, reminders, cron jobs, timers, background jobs, diagnostics, troubleshooting, MCP tools, daemon health, identity updates, or Netclaw capabilities and self-maintenance."
 metadata:
   author: netclaw
-  version: "2.65.3"
+  version: "2.65.4"
 ---
 
 # Netclaw Operations
@@ -36,6 +36,21 @@ a reference file — load the one matching the user's intent with
 | Rotate or repair secrets | `skill_read_resource('netclaw-operations', 'references/secrets.md')` |
 | Pair remote devices, manage access | `skill_read_resource('netclaw-operations', 'references/devices.md')` |
 | Kick the tires on Netclaw end-to-end locally | `skill_read_resource('netclaw-operations', 'references/demo-apphost.md')` |
+
+## Microsoft Teams configuration
+
+Use `netclaw config` to configure Microsoft Teams. The TUI stores canonical
+Teams and Entra IDs. It shows names only as cached presentation labels.
+
+Use an authenticated source for manual IDs. The TUI accepts Entra object IDs
+in canonical lowercase `D` format and rejects invalid IDs before it saves.
+
+Use the Group Chat picker only when Graph has `Chat.ReadBasic.All`. This
+permission is optional. Manual Group Chat IDs still work without it.
+
+When you remove the final global Teams user or group, explain the result.
+Allowed channels without exact grants accept verified senders. Personal and
+Group Chat ingress remains denied until a global principal exists.
 
 ## File and Shell Selection
 

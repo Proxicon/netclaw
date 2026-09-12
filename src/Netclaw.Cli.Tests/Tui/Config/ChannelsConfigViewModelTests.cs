@@ -74,6 +74,98 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Global_principal_entry_does_not_retain_a_channel_edit_scope()
+    {
+        WriteTeamsConfig(enabled: true, groupChats: []);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginTeamsPrincipalAdd();
+        vm.ActivateTeamsPrincipalAdd();
+        vm.BeginManualTeamsUserEntry();
+        vm.AllowedUsersInput = "11111111-1111-1111-1111-111111111111";
+        vm.ApplyAllowedUsers();
+        await vm.PendingConfigWrite;
+
+        vm.ActivateManagementMenuItem();
+        vm.ActivateSelectedChannelRow();
+        vm.ActivateChannelAccessRow();
+        vm.GoBack();
+        vm.BeginTeamsPrincipalAdd();
+        vm.ActivateTeamsPrincipalAdd();
+        vm.AddDiscoveredTeamsUser(new TeamsDirectoryUser(
+            "22222222-2222-2222-2222-222222222222", "Ada Lovelace", "ada@example.test", null));
+        await vm.PendingConfigWrite;
+
+        Assert.Equal(
+            ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"],
+            ChannelCsv.ParseCsv(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedUserIdsInput, trimHash: false));
+        Assert.Empty(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelAccessOverrides);
+    }
+
+    [Fact]
+    public async Task Group_chat_discovery_ends_before_a_later_global_user_entry()
+    {
+        WriteTeamsConfig(enabled: true, groupChats: []);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginGroupChatDiscovery();
+        vm.BeginManualGroupChatEntry();
+        vm.AllowedGroupChatsInput = "19:operations@thread.v2";
+        vm.ApplyGroupChats();
+        await vm.PendingConfigWrite;
+
+        vm.BeginTeamsPrincipalAdd();
+        vm.ActivateTeamsPrincipalAdd();
+        vm.BeginAdvancedTeamsUserEntry();
+
+        Assert.Equal(ChannelsConfigScreen.AllowedUsers, vm.Screen.Value);
+        Assert.False(vm.IsGroupChatDiscovery);
+    }
+
+    [Fact]
+    public async Task Disabled_Teams_destination_removal_persists_after_reopen()
+    {
+        WriteTeamsConfig(enabled: false, groupChats: ["19:operations@thread.v2"]);
+        using (var vm = CreateViewModel())
+        {
+            vm.OpenAdapterManagement(ChannelType.Teams);
+            vm.ActivateManagementMenuItem();
+            vm.MoveChannelRow(1);
+            vm.BeginTeamsDestinationRemoval();
+            vm.MoveTeamsDestinationRemoval(1);
+            vm.ConfirmTeamsDestinationRemoval(remove: true);
+            Assert.Null(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).AllowedGroupChatIdsInput);
+            await vm.PendingConfigWrite;
+        }
+
+        using var reopened = CreateViewModel();
+        var teams = reopened.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams);
+        Assert.False(reopened.Step.IsAdapterEnabled(ChannelType.Teams));
+        Assert.Null(teams.AllowedGroupChatIdsInput);
+    }
+
+    [Fact]
+    public async Task Manual_Teams_principal_ids_are_normalized_before_persistence()
+    {
+        WriteTeamsConfig(enabled: true, groupChats: []);
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginTeamsPrincipalAdd();
+        vm.ActivateTeamsPrincipalAdd();
+        vm.BeginManualTeamsUserEntry();
+        vm.AllowedUsersInput = "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}";
+        vm.ApplyAllowedUsers();
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var values));
+        Assert.Equal(["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"], ToStringArray(values));
+    }
+
+    [Fact]
     public async Task Teams_principal_management_removes_only_the_confirmed_global_principal()
     {
         File.WriteAllText(_paths.NetclawConfigPath,
@@ -2595,6 +2687,32 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
 
     private void WriteFreshConfig()
         => File.WriteAllText(_paths.NetclawConfigPath, """{ "configVersion": 1 }""");
+
+    private void WriteTeamsConfig(bool enabled, IReadOnlyList<string> groupChats)
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            $$"""
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": {{enabled.ToString().ToLowerInvariant()}},
+                "TenantId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ClientId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "BotId": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "AllowedTeamIds": ["team-a"],
+                "AllowedChannelIds": ["channel-a"],
+                "AllowedGroupChatIds": [{{string.Join(',', groupChats.Select(id => $"\"{id}\""))}}]
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": { "ClientSecret": "teams-test-secret" }
+            }
+            """);
+    }
 
     private string[] PersistedChannels(ChannelType type)
     {
