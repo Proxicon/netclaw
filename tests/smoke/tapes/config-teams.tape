@@ -23,7 +23,7 @@ Wait+Screen@30s /Settings Areas/
 
 # Channels is row 3 in the dashboard list. Microsoft Teams is the fourth
 # adapter in the picker, immediately before the semantic Done row.
-Down
+Down 2
 Enter
 Wait+Screen@10s /Which channels would you like to connect/
 Wait+Screen@10s /Slack/
@@ -169,7 +169,7 @@ Up 3
 Down 3
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/
-Down 2
+Down
 Enter
 Wait+Screen@10s /Microsoft Teams > Add users or groups/
 Down
