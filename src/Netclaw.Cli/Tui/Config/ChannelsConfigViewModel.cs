@@ -1656,6 +1656,17 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         NotifyContentChanged();
     }
 
+    internal void BeginAdvancedTeamsUserEntry()
+    {
+        if (_isGroupChatDiscovery)
+        {
+            BeginManualGroupChatEntry();
+            return;
+        }
+
+        BeginManualTeamsUserEntry();
+    }
+
     internal void BeginManualTeamsGroupEntry()
     {
         AllowedGroupsInput = ChannelCsv.JoinOrNull(_editingChannelAccess?.AllowedGroupIds ?? GetAllowedGroupIds(ChannelType.Teams));

@@ -313,6 +313,43 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Advanced_Group_Chat_path_does_not_add_a_global_user()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a"
+              }
+            }
+            """);
+        File.WriteAllText(_paths.SecretsPath,
+            """{ "configVersion": 1, "Teams": { "ClientSecret": "teams-secret" } }""");
+        using var vm = CreateViewModel();
+
+        vm.OpenAdapterManagement(ChannelType.Teams);
+        vm.BeginGroupChatDiscovery();
+        vm.BeginAdvancedTeamsUserEntry();
+
+        Assert.Equal(ChannelsConfigScreen.GroupChats, vm.Screen.Value);
+        Assert.Null(vm.AllowedUsersInput);
+
+        vm.AllowedGroupChatsInput = "19:offline-group-chat@thread.v2";
+        vm.ToggleGroupChats();
+        vm.ApplyGroupChats();
+        await vm.PendingConfigWrite;
+
+        var config = ConfigFileHelper.LoadJsonDict(_paths.NetclawConfigPath);
+        Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupChatIds", out var groupChats));
+        Assert.Equal(["19:offline-group-chat@thread.v2"], ToStringArray(groupChats));
+        Assert.False(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out _));
+    }
+
+    [Fact]
     public async Task Save_disabled_existing_Teams_preserves_dormant_fields_and_secret()
     {
         WriteAllChannelConfig();

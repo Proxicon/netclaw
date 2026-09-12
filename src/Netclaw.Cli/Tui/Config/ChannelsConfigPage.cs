@@ -1064,7 +1064,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             StageSingleInput();
             if (ViewModel.IsAdvancedTeamsDirectoryActionSelected()
                 && string.IsNullOrWhiteSpace(ViewModel.DirectorySearchInput))
-                ViewModel.BeginManualTeamsUserEntry();
+                ViewModel.BeginAdvancedTeamsUserEntry();
             else if (ViewModel.UserSearchResults.Count == 0)
                 _ = ViewModel.SearchUsersFromInputAsync();
             else
