@@ -137,7 +137,7 @@ Enter
 Wait+Screen@10s /Microsoft Teams > Add a destination/
 Wait+Screen@10s /Channel/
 Enter
-Wait+Screen@10s /Microsoft Teams > Find Teams/
+Wait+Screen@10s /Microsoft Teams > Add channel/
 Enter
 Wait+Screen@10s /Advanced: canonical Teams channel IDs/
 Type "55555555-5555-5555-5555-555555555555"
