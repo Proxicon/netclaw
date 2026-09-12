@@ -153,7 +153,7 @@ Enter
 Wait+Screen@10s /Microsoft Teams > Add users or groups/
 Wait+Screen@10s /User/
 Enter
-Wait+Screen@10s /Microsoft Teams > Find users/
+Wait+Screen@10s /Microsoft Teams > Allowed users/
 Enter
 Wait+Screen@10s /Advanced path: enter canonical Entra user IDs/
 Type ",77777777-7777-7777-7777-777777777777"
@@ -174,7 +174,7 @@ Enter
 Wait+Screen@10s /Microsoft Teams > Add users or groups/
 Down
 Enter
-Wait+Screen@10s /Microsoft Teams > Find groups/
+Wait+Screen@10s /Microsoft Teams > Allowed groups/
 Enter
 Wait+Screen@10s /Advanced path: enter canonical Entra group IDs/
 Type ",99999999-9999-9999-9999-999999999999"
@@ -195,7 +195,7 @@ Enter
 Wait+Screen@10s /Microsoft Teams > Add a destination/
 Down
 Enter
-Wait+Screen@10s /Microsoft Teams > Find users/
+Wait+Screen@10s /Microsoft Teams > Find chats containing this user/
 Enter
 Wait+Screen@10s /Microsoft Teams > Group Chats/
 Wait+Screen@10s /Canonical Group Chat IDs/

@@ -181,6 +181,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     internal IReadOnlyList<TeamsDirectoryGroup> GroupSearchResults => _groupSearchResults;
     internal TeamsDirectoryTeam? SelectedTeam => _selectedTeam;
     internal int TeamsDestinationAddIndex => _teamsDestinationAddIndex;
+    internal bool IsGroupChatDiscovery => _isGroupChatDiscovery;
     internal TeamsDirectoryUser? SelectedGroupChatParticipant => _selectedGroupChatParticipant;
     internal IReadOnlyList<TeamsDirectoryGroupChat> GroupChatSearchResults => _groupChatSearchResults;
     internal string? GroupChatSearchInput { get => _groupChatSearchInput; set => _groupChatSearchInput = value; }

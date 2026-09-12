@@ -310,9 +310,11 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         var input = EnsureSingleInput(ChannelsConfigScreen.TeamsUserSearch, "teams-user-search", ViewModel.DirectorySearchInput, "Search users by name, UPN, or mail");
         input.OnFocused();
         var layout = Layouts.Vertical()
-            .WithChild(Header(ViewModel.EditingChannelAccess is null
-                ? "  Microsoft Teams > Allowed users"
-                : "  Microsoft Teams > Channel allowed users"))
+            .WithChild(Header(ViewModel.IsGroupChatDiscovery
+                ? "  Microsoft Teams > Find chats containing this user"
+                : ViewModel.EditingChannelAccess is null
+                    ? "  Microsoft Teams > Allowed users"
+                    : "  Microsoft Teams > Channel allowed users"))
             .WithChild(Hint("  Search identity metadata. Netclaw saves only the canonical Entra object ID."))
             .WithChild(WizardStepHelpers.BuildTextInputPanel(input, "User search"));
 
