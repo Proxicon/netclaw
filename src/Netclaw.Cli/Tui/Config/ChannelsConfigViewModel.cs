@@ -74,6 +74,8 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
     private int _teamsPrincipalFilterIndex;
     private int _teamsPrincipalRemovalIndex;
     private TeamsPrincipalRow? _pendingPrincipalRemoval;
+    private ChannelPermissionRow? _pendingTeamsDestinationRemoval;
+    private int _teamsDestinationRemovalIndex;
     private ChannelsConfigScreen? _teamsPrincipalSearchReturnScreen;
 
     // Cancels every input-triggered config write (and its channel-access probe) when the editor is
@@ -921,6 +923,45 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         _channelRowIndex = Clamp(_channelRowIndex, GetChannelRows().Count);
         AutosaveCompletedAction($"Removed {row.DisplayName} and saved.");
         NotifyContentChanged();
+    }
+
+    internal void BeginTeamsDestinationRemoval()
+    {
+        var rows = GetChannelRows();
+        if (_activeAdapterType != ChannelType.Teams || rows.Count == 0)
+            return;
+
+        var row = rows[_channelRowIndex];
+        if (row.IsAction || row.IsDirectMessage)
+            return;
+
+        _pendingTeamsDestinationRemoval = row;
+        _teamsDestinationRemovalIndex = 0;
+        Screen.Value = ChannelsConfigScreen.TeamsDestinationRemovalConfirm;
+        Status.Value = new ConfigStatusMessage(
+            "Confirm removal. The configured destination is denied after configuration activation.",
+            ConfigStatusTone.Warning);
+        NotifyContentChanged();
+    }
+
+    internal ChannelPermissionRow? PendingTeamsDestinationRemoval => _pendingTeamsDestinationRemoval;
+    internal int TeamsDestinationRemovalIndex => _teamsDestinationRemovalIndex;
+
+    internal void MoveTeamsDestinationRemoval(int delta)
+    {
+        _teamsDestinationRemovalIndex = Clamp(_teamsDestinationRemovalIndex + delta, 2);
+        NotifyContentChanged();
+    }
+
+    internal void ConfirmTeamsDestinationRemoval(bool remove)
+    {
+        var pending = _pendingTeamsDestinationRemoval;
+        _pendingTeamsDestinationRemoval = null;
+        Screen.Value = ChannelsConfigScreen.ChannelPermissions;
+        if (remove && pending is not null)
+            RemoveSelectedChannel();
+        else
+            NotifyContentChanged();
     }
 
     internal void BeginAddChannel()
@@ -2973,6 +3014,9 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
         if (Screen.Value == ChannelsConfigScreen.TeamsPrincipalRemovalConfirm)
             _pendingPrincipalRemoval = null;
 
+        if (Screen.Value == ChannelsConfigScreen.TeamsDestinationRemovalConfirm)
+            _pendingTeamsDestinationRemoval = null;
+
         if (Screen.Value is ChannelsConfigScreen.TeamsTeamSearch
             or ChannelsConfigScreen.TeamsChannelSearch
             or ChannelsConfigScreen.TeamsUserSearch
@@ -2989,6 +3033,7 @@ public sealed class ChannelsConfigViewModel : ReactiveViewModel
             ChannelsConfigScreen.TeamsPrincipalAdd => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.TeamsPrincipalManagement => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => ChannelsConfigScreen.TeamsPrincipalManagement,
+            ChannelsConfigScreen.TeamsDestinationRemovalConfirm => ChannelsConfigScreen.ChannelPermissions,
             ChannelsConfigScreen.ChannelPermissions => ChannelsConfigScreen.AdapterMenu,
             ChannelsConfigScreen.AddChannel => ChannelsConfigScreen.ChannelPermissions,
             ChannelsConfigScreen.TeamsTeamSearch => ChannelsConfigScreen.ChannelPermissions,
@@ -3810,6 +3855,7 @@ internal enum ChannelsConfigScreen
     TeamsPrincipalAdd,
     TeamsPrincipalManagement,
     TeamsPrincipalRemovalConfirm,
+    TeamsDestinationRemovalConfirm,
     TeamsTeamSearch,
     TeamsChannelSearch,
     TeamsUserSearch,

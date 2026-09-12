@@ -87,6 +87,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsPrincipalAdd => BuildTeamsPrincipalAdd(),
                     ChannelsConfigScreen.TeamsPrincipalManagement => BuildTeamsPrincipalManagement(),
                     ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => BuildTeamsPrincipalRemovalConfirm(),
+                    ChannelsConfigScreen.TeamsDestinationRemovalConfirm => BuildTeamsDestinationRemovalConfirm(),
                     ChannelsConfigScreen.TeamsTeamSearch => BuildTeamsTeamSearch(),
                     ChannelsConfigScreen.TeamsChannelSearch => BuildTeamsChannelSearch(),
                     ChannelsConfigScreen.TeamsUserSearch => BuildTeamsUserSearch(),
@@ -449,6 +450,22 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             .WithChild(Row($"{FocusPrefix(ViewModel.TeamsPrincipalRemovalIndex == 1)}Remove", ViewModel.TeamsPrincipalRemovalIndex == 1));
     }
 
+    private ILayoutNode BuildTeamsDestinationRemovalConfirm()
+    {
+        var destination = ViewModel.PendingTeamsDestinationRemoval;
+        if (destination is null)
+            return Layouts.Empty();
+
+        return Layouts.Vertical()
+            .WithChild(Header("  Remove Teams destination?"))
+            .WithChild(Hint($"  {destination.DisplayName}"))
+            .WithChild(Hint($"  Canonical ID: {destination.Id}"))
+            .WithChild(Hint("  This removal affects only this configured destination after configuration activation."))
+            .WithChild(Layouts.Empty().Height(1))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsDestinationRemovalIndex == 0)}Cancel", ViewModel.TeamsDestinationRemovalIndex == 0))
+            .WithChild(Row($"{FocusPrefix(ViewModel.TeamsDestinationRemovalIndex == 1)}Remove", ViewModel.TeamsDestinationRemovalIndex == 1));
+    }
+
     private ILayoutNode BuildTeamsChannelAccess()
     {
         var access = ViewModel.EditingChannelAccess;
@@ -626,6 +643,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsPrincipalAdd => "  Select a principal type, then search a friendly identity.",
                     ChannelsConfigScreen.TeamsPrincipalManagement => "  Left/right changes the filter. Enter opens Add, Done, or removal confirmation.",
                     ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => "  Confirm removal. This only removes the selected global grant.",
+                    ChannelsConfigScreen.TeamsDestinationRemovalConfirm => "  Confirm removal. The destination becomes denied after configuration activation.",
                     ChannelsConfigScreen.TeamsGroupChatSearch => "  Type to filter loaded chats. Enter selects, loads more, or opens advanced entry.",
                     ChannelsConfigScreen.TeamsChannelAccess => "  Enter edits a principal list. Channel rules only restrict this exact Team and channel.",
                     ChannelsConfigScreen.AllowedUsers => "  Use comma-separated user IDs. Blank means unrestricted users in allowed channels.",
@@ -668,6 +686,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.TeamsPrincipalAdd => " [↑/↓] Navigate  [Enter] Select  [Esc] Menu",
                     ChannelsConfigScreen.TeamsPrincipalManagement => " [↑/↓] Select  [←/→] Filter  [Enter] Remove/open  [Esc] Menu",
                     ChannelsConfigScreen.TeamsPrincipalRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
+                    ChannelsConfigScreen.TeamsDestinationRemovalConfirm => " [↑/↓] Select  [Enter] Confirm  [Esc] Cancel",
                     ChannelsConfigScreen.TeamsTeamSearch => " [Type] Search  [Enter] Search/select  [↑/↓] Select  [Esc] Channels",
                     ChannelsConfigScreen.TeamsChannelSearch => " [↑/↓] Select  [Enter] Save channel  [Esc] Teams",
                     ChannelsConfigScreen.TeamsUserSearch => " [Type] Search  [Enter] Search/add  [↑/↓] Select  [Esc] Menu",
@@ -816,6 +835,9 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
             case ChannelsConfigScreen.TeamsPrincipalRemovalConfirm:
                 HandleTeamsPrincipalRemovalConfirmKey(keyInfo);
                 break;
+            case ChannelsConfigScreen.TeamsDestinationRemovalConfirm:
+                HandleTeamsDestinationRemovalConfirmKey(keyInfo);
+                break;
             case ChannelsConfigScreen.TeamsTeamSearch:
                 HandleTeamsTeamSearchKey(keyInfo);
                 break;
@@ -907,7 +929,10 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 ViewModel.BeginAddChannel();
                 break;
             case ConsoleKey.Delete:
-                ViewModel.RemoveSelectedChannel();
+                if (ViewModel.ActiveAdapterType == ChannelType.Teams)
+                    ViewModel.BeginTeamsDestinationRemoval();
+                else
+                    ViewModel.RemoveSelectedChannel();
                 break;
         }
     }
@@ -993,6 +1018,22 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                 break;
             case ConsoleKey.Enter:
                 ViewModel.ConfirmTeamsPrincipalRemoval(ViewModel.TeamsPrincipalRemovalIndex == 1);
+                break;
+        }
+    }
+
+    private void HandleTeamsDestinationRemovalConfirmKey(ConsoleKeyInfo keyInfo)
+    {
+        switch (keyInfo.Key)
+        {
+            case ConsoleKey.UpArrow:
+                ViewModel.MoveTeamsDestinationRemoval(-1);
+                break;
+            case ConsoleKey.DownArrow:
+                ViewModel.MoveTeamsDestinationRemoval(1);
+                break;
+            case ConsoleKey.Enter:
+                ViewModel.ConfirmTeamsDestinationRemoval(ViewModel.TeamsDestinationRemovalIndex == 1);
                 break;
         }
     }
