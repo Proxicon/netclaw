@@ -132,6 +132,7 @@ Wait+Screen@10s /Microsoft Teams is configured/
 
 # Add one channel via the explicit manual canonical-ID path. Do not submit a
 # directory query. An empty search selects the advanced local ID entry.
+Up 20
 Down
 Enter
 Wait+Screen@10s /Microsoft Teams > Add a destination/
@@ -148,7 +149,8 @@ Wait+Screen@10s /at the Team default and saved/
 # Return to management and add an allowed user via its manual path.
 Escape
 Wait+Screen@10s /Microsoft Teams is configured/
-Down
+Up 20
+Down 2
 Enter
 Wait+Screen@10s /Microsoft Teams > Add users or groups/
 Wait+Screen@10s /User/
@@ -169,7 +171,8 @@ Up 3
 Down 3
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/
-Down
+Up 20
+Down 2
 Enter
 Wait+Screen@10s /Microsoft Teams > Add users or groups/
 Down
@@ -190,6 +193,7 @@ Up 3
 Down 3
 Enter
 Wait+Screen@10s /Microsoft Teams is configured/
+Up 20
 Down
 Enter
 Wait+Screen@10s /Microsoft Teams > Add a destination/
@@ -206,7 +210,8 @@ Wait+Screen@10s /Microsoft Teams is configured/
 Wait+Screen@10s /Group Chat settings saved/
 
 # Enable supported Teams attachments through the dedicated management control.
-Down
+Up 20
+Down 4
 Enter
 Wait+Screen@10s /Microsoft Teams > Attachments/
 Wait+Screen@10s /Allow supported Teams attachments/
