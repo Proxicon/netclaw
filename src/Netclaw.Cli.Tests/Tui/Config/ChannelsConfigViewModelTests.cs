@@ -74,6 +74,49 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Teams_principal_management_removes_only_the_confirmed_global_principal()
+    {
+        File.WriteAllText(_paths.NetclawConfigPath,
+            """
+            {
+              "configVersion": 1,
+              "Teams": {
+                "Enabled": true,
+                "TenantId": "tenant-a",
+                "ClientId": "client-a",
+                "BotId": "bot-a",
+                "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"],
+                "AllowedGroupIds": ["22222222-2222-2222-2222-222222222222"],
+                "ChannelAccessOverrides": [{
+                  "TeamId": "team-a",
+                  "ChannelId": "channel-a",
+                  "AllowedUserIds": ["11111111-1111-1111-1111-111111111111"]
+                }]
+              }
+            }
+            """);
+        using var vm = CreateViewModel();
+
+        vm.BeginTeamsPrincipalManagement();
+        var user = Assert.Single(vm.GetTeamsPrincipalRows(), row => row.Kind == TeamsPrincipalKind.User);
+        Assert.Equal("Global Teams access", user.Scope);
+
+        vm.ActivateTeamsPrincipalManagement();
+        Assert.Equal(ChannelsConfigScreen.TeamsPrincipalRemovalConfirm, vm.Screen.Value);
+        vm.ConfirmTeamsPrincipalRemoval(remove: false);
+        Assert.Single(vm.GetTeamsPrincipalRows(), row => row.Kind == TeamsPrincipalKind.User);
+
+        vm.ActivateTeamsPrincipalManagement();
+        vm.MoveTeamsPrincipalRemoval(1);
+        vm.ConfirmTeamsPrincipalRemoval(remove: true);
+        await vm.PendingConfigWrite;
+
+        Assert.DoesNotContain(vm.GetTeamsPrincipalRows(), row => row.Kind == TeamsPrincipalKind.User);
+        var access = Assert.Single(vm.Step.GetAdapterViewModel<TeamsStepViewModel>(ChannelType.Teams).ChannelAccessOverrides);
+        Assert.Equal(["11111111-1111-1111-1111-111111111111"], access.AllowedUserIds);
+    }
+
+    [Fact]
     public async Task Teams_attachments_toggle_autosaves_and_reloads()
     {
         File.WriteAllText(_paths.NetclawConfigPath,
@@ -248,13 +291,13 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
 
         vm.BeginTeamsUserSearch();
         vm.BeginManualTeamsUserEntry();
-        vm.AllowedUsersInput = "user-a";
+        vm.AllowedUsersInput = "11111111-1111-1111-1111-111111111111";
         vm.ApplyAllowedUsers();
         await vm.PendingConfigWrite;
 
         vm.BeginTeamsGroupSearch();
         vm.BeginManualTeamsGroupEntry();
-        vm.AllowedGroupsInput = "group-a";
+        vm.AllowedGroupsInput = "22222222-2222-2222-2222-222222222222";
         vm.ApplyAllowedGroups();
         await vm.PendingConfigWrite;
 
@@ -264,9 +307,9 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedChannelIds", out var channels));
         Assert.Equal(["channel-a"], ToStringArray(channels));
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedUserIds", out var users));
-        Assert.Equal(["user-a"], ToStringArray(users));
+        Assert.Equal(["11111111-1111-1111-1111-111111111111"], ToStringArray(users));
         Assert.True(ConfigFileHelper.TryGetPathValue(config, "Teams.AllowedGroupIds", out var groups));
-        Assert.Equal(["group-a"], ToStringArray(groups));
+        Assert.Equal(["22222222-2222-2222-2222-222222222222"], ToStringArray(groups));
     }
 
     [Fact]

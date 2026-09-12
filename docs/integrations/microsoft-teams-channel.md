@@ -169,8 +169,10 @@ An empty global principal list rejects group-chat traffic.
 With `MentionOnly: true`, every group-chat message needs a structured bot
 mention. A prior group-chat message does not create a broad continuation rule.
 
-Use the Manage Group Chats screen in `netclaw config` to paste canonical IDs.
-Display names are labels only. Copy each ID from an authenticated source.
+Use `Manage channels and permissions` in `netclaw config` to inspect saved
+channels and Group Chats. Use `Add a channel or Group Chat` for the picker or
+the advanced canonical-ID path. Display names are labels only. Copy each ID
+from an authenticated source.
 
 Attachments remain disabled until `AllowAttachments` is true. Netclaw stages
 each accepted file, checks its size and content, then removes unsafe input.
@@ -204,14 +206,23 @@ Graph **application** permissions:
 - `User.Read.All` — user display name, UPN, and mail metadata.
 - `GroupMember.Read.All` — security/Microsoft 365 group discovery and checked
   group membership.
+- `Chat.ReadBasic.All` — optional Group Chat topic and participant-preview
+  discovery for chats that contain one selected user.
 
 Do not add `Directory.Read.All` for this feature. The Teams package RSC
 permission described above is separate from these Graph application
 permissions.
 
-Netclaw does not request `Chat.ReadBasic.WhereInstalled` by default. Group-chat
-authorization uses configured canonical IDs. Enable chat discovery only after
-Microsoft Graph support is proven and bounded to a 30-minute cache.
+`Chat.ReadBasic.All` is optional. It grants tenant-wide application access to
+basic chat metadata and requires administrator consent. The picker limits each
+request to chats that contain one selected user. The selected user does not
+gain access and is not saved. The permission does not prove that the Netclaw
+app is installed in a selected chat. Without this permission, Group Chat
+ingress and local removal still use configured canonical IDs.
+
+Netclaw does not request `Chat.ReadBasic.WhereInstalled`, `Chat.Read.All`, or
+chat message-read permissions for this picker. Group-chat authorization uses
+configured canonical IDs. The directory cache has a bounded lifetime.
 
 `netclaw config` now lists **Microsoft Teams** after Mattermost. The secure
 connection flow captures Tenant ID, application/client ID, Bot ID, and a

@@ -50,6 +50,26 @@ public sealed class TeamsDirectorySearchControllerTests
         Assert.Equal(1, directory.TeamSearchCount);
     }
 
+    [Fact]
+    public async Task An_input_invalidation_rejects_a_completion_from_a_directory_that_ignores_cancellation()
+    {
+        var time = new FakeTimeProvider();
+        var directory = new CancellationResistantDirectory();
+        using var controller = new TeamsDirectorySearchController(directory, time);
+
+        var search = controller.SearchTeamsAsync("old", TestContext.Current.CancellationToken).AsTask();
+        time.Advance(TimeSpan.FromMilliseconds(300));
+        await directory.Started.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        controller.Invalidate();
+        directory.Complete();
+
+        var response = await search;
+
+        Assert.False(response.IsCurrent);
+        Assert.False(controller.IsCurrent(response.Generation));
+    }
+
     private sealed class RecordingDirectory : ITeamsDirectory
     {
         public int TeamSearchCount { get; private set; }
@@ -110,5 +130,49 @@ public sealed class TeamsDirectorySearchControllerTests
             CancellationToken cancellationToken = default)
             => ValueTask.FromResult(
                 TeamsDirectoryOperationResult<IReadOnlySet<string>>.Available(new HashSet<string>(StringComparer.Ordinal)));
+    }
+
+    private sealed class CancellationResistantDirectory : ITeamsDirectory
+    {
+        private readonly TaskCompletionSource<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>> _result = new();
+
+        public TaskCompletionSource Started { get; } = new();
+
+        public void Complete() => _result.SetResult(
+            TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>.Available(
+                [new TeamsDirectoryTeam("team-1", "Operations", null)]));
+
+        public async ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryTeam>>> SearchTeamsAsync(
+            string query,
+            int maximumResults,
+            CancellationToken cancellationToken = default)
+        {
+            Started.SetResult();
+            return await _result.Task;
+        }
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryTeam>> GetTeamAsync(string teamId, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryTeam>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>> GetChannelsAsync(string teamId, int maximumResults, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryChannel>>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryChannel>> GetChannelAsync(string teamId, string channelId, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryChannel>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryUser>>> SearchUsersAsync(string query, int maximumResults, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryUser>>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryGroup>>> SearchGroupsAsync(string query, int maximumResults, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryGroup>>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryGroup>> GetGroupAsync(string groupId, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryGroup>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryUser>> GetUserAsync(string userId, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<TeamsDirectoryUser>.Unavailable("not_used"));
+
+        public ValueTask<TeamsDirectoryOperationResult<IReadOnlySet<string>>> CheckUserGroupMembershipAsync(string userId, IReadOnlyCollection<string> groupIds, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(TeamsDirectoryOperationResult<IReadOnlySet<string>>.Unavailable("not_used"));
     }
 }

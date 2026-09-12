@@ -53,6 +53,32 @@ internal sealed class TeamsDirectorySearchController : IDisposable
             token => _directory.SearchGroupsAsync(query, TeamsGraphSearchLimits.MaximumResults, token),
             cancellationToken);
 
+    public ValueTask<TeamsDirectorySearchResponse<TeamsDirectoryGroupChatPage>> GetGroupChatsAsync(
+        string userId,
+        string? continuation,
+        CancellationToken cancellationToken = default)
+        => ExecuteAsync(
+            token => _directory.GetGroupChatsAsync(
+                userId,
+                TeamsGraphSearchLimits.MaximumResults,
+                continuation,
+                token),
+            cancellationToken);
+
+    /// <summary>
+    /// Invalidates a result when its input or owning screen changes. A provider
+    /// that ignores cancellation still fails the generation check on return.
+    /// </summary>
+    public void Invalidate()
+    {
+        _currentRequest?.Cancel();
+        _currentRequest?.Dispose();
+        _currentRequest = null;
+        _generation++;
+    }
+
+    public bool IsCurrent(long generation) => generation == _generation;
+
     private async ValueTask<TeamsDirectorySearchResponse<T>> ExecuteAsync<T>(
         Func<CancellationToken, ValueTask<TeamsDirectoryOperationResult<T>>> operation,
         CancellationToken cancellationToken)
@@ -67,18 +93,17 @@ internal sealed class TeamsDirectorySearchController : IDisposable
         {
             await Task.Delay(DebounceDelay, _timeProvider, request.Token).ConfigureAwait(false);
             var result = await operation(request.Token).ConfigureAwait(false);
-            return new TeamsDirectorySearchResponse<T>(generation == _generation, result);
+            return new TeamsDirectorySearchResponse<T>(generation == _generation, generation, result);
         }
         catch (OperationCanceledException) when (request.IsCancellationRequested)
         {
-            return new TeamsDirectorySearchResponse<T>(false, TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_search_cancelled"));
+            return new TeamsDirectorySearchResponse<T>(false, generation, TeamsDirectoryOperationResult<T>.Unavailable("teams_directory_search_cancelled"));
         }
     }
 
     public void Dispose()
     {
-        _currentRequest?.Cancel();
-        _currentRequest?.Dispose();
+        Invalidate();
     }
 }
 
@@ -89,4 +114,5 @@ internal static class TeamsGraphSearchLimits
 
 internal sealed record TeamsDirectorySearchResponse<T>(
     bool IsCurrent,
+    long Generation,
     TeamsDirectoryOperationResult<T> Result);

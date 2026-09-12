@@ -32,6 +32,7 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
     private static readonly TimeSpan ProfileAndMembershipTtl = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan DirectoryRecordTtl = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan SearchTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan GroupChatContinuationTtl = TimeSpan.FromMinutes(5);
     private readonly GraphServiceClient _graphClient;
     private readonly string _tenantId;
     private readonly IMemoryCache _cache;
@@ -214,6 +215,81 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
                 {
                     request.QueryParameters.Select = ["id", "displayName", "description"];
                 }, token).ConfigureAwait(false)),
+            cancellationToken).ConfigureAwait(false);
+
+        return CacheResult(key, result, DirectoryRecordTtl);
+    }
+
+    public async ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryGroupChatPage>> GetGroupChatsAsync(
+        string userId,
+        int maximumResults,
+        string? continuation = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryNormalizeIdentifier(userId, out var canonicalUserId)
+            || !TryNormalizeMaximum(maximumResults, out var maximum))
+        {
+            return TeamsDirectoryOperationResult<TeamsDirectoryGroupChatPage>.InvalidRequest("teams_directory_invalid_request");
+        }
+
+        string? nextLink = null;
+        if (!string.IsNullOrWhiteSpace(continuation)
+            && !TryGetGroupChatContinuation(canonicalUserId, continuation, out nextLink))
+        {
+            return TeamsDirectoryOperationResult<TeamsDirectoryGroupChatPage>.InvalidRequest("teams_directory_invalid_continuation");
+        }
+
+        var result = await ExecuteAsync(
+            async token =>
+            {
+                Microsoft.Graph.Models.ChatCollectionResponse? response;
+                if (nextLink is null)
+                {
+                    response = await _graphClient.Users[canonicalUserId].Chats.GetAsync(request =>
+                    {
+                        request.QueryParameters.Top = maximum;
+                        request.QueryParameters.Expand = ["members"];
+                    }, token).ConfigureAwait(false);
+                }
+                else
+                {
+                    response = await _graphClient.Users[canonicalUserId].Chats.WithUrl(nextLink)
+                        .GetAsync(cancellationToken: token).ConfigureAwait(false);
+                }
+
+                var chats = ToGroupChats(response?.Value, maximum);
+                var next = string.IsNullOrWhiteSpace(response?.OdataNextLink)
+                    ? null
+                    : CreateGroupChatContinuation(canonicalUserId, response.OdataNextLink);
+                return new TeamsDirectoryGroupChatPage(chats, next);
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        if (result.IsAvailable && result.Value is not null)
+            CacheRecords(
+                TeamsDirectoryOperationResult<IReadOnlyList<TeamsDirectoryGroupChat>>.Available(result.Value.Chats),
+                "group-chat",
+                static chat => chat.Id,
+                DirectoryRecordTtl);
+
+        return result;
+    }
+
+    public async ValueTask<TeamsDirectoryOperationResult<TeamsDirectoryGroupChat>> GetGroupChatAsync(
+        string chatId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TeamsSessionIdentifierCodec.IsCanonicalGroupChatConversationId(chatId))
+            return TeamsDirectoryOperationResult<TeamsDirectoryGroupChat>.InvalidRequest("teams_directory_invalid_request");
+
+        var canonicalChatId = chatId.Trim();
+        var key = CacheKey("group-chat", canonicalChatId);
+        if (_cache.TryGetValue(key, out TeamsDirectoryGroupChat? cached) && cached is not null)
+            return TeamsDirectoryOperationResult<TeamsDirectoryGroupChat>.Available(cached);
+
+        var result = await ExecuteAsync(
+            async token => ToGroupChat(
+                await _graphClient.Chats[canonicalChatId].GetAsync(cancellationToken: token).ConfigureAwait(false)),
             cancellationToken).ConfigureAwait(false);
 
         return CacheResult(key, result, DirectoryRecordTtl);
@@ -562,6 +638,40 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
         return new TeamsDirectoryChannel(teamId, id, channel.DisplayName, channel.Description);
     }
 
+    private static IReadOnlyList<TeamsDirectoryGroupChat> ToGroupChats(
+        IEnumerable<Microsoft.Graph.Models.Chat>? values,
+        int maximum) =>
+        values?
+            .Where(static chat => chat.ChatType == Microsoft.Graph.Models.ChatType.Group)
+            .Where(static chat => TeamsSessionIdentifierCodec.IsCanonicalGroupChatConversationId(chat.Id))
+            .GroupBy(static chat => chat.Id!.Trim(), StringComparer.Ordinal)
+            .Select(static group => ToGroupChat(group.First()))
+            .Take(maximum)
+            .ToArray()
+        ?? [];
+
+    private static TeamsDirectoryGroupChat ToGroupChat(Microsoft.Graph.Models.Chat? chat)
+    {
+        var chatId = chat?.Id;
+        if (chat is null
+            || chatId is null
+            || chat.ChatType != Microsoft.Graph.Models.ChatType.Group
+            || !TeamsSessionIdentifierCodec.IsCanonicalGroupChatConversationId(chatId))
+        {
+            throw new InvalidDataException("The chat response is not a canonical Group Chat.");
+        }
+
+        var participants = chat.Members?
+            .Select(static member => NormalizeDisplayText(member.DisplayName))
+            .Where(static displayName => displayName is not null)
+            .Cast<string>()
+            .Distinct(StringComparer.Ordinal)
+            .Take(25)
+            .ToArray()
+            ?? [];
+        return new TeamsDirectoryGroupChat(chatId.Trim(), NormalizeDisplayText(chat.Topic), participants);
+    }
+
     private static IReadOnlyList<TeamsDirectoryUser> ToUsers(
         IEnumerable<Microsoft.Graph.Models.User>? values,
         int maximum) =>
@@ -654,6 +764,62 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
         return normalized.Length is > 0 and <= 256;
     }
 
+    private string? CreateGroupChatContinuation(string userId, string nextLink)
+    {
+        if (!IsCurrentGraphUri(nextLink))
+            return null;
+
+        var handle = Guid.NewGuid().ToString("N");
+        _cache.Set(
+            CacheKey("group-chat-continuation", handle),
+            new GroupChatContinuation(userId, nextLink, _timeProvider.GetUtcNow() + GroupChatContinuationTtl),
+            new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = GroupChatContinuationTtl,
+                Size = 1
+            });
+        return handle;
+    }
+
+    private bool TryGetGroupChatContinuation(string userId, string continuation, out string nextLink)
+    {
+        nextLink = string.Empty;
+        if (!Guid.TryParseExact(continuation, "N", out _)
+            || !_cache.TryGetValue(CacheKey("group-chat-continuation", continuation), out GroupChatContinuation? value)
+            || value is null
+            || value.ExpiresAt <= _timeProvider.GetUtcNow()
+            || !string.Equals(value.UserId, userId, StringComparison.Ordinal)
+            || !IsCurrentGraphUri(value.NextLink))
+        {
+            return false;
+        }
+
+        nextLink = value.NextLink;
+        return true;
+    }
+
+    private bool IsCurrentGraphUri(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var candidate)
+            || !Uri.TryCreate(_graphClient.RequestAdapter.BaseUrl, UriKind.Absolute, out var graphBase))
+        {
+            return false;
+        }
+
+        return candidate.Scheme == Uri.UriSchemeHttps
+               && string.Equals(candidate.Host, graphBase.Host, StringComparison.OrdinalIgnoreCase)
+               && candidate.Port == graphBase.Port;
+    }
+
+    private static string? NormalizeDisplayText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl))
+            return null;
+
+        var normalized = value.Trim();
+        return normalized.Length <= 160 ? normalized : normalized[..160];
+    }
+
     private static string RequireValue(string? value, string parameterName)
     {
         if (!TryNormalizeIdentifier(value, out var normalized))
@@ -661,6 +827,8 @@ public sealed class TeamsGraphDirectoryClient : ITeamsDirectory, ITeamsDirectory
 
         return normalized;
     }
+
+    private sealed record GroupChatContinuation(string UserId, string NextLink, DateTimeOffset ExpiresAt);
 
     private static string EscapeODataLiteral(string value) => value.Replace("'", "''", StringComparison.Ordinal);
 
