@@ -9,6 +9,7 @@ using Netclaw.Actors.Skills;
 using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
+using Netclaw.Security;
 using Netclaw.Security.Skills;
 using Netclaw.Tools;
 using Xunit;
@@ -170,6 +171,40 @@ public class GeneratedToolSchemaMetaTests
     }
 
     [Fact]
+    public void Reminder_binder_requires_the_delivery_kind()
+    {
+        var error = Assert.Throws<ArgumentException>(
+            () => CreateReminderTool().ParseArguments(CreateReminderArguments(null)));
+
+        Assert.Contains("Required parameter 'DeliveryKind' is missing", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("none")]
+    [InlineData("current_session")]
+    public void Reminder_binder_treats_blank_optional_strings_as_left_out(string deliveryKind)
+    {
+        var parsed = CreateReminderTool().ParseArguments(
+            CreateReminderArguments(deliveryKind, deliveryTransport: "", deliveryAddress: "  "));
+
+        Assert.Equal(deliveryKind, parsed.DeliveryKind);
+    }
+
+    [Fact]
+    public void Reminder_schema_requires_and_enumerates_the_delivery_kind()
+    {
+        var schema = CreateReminderTool().ParameterSchema;
+
+        Assert.Contains(
+            "DeliveryKind",
+            schema.GetProperty("required").EnumerateArray().Select(static name => name.GetString()));
+        Assert.Equal(
+            ["current_session", "channel", "none"],
+            schema.GetProperty("properties").GetProperty("DeliveryKind").GetProperty("enum")
+                .EnumerateArray().Select(static value => value.GetString()!));
+    }
+
+    [Fact]
     public void Reminder_binder_accepts_complete_channel_branch()
     {
         var parsed = CreateReminderTool().ParseArguments(CreateReminderArguments(
@@ -215,11 +250,14 @@ public class GeneratedToolSchemaMetaTests
 
     public static TheoryData<Dictionary<string, object?>> InvalidReminderArguments => new()
     {
-        CreateReminderArguments(null),
         CreateReminderArguments("unsupported"),
         CreateReminderArguments("channel", deliveryTransport: "slack"),
         CreateReminderArguments("current_session", deliveryTransport: "slack"),
         CreateReminderArguments("none", deliveryAddress: "channel-token"),
+        CreateReminderArguments("none", deliveryTransport: "slack", deliveryAddress: "  "),
+        CreateReminderArguments(""),
+        // A blank duplicate of the discriminator still counts as a second value.
+        WithBlankDiscriminatorDuplicate(CreateReminderArguments("none")),
         WithConflictingDiscriminator(CreateReminderArguments(
             "channel",
             deliveryTransport: "slack",
@@ -250,6 +288,12 @@ public class GeneratedToolSchemaMetaTests
             ["ConcreteMap"] = new Dictionary<string, string> { ["kind"] = "concrete" },
         };
 
+    private static Dictionary<string, object?> WithBlankDiscriminatorDuplicate(Dictionary<string, object?> arguments)
+    {
+        arguments["delivery_kind"] = "";
+        return arguments;
+    }
+
     private static SetReminderTool CreateReminderTool()
         => new(null!, TimeProvider.System, new SchedulingConfig());
 
@@ -258,7 +302,8 @@ public class GeneratedToolSchemaMetaTests
             new SkillRegistry(),
             new NetclawPaths(),
             new NoOpSkillContentScanner(),
-            null!);
+            null!,
+            new ToolPathPolicy([]));
 
     private static Dictionary<string, object?> CreateReminderArguments(
         string? deliveryKind,

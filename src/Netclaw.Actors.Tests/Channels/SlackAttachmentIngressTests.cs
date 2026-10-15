@@ -20,7 +20,9 @@ using Netclaw.Actors.Sessions;
 using Netclaw.Actors.Tests.Sessions;
 using FakeChatClient = Netclaw.Tests.Utilities.FakeChatClient;
 using Netclaw.Channels.Slack;
+using Netclaw.Tests.Utilities;
 using Netclaw.Configuration;
+using Netclaw.Media;
 using Netclaw.Security;
 using SlackNet.Blocks;
 using Xunit;
@@ -35,7 +37,7 @@ namespace Netclaw.Actors.Tests.Channels;
 /// DataContent inlining) against a stubbed HTTP handler, content scanner,
 /// and reply client. None of these tests touch a live Slack connection.
 /// </summary>
-public sealed class SlackAttachmentIngressVisionTests : TestKit
+public sealed class SlackAttachmentIngressVisionTests : TestKit, IAsyncDisposable
 {
     private static readonly byte[] FakePngBytes = Convert.FromBase64String(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==");
@@ -52,13 +54,27 @@ public sealed class SlackAttachmentIngressVisionTests : TestKit
     private readonly FakeChatClient _chatClient = new() { ResponseText = "ok" };
     private readonly RecordingReplyClient _replyClient = new();
     private readonly ConfigurableFakeSlackFileHandler _httpHandler = new();
-    private readonly NetclawPaths _paths = new(Path.Combine(
-        Path.GetTempPath(),
-        $"netclaw-slack-attachment-tests-{Guid.NewGuid():N}"));
+    private readonly TestSessionTempDirectory _tempDir =
+        TestSessionTempDirectory.Create(prefix: "netclaw-slack-attachment-tests-", createDirectoryTree: true);
+    private NetclawPaths _paths => _tempDir.Paths;
 
     public SlackAttachmentIngressVisionTests(ITestOutputHelper output) : base(output: output)
     {
-        _paths.EnsureDirectoriesExist();
+    }
+
+    // TestKit stops the actor system only after AfterAllAsync returns, and it fails
+    // the test when AfterAllAsync takes more than 5 seconds. Delete the directory
+    // after TestKit has disposed, and not in AfterAllAsync.
+    async ValueTask IAsyncDisposable.DisposeAsync()
+    {
+        try
+        {
+            await base.DisposeAsync();
+        }
+        finally
+        {
+            await _tempDir.DisposeAsync();
+        }
     }
 
     /// <summary>
@@ -227,14 +243,14 @@ public sealed class SlackAttachmentIngressVisionTests : TestKit
     public async Task Docx_in_dm_is_path_only_with_format_not_inlineable_note()
     {
         _httpHandler.RespondWith(
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            MimeTypeCatalog.ApplicationDocx,
             FakeDocxBytes);
         var gateway = BuildGateway("slack-gw-docx-path-only");
 
         var files = new List<SlackFileReference>
         {
             new("F888", "notes.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                MimeTypeCatalog.ApplicationDocx,
                 FakeDocxBytes.Length,
                 "https://files.slack.com/files-pri/T1234-F888/notes.docx")
         };
@@ -301,7 +317,7 @@ public sealed class SlackAttachmentIngressVisionTests : TestKit
         var files = new List<SlackFileReference>
         {
             new("F999", "secret.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                MimeTypeCatalog.ApplicationDocx,
                 FakeDocxBytes.Length,
                 "https://files.slack.com/files-pri/T1234-F999/secret.docx")
         };

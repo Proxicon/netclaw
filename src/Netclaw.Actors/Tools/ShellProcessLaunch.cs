@@ -4,7 +4,9 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using Netclaw.Security;
+using Netclaw.Security.Authorization.Filesystem;
 using Netclaw.Tools;
 
 namespace Netclaw.Actors.Tools;
@@ -40,6 +42,8 @@ public sealed class ShellProcessLaunch
         WorkingDirectory = workingDirectory;
         if (!Path.IsPathFullyQualified(WorkingDirectory))
             throw new ShellProcessStartException("Shell execution requires an absolute working directory.");
+        if (CanonicalPath.HasParentSegment(WorkingDirectory))
+            throw new ShellProcessStartException("Shell execution requires a working directory without parent traversal segments.");
         _context = context;
         _commandPolicy = commandPolicy;
         _pathPolicy = pathPolicy;
@@ -98,20 +102,42 @@ public sealed class ShellProcessLaunch
         };
         if (_context.ProjectDirectory is { } projectDirectory)
             paths.Add(projectDirectory);
-        foreach (var view in ShellPolicyPathFacts.CreateExecutionViews(analysis))
+        AddPaths(analysis);
+        // The same directory proof that authorized each occurrence names the paths to recheck (#2122, #1828).
+        if (BashDirectoryScopeProjection.TryCreate(
+                analysis,
+                _commandPolicy,
+                new ShellApprovalMatcher(Environment),
+                out var projection))
         {
-            if (view.ResolutionBase.Path is { } resolutionBase)
-                paths.Add(resolutionBase.Value);
-            foreach (var fact in view.Facts)
-            foreach (var path in fact.Paths)
-                paths.Add(path.Value);
+            foreach (var slice in projection.Slices)
+                AddPaths(slice.Analysis);
+        }
+
+        // Each literal twin that authorized a command names its paths too (F1).
+        if (TryProjectLiteralTwins(analysis, out var twins))
+        {
+            foreach (var slice in twins.Slices)
+                AddPaths(slice.Analysis);
         }
 
         return paths.Order(StringComparer.Ordinal).Select(static path =>
         {
-            ToolPathPolicy.TryResolveSymlinksInPath(path, out var target);
+            FileSystemAuthority.TryResolveLinks(path, out var target);
             return new LaunchPathState(path, target, Directory.Exists(path));
         }).ToArray();
+
+        void AddPaths(ShellCommandAnalysis source)
+        {
+            foreach (var view in ShellPolicyPathFacts.CreateExecutionViews(source))
+            {
+                if (view.ResolutionBase.Path is { } resolutionBase)
+                    paths.Add(resolutionBase.Value);
+                foreach (var fact in view.Facts)
+                foreach (var path in fact.Paths)
+                    paths.Add(path.Value);
+            }
+        }
     }
 
     private readonly record struct LaunchPathState(string Path, string Target, bool DirectoryExists);
@@ -119,35 +145,63 @@ public sealed class ShellProcessLaunch
     private ShellCommandAnalysis CheckHardPolicies()
     {
         // Parse again because filesystem facts and policy can change while the request waits.
-        var analysis = _commandPolicy.Analyze(Command, WorkingDirectory);
+        // The launch facts are the variables that this launch sets on the child process.
+        var analysis = _commandPolicy.Analyze(Command, WorkingDirectory, Storage.ManagedTemporary);
         var decision = _commandPolicy.Evaluate(analysis);
         if (!decision.Allowed)
             throw new ShellProcessStartException($"Error: Command blocked by hard deny policy: {decision.DenyReason}");
         if (_pathPolicy.CommandReferencesDeniedPath(analysis))
             throw new ShellProcessStartException("Error: Command references a protected file path. Access denied by security policy.");
+
+        // The authorizer screens each literal twin as a typed command (F1), so the
+        // launch repeats those screens.
+        if (TryProjectLiteralTwins(analysis, out var twins))
+        {
+            foreach (var slice in twins.Slices)
+            {
+                var twinDecision = _commandPolicy.Evaluate(slice.Analysis);
+                if (!twinDecision.Allowed)
+                    throw new ShellProcessStartException($"Error: Command blocked by hard deny policy: {twinDecision.DenyReason}");
+                if (_pathPolicy.CommandReferencesDeniedPath(slice.Analysis))
+                    throw new ShellProcessStartException("Error: Command references a protected file path. Access denied by security policy.");
+            }
+        }
+
         return analysis;
     }
 
+    private bool TryProjectLiteralTwins(
+        ShellCommandAnalysis analysis,
+        [NotNullWhen(true)] out BashLiteralTwinSlices? twins)
+        => BashLiteralTwinSlices.TryCreate(
+            analysis,
+            _commandPolicy,
+            new ShellApprovalMatcher(Environment),
+            out twins);
+
     private void PrepareDirectories()
     {
-        // Reject unsafe filesystem links before the child can use session temporary storage.
-        // Prepare creates the directory and sets TMPDIR, TMP, and TEMP on the child environment only.
-        var temporaryError = ManagedTemporaryEnvironment.Prepare(_startInfo, Storage.ManagedTemporary);
-        if (temporaryError is not null)
-            throw new ShellProcessStartException(temporaryError);
-
         if (_context.SessionDirectory is { } sessionDirectory
             && PathUtility.AreEquivalentPaths(WorkingDirectory, sessionDirectory))
         {
+            // One shared creator builds the session workspace folder (with a link
+            // check at the path and at its parent) for the spill writer and this
+            // launcher. This runs before the temporary directory, because that
+            // creation also builds the workspace folder as an intermediate in the
+            // legacy layout and would do so behind a link.
+            string? error;
             try
             {
-                Directory.CreateDirectory(WorkingDirectory);
+                error = ToolOutputSpillLocation.EnsureSessionWorkspaceDirectory(sessionDirectory);
             }
             catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException
                                        or UnauthorizedAccessException or System.Security.SecurityException)
             {
                 throw new ShellProcessStartException($"Error preparing session working directory: {ex.Message}", ex);
             }
+
+            if (error is not null)
+                throw new ShellProcessStartException(error);
         }
         else if (!Directory.Exists(WorkingDirectory))
         {
@@ -158,7 +212,13 @@ public sealed class ShellProcessLaunch
                 $"Error: Working directory '{WorkingDirectory}' does not exist. Create it first, e.g.: {CreateDirectoryHint()}");
         }
 
-        _startInfo.WorkingDirectory = WorkingDirectory;
+        // Reject unsafe filesystem links before the child can use session temporary storage.
+        // Prepare creates the directory and sets TMPDIR, TMP, and TEMP on the child environment only.
+        var temporaryError = ManagedTemporaryEnvironment.Prepare(_startInfo, Storage.ManagedTemporary);
+        if (temporaryError is not null)
+            throw new ShellProcessStartException(temporaryError);
+
+        Environment.ApplyWorkingDirectory(_startInfo, WorkingDirectory);
     }
 
     private string CreateDirectoryHint()

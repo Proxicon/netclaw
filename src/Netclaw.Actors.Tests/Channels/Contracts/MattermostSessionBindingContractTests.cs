@@ -56,6 +56,7 @@ public sealed class MattermostSessionBindingContractTests(ITestOutputHelper outp
             TimeProvider: TimeProvider.System,
             Options: options,
             DefaultChannelId: null,
+            ChannelRegistry: TestChannelRegistries.MattermostWithProcessingRenderer(_replyClient),
             ReplyClient: _replyClient,
             ContentScanner: new NullContentScanner(),
             AudienceProfiles: TestMattermostGatewayDeps.DefaultAudienceProfiles,
@@ -195,6 +196,7 @@ public sealed class MattermostSessionBindingContractTests(ITestOutputHelper outp
             TimeProvider: TimeProvider.System,
             Options: options,
             DefaultChannelId: null,
+            ChannelRegistry: TestChannelRegistries.MattermostWithProcessingRenderer(_replyClient),
             ReplyClient: _replyClient,
             ContentScanner: new NullContentScanner(),
             AudienceProfiles: TestMattermostGatewayDeps.DefaultAudienceProfiles,
@@ -216,8 +218,8 @@ public sealed class MattermostSessionBindingContractTests(ITestOutputHelper outp
     {
         var ct = TestContext.Current.CancellationToken;
         var sid = new SessionId("session-mm-file-output");
-        var paths = TestMattermostGatewayDeps.NewTestPaths();
-        var filePath = Path.Combine(paths.BasePath, $"mattermost-upload-{Guid.NewGuid():N}.txt");
+        await using var paths = TestMattermostGatewayDeps.NewTestPaths();
+        var filePath = Path.Join(paths.Paths.BasePath, $"mattermost-upload-{Guid.NewGuid():N}.txt");
         await File.WriteAllTextAsync(filePath, "hello mattermost", ct);
 
         var pipeline = new RecordingSessionPipeline(_ =>
@@ -392,6 +394,7 @@ public sealed class MattermostSessionBindingContractTests(ITestOutputHelper outp
             TimeProvider: TimeProvider.System,
             Options: options,
             DefaultChannelId: null,
+            ChannelRegistry: TestChannelRegistries.MattermostWithProcessingRenderer(_replyClient),
             ReplyClient: _replyClient,
             ContentScanner: new NullContentScanner(),
             AudienceProfiles: TestMattermostGatewayDeps.DefaultAudienceProfiles,
@@ -407,14 +410,20 @@ public sealed class MattermostSessionBindingContractTests(ITestOutputHelper outp
             new MattermostRootPostId("root-test"),
             deps), $"mm-session-store-{Interlocked.Increment(ref _actorCounter)}");
 
-        await AwaitAssertAsync(() => Assert.Single(_replyClient.Posts), cancellationToken: ct);
-
-        var actions = _replyClient.Posts[0].Attachments![0].Actions!;
-        foreach (var action in actions)
-        {
-            Assert.True(store.TryGet(action.Context["action_token"], out var stored));
-            Assert.Equal("post-1", stored!.PromptPostId);
-            Assert.Equal("call-mm-association", stored.CallId);
-        }
+        // The fake transport records the post before the binding calls
+        // AssociatePromptPostId. Waiting on the post alone reads PromptPostId while
+        // it is still null, so poll the whole association invariant instead.
+        await AwaitAssertAsync(
+            () =>
+            {
+                var post = Assert.Single(_replyClient.Posts);
+                foreach (var action in post.Attachments![0].Actions!)
+                {
+                    Assert.True(store.TryGet(action.Context["action_token"], out var stored));
+                    Assert.Equal("post-1", stored!.PromptPostId);
+                    Assert.Equal("call-mm-association", stored.CallId);
+                }
+            },
+            cancellationToken: ct);
     }
 }

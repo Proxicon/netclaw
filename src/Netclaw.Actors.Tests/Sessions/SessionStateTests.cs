@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using System.Collections.Immutable;
+using Netclaw.Actors.Jobs;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Sessions;
@@ -20,6 +21,40 @@ namespace Netclaw.Actors.Tests.Sessions;
 public class SessionStateTests
 {
     private static readonly SessionId TestSessionId = new("test/session");
+
+    [Fact]
+    public void Admitted_input_survives_snapshot_and_closes_only_by_its_id()
+    {
+        var firstId = new InputId("first");
+        var secondId = new InputId("second");
+        var first = new InputAdmitted
+        {
+            SessionId = TestSessionId,
+            InputId = firstId,
+            SourceMessageId = "event-1",
+            TurnContext = new TurnContextRecord
+            {
+                SessionId = TestSessionId,
+                ChannelType = "slack",
+                RequesterSenderId = new SenderId("user-1")
+            },
+            UserMessage = new SerializableChatMessage { Role = ChatRole.User, Content = "one" }
+        };
+        var second = first with
+        {
+            InputId = secondId,
+            SourceMessageId = "event-2",
+            UserMessage = new SerializableChatMessage { Role = ChatRole.User, Content = "two" }
+        };
+
+        var restored = SessionState.FromSnapshot(SessionState.Empty.Apply(first).Apply(second).ToSnapshot());
+        Assert.Equal([firstId, secondId], restored.PendingInputs.Select(input => input.InputId));
+        Assert.Contains("slack:user-1:event-1", restored.RecentSourceMessageKeys);
+
+        var closed = restored.CloseInputs([firstId]);
+        Assert.Equal(secondId, Assert.Single(closed.PendingInputs).InputId);
+        Assert.Contains("slack:user-1:event-1", closed.RecentSourceMessageKeys);
+    }
 
     [Fact]
     public void Empty_state_has_no_history()
@@ -72,6 +107,87 @@ public class SessionStateTests
 
         Assert.Equal(4, state.History.Count);
         Assert.Equal(2, state.TurnCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Terminal_reducer_sets_history_and_source_ledgers_for_both_history_modes(bool userAlreadyInHistory)
+    {
+        // Arrange
+        var user = new SerializableChatMessage { Role = ChatRole.User, Content = "same question" };
+        var tool = new SerializableChatMessage { Role = ChatRole.Tool, Content = "tool result" };
+        var assistant = new SerializableChatMessage { Role = ChatRole.Assistant, Content = "answer" };
+        var state = userAlreadyInHistory
+            ? SessionState.Empty with { History = [user, tool] }
+            : SessionState.Empty;
+        var reminderId = new ReminderId("check-pr:1712000000000");
+        var jobId = new BackgroundJobId("bg-job:unit-1");
+        var evt = new TurnRecorded
+        {
+            SessionId = TestSessionId,
+            UserMessage = user,
+            AssistantReply = assistant,
+            SourceReminderId = reminderId,
+            SourceBackgroundJobId = jobId
+        };
+
+        // Act
+        var next = state.Apply(evt, userAlreadyInHistory);
+
+        // Assert
+        var expected = userAlreadyInHistory
+            ? new[] { user, tool, assistant }
+            : new[] { user, assistant };
+        Assert.Equal(expected, next.History);
+        Assert.Equal(1, next.TurnCount);
+        Assert.Contains(reminderId, next.ProcessedReminderIds);
+        Assert.Contains(jobId, next.ProcessedBackgroundJobIds);
+    }
+
+    [Fact]
+    public void Terminal_reducer_closes_each_equal_text_input_by_id_and_preserves_unrelated_input()
+    {
+        // Arrange
+        var user = new SerializableChatMessage { Role = ChatRole.User, Content = "same text" };
+        var firstId = new InputId("same-1");
+        var secondId = new InputId("same-2");
+        var otherId = new InputId("other");
+        InputAdmitted Admit(InputId id, string content) => new()
+        {
+            SessionId = TestSessionId,
+            InputId = id,
+            SourceMessageId = id.Value,
+            TurnContext = new TurnContextRecord
+            {
+                SessionId = TestSessionId,
+                ChannelType = "slack",
+                RequesterSenderId = new SenderId("user-1")
+            },
+            UserMessage = new SerializableChatMessage { Role = ChatRole.User, Content = content }
+        };
+        var tool = new SerializableChatMessage { Role = ChatRole.Tool, Content = "tool result" };
+        var state = SessionState.Empty
+            .Apply(Admit(firstId, user.Content))
+            .Apply(Admit(secondId, user.Content))
+            .Apply(Admit(otherId, "later")) with { History = [user, user, tool] };
+        var evt = new TurnRecorded
+        {
+            SessionId = TestSessionId,
+            UserMessage = user,
+            AssistantReply = new SerializableChatMessage { Role = ChatRole.Assistant, Content = "answer" },
+            ConsumedInputIds = [firstId, secondId]
+        };
+
+        // Act
+        var next = state.Apply(evt, userAlreadyInHistory: true);
+
+        // Assert
+        Assert.Equal(otherId, Assert.Single(next.PendingInputs).InputId);
+        Assert.Equal(["same text", "same text", "tool result", "answer"],
+            next.History.Select(message => message.Content));
+        Assert.Equal(1, next.TurnCount);
+        Assert.Equal(3, next.RecentSourceMessageKeys.Count);
     }
 
     [Fact]
@@ -225,8 +341,8 @@ public class SessionStateTests
     [Fact]
     public void AddSystemNudge_snapshots_media_so_caller_clear_cannot_empty_it()
     {
-        // Regression: LlmSessionActor hands a caller-owned media accumulator
-        // (ModelInputMediaBuffer) to AddSystemNudge and then reuses/empties it.
+        // Regression: ActiveToolBatchTracker hands its media list to AddSystemNudge
+        // and then reuses its media state.
         // Without a defensive snapshot the nudge would alias that list, so the
         // caller's reuse wiped the tool-loaded image before the next LLM call
         // hydrated it — the model was told "Image loaded" but never saw the bytes
@@ -631,8 +747,10 @@ public class SessionStateTests
         Assert.Empty(restored.ProcessedReminderIds);
     }
 
-    [Fact]
-    public void Successful_subagent_merge_adds_only_confirmed_changed_files()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Completed_or_partial_subagent_merge_adds_only_confirmed_changed_files(bool partial)
     {
         var child = new WorkingContextDelta
         {
@@ -641,9 +759,11 @@ public class SessionStateTests
             ObservedChangedFiles = ["src/ObservedOnly.cs"]
         };
 
-        var merged = LlmSessionActor.MergeSuccessfulSubAgentWorkingContext(
-            WorkingContext.Empty,
-            new ChildRunCompletion.Completed(child));
+        ChildRunCompletion completion = partial
+            ? new ChildRunCompletion.Partial(SubAgentOutcomeReason.ToolIterationBudgetExhausted, child)
+            : new ChildRunCompletion.Completed(child);
+
+        var merged = WorkingContextUpdater.MergeSuccessfulSubAgentWorkingContext(WorkingContext.Empty, completion);
 
         Assert.Equal(["src/Changed.cs"], merged.RecentFiles);
     }
@@ -657,7 +777,7 @@ public class SessionStateTests
             ConfirmedChangedFiles = ["src/Denied.cs"]
         };
 
-        var merged = LlmSessionActor.MergeSuccessfulSubAgentWorkingContext(
+        var merged = WorkingContextUpdater.MergeSuccessfulSubAgentWorkingContext(
             current,
             new ChildRunCompletion.Failed(SubAgentOutcomeReason.ToolExecutionFailed));
 
@@ -669,7 +789,7 @@ public class SessionStateTests
     {
         var current = WorkingContext.Empty.AddRecentFile("src/Existing.cs");
 
-        var merged = LlmSessionActor.MergeSuccessfulSubAgentWorkingContext(
+        var merged = WorkingContextUpdater.MergeSuccessfulSubAgentWorkingContext(
             current,
             new ChildRunCompletion.Cancelled(SubAgentOutcomeReason.CancelledByParent));
 

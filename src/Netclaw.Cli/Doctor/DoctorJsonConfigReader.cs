@@ -5,6 +5,7 @@
 // -----------------------------------------------------------------------
 using System.Text.Json.Nodes;
 using Netclaw.Cli;
+using Netclaw.Cli.Json;
 using Netclaw.Configuration;
 
 namespace Netclaw.Cli.Doctor;
@@ -55,6 +56,35 @@ internal static class DoctorJsonConfigReader
         return false;
     }
 
+    /// <summary>
+    /// For checks that read log history: when <c>Retention:Logs:Days</c> is set to a
+    /// non-zero value shorter than the check's look-back, returns a sentence saying the window is
+    /// limited to the retention period (otherwise empty). The environment variable wins over
+    /// netclaw.json, as it does for the daemon.
+    /// </summary>
+    public static string LogRetentionNote(NetclawPaths paths, int lookbackDays)
+    {
+        var raw = Environment.GetEnvironmentVariable("NETCLAW_Retention__Logs__Days");
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            try
+            {
+                raw = File.Exists(paths.NetclawConfigPath)
+                    ? (JsonNode.Parse(File.ReadAllText(paths.NetclawConfigPath), documentOptions: JsonDefaults.ConfigDocument) as JsonObject)?["Retention"]?["Logs"]?["Days"]?.ToString()
+                    : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+            {
+                return "";
+            }
+        }
+
+        return int.TryParse(raw, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var days)
+            && days > 0 && days < lookbackDays
+            ? $" Log retention is set to {days} days (Retention:Logs:Days), so this check can only see that far back."
+            : "";
+    }
+
     public static (JsonObject? Root, DoctorCheckResult? Error) TryReadConfig(NetclawPaths paths)
     {
         if (!File.Exists(paths.NetclawConfigPath))
@@ -78,7 +108,7 @@ internal static class DoctorJsonConfigReader
 
         try
         {
-            var root = JsonNode.Parse(File.ReadAllText(paths.NetclawConfigPath)) as JsonObject;
+            var root = JsonNode.Parse(File.ReadAllText(paths.NetclawConfigPath), documentOptions: JsonDefaults.ConfigDocument) as JsonObject;
             if (root is null)
             {
                 return (null, DoctorCheckResult.Error(

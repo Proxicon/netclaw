@@ -39,6 +39,15 @@ public static partial class SessionProtocol
         /// Ephemeral channel metadata for ACL/audit. Not persisted.
         /// </summary>
         public MessageSource? Source { get; init; }
+
+        /// <summary>Actor-local correlation for an input that the journal accepted.</summary>
+        internal InputId? AdmittedInputId { get; init; }
+
+        /// <summary>
+        /// Actor-local copy of the authority that the journal recorded for <see cref="AdmittedInputId"/>.
+        /// A buffered input keeps it so that a later drain can choose the turn that the input joins.
+        /// </summary>
+        internal TurnContext? AdmittedAuthority { get; init; }
     }
 
     /// <summary>

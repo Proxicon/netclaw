@@ -11,6 +11,8 @@ using Akka.Actor;
 using Akka.Event;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using Netclaw.Actors.Authorization;
+using Netclaw.Actors.Authorization.Consent;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Sessions;
@@ -571,59 +573,56 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
             if (_activeCycleBatch is { } cycleBatch)
             {
-                var cycleResults = msg.ToolResults.ToDictionary(
-                    result => result.ToolCallId is { } callId
+                var cycleResults = msg.Results.ToDictionary(
+                    result => result.Message.ToolCallId is { } callId
                         ? callId.Value
                         : throw new InvalidOperationException("A tool cycle result requires a call identity."),
-                    result =>
-                    {
-                        var callId = result.ToolCallId
-                            ?? throw new InvalidOperationException("A tool cycle result requires a call identity.");
-                        msg.ToolReceipts.TryGetValue(callId.Value, out var receipt);
-                        return new ToolCycleResult(
-                            receipt?.Category ?? ToolInvocationOutcomeCategory.Success,
-                            result.Content ?? string.Empty);
-                    },
+                    result => new ToolCycleResult(
+                        result.Receipt?.Category ?? ToolInvocationOutcomeCategory.Success,
+                        result.Message.Content ?? string.Empty),
                     StringComparer.Ordinal);
                 _turnState.ObserveCompleted(ToolCycleSignatureFactory.Complete(cycleBatch, cycleResults));
                 _activeCycleBatch = null;
             }
 
             // Append tool results as MEAI messages and log each result.
-            foreach (var result in msg.ToolResults)
+            foreach (var result in msg.Results)
             {
-                _history.Add(ChatMessageConverter.ToAiMessage(result));
-                if (result.ToolCallId is { } callId)
+                var message = result.Message;
+                _history.Add(ChatMessageConverter.ToAiMessage(message));
+                if (message.ToolCallId is { } callId)
                 {
-                    msg.ToolReceipts.TryGetValue(callId.Value, out var receipt);
+                    var receipt = result.Receipt;
                     _fileActivity.Apply(receipt);
-                    TryApplyProjectDirectory(result.Name, receipt);
-                    if (msg.AuthorizationAttemptIds.TryGetValue(callId.Value, out var authorizationAttemptId))
-                    {
-                        _log.Info(
-                            "SubAgent authorization attempt result authorizationAttemptId={AuthorizationAttemptId} " +
-                            "sessionId={SessionId} subSessionId={SubSessionId} callId={CallId} " +
-                            "outcomeCategory={OutcomeCategory} remediationCode={RemediationCode}",
-                            authorizationAttemptId.Value,
-                            _parentSessionId,
-                            _subSessionId,
-                            callId.Value,
-                            receipt?.Category.ToString(),
-                            (receipt as ToolInvocationReceipt.Correction)?.RemediationCode.ToString());
-                    }
-                    if (msg.ToolExposureRequests.TryGetValue(callId.Value, out var exposureRequest))
+                    TryApplyProjectDirectory(message.Name, receipt);
+                    _log.Info(
+                        "SubAgent authorization attempt result authorizationAttemptId={AuthorizationAttemptId} " +
+                        "sessionId={SessionId} subSessionId={SubSessionId} callId={CallId} " +
+                        "outcomeCategory={OutcomeCategory} remediationCode={RemediationCode}",
+                        result.AuthorizationAttemptId.Value,
+                        _parentSessionId,
+                        _subSessionId,
+                        callId.Value,
+                        receipt?.Category.ToString(),
+                        (receipt as ToolInvocationReceipt.Correction)?.RemediationCode.ToString());
+                    if (result.ExposureRequest is { } exposureRequest)
                         TryActivateDiscoveredTool(exposureRequest.ToolName.Value);
                 }
-                if (result.Name is "load_tool" && result.Content is not null)
-                    TryActivateDiscoveredTool(result.Content.Trim());
+                if (message.Name is "load_tool" && message.Content is not null)
+                    TryActivateDiscoveredTool(message.Content.Trim());
             }
 
-            foreach (var change in msg.ManagedTemporaryCorrectionChanges)
-                _managedTemporaryCorrections.Apply(change);
+            foreach (var result in msg.Results)
+            {
+                if (result.ManagedTemporaryCorrectionUpdate is { } change)
+                    _managedTemporaryCorrections.Apply(change);
+            }
 
-            AddModelInputMediaNudge(msg.ModelInputMediaReferences);
+            AddModelInputMediaNudge(msg.Results
+                .SelectMany(result => result.ModelInputMediaReferences)
+                .ToArray());
 
-            var budgetStatus = _turnState.RecordToolCompletion(msg.ToolResults.Count, _maxToolIterations);
+            var budgetStatus = _turnState.RecordToolCompletion(msg.Results.Length, _maxToolIterations);
             switch (budgetStatus)
             {
                 case ToolBudgetStatus.Exhausted exhausted:
@@ -897,32 +896,30 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
 
     private void EmitToolCycleCorrection(IReadOnlyList<FunctionCallContent> toolCalls)
     {
-        var receipts = new Dictionary<string, ToolInvocationReceipt>(StringComparer.Ordinal);
-        var authorizationAttemptIds = new Dictionary<string, AuthorizationAttemptId>(StringComparer.Ordinal);
-        var results = new List<SerializableChatMessage>(toolCalls.Count);
-        foreach (var call in toolCalls)
+        var results = new SubAgentToolCallResult[toolCalls.Count];
+        for (var i = 0; i < toolCalls.Count; i++)
         {
+            var call = toolCalls[i];
             var receipt = new ToolInvocationReceipt.Correction(ToolRemediationCode.BreakToolCycle);
-            receipts.Add(call.CallId, receipt);
-            authorizationAttemptIds.Add(call.CallId, AuthorizationAttemptId.New());
-            results.Add(ToolRemediationPresenter.Present(
-                new SerializableChatMessage
-                {
-                    Role = Protocol.ChatRole.Tool,
-                    Content = ToolCycleMessages.Correction,
-                    ToolCallId = new ToolCallId(call.CallId),
-                    Name = call.Name
-                },
+            results[i] = new SubAgentToolCallResult(
+                ToolRemediationPresenter.Present(
+                    new SerializableChatMessage
+                    {
+                        Role = Protocol.ChatRole.Tool,
+                        Content = ToolCycleMessages.Correction,
+                        ToolCallId = new ToolCallId(call.CallId),
+                        Name = call.Name
+                    },
+                    receipt,
+                    setWorkingDirectoryAvailable: false),
+                Array.Empty<SerializableMediaReference>(),
+                null,
                 receipt,
-                setWorkingDirectoryAvailable: false));
+                null,
+                AuthorizationAttemptId.New());
         }
 
-        Self.Tell(new ToolExecutionCompleted
-        {
-            ToolResults = results,
-            ToolReceipts = receipts,
-            AuthorizationAttemptIds = authorizationAttemptIds
-        });
+        Self.Tell(new ToolExecutionCompleted(results));
     }
 
     private void FireLlmCall(bool forceNoTools = false)
@@ -1537,81 +1534,70 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                             ? new ToolExposureRequest(nativeTool)
                             : null);
                 }
-                catch (ToolApprovalRequiredException approvalEx)
+                // A child without an approval bridge never needs consent: the
+                // authorizer denies the call first (approval_required_unattended,
+                // D2). A request here is a defect: log it and deny the call.
+                catch (ToolApprovalRequiredException) when (approvalBridge is null)
+                {
+                    logger.Error(
+                        "SubAgent tool {0} asked for consent with no approval bridge; denied as a defect.",
+                        tc.Name);
+                    toolContext.Outputs.TryComplete(
+                        new ToolInvocationReceipt.OtherOutcome(ToolInvocationOutcomeCategory.AccessDenied));
+                    return BuildToolResult(
+                        tc,
+                        ToolAuthorizer.ConsentWithoutBridgeResult(tc.Name),
+                        toolContext,
+                        modelInputBudget,
+                        consumedManagedTemporaryKey is { } defectConsumed
+                            ? new ManagedTemporaryCorrectionChange.Consume(defectConsumed)
+                            : null);
+                }
+                catch (ToolApprovalRequiredException approvalEx) when (approvalBridge is not null)
                 {
                     var ctx = approvalEx.ApprovalContext;
-                    if (approvalBridge is null)
+                    if (approvalBridge is not IParentConsentBridge consentBridge)
                     {
                         throw new ParentApprovalUnavailableException(
-                            $"Tool '{tc.Name}' requires interactive approval, but no parent approval bridge is available.");
+                            $"Tool '{tc.Name}' requires interactive approval, but the parent approval bridge cannot ask for consent.");
                     }
 
                     // Signal the actor that an approval wait is starting BEFORE
                     // the await so the inactivity watchdog cannot cancel the
-                    // wait. The bridge call uses externalCt — only explicit
-                    // external cancellation (parent passivation, daemon
-                    // restart, user cancel) aborts the wait; the internal
-                    // watchdog cannot.
+                    // wait. The wait ends with an answer, the session's approval
+                    // timeout, or explicit external cancellation (parent
+                    // passivation, daemon restart, user cancel). The internal
+                    // watchdog cannot cancel it.
                     self.Tell(SubAgentApprovalWaitStarted.Instance);
 
-                    ParentApprovalDecision decision;
+                    ConsentStep step;
                     try
                     {
-                        if (approvalBridge is IAuthorizationAttemptAwareParentApprovalBridge awareBridge)
-                        {
-                            decision = await awareBridge.RequestApprovalAsync(
-                                new ParentApprovalRequest(
-                                    toolContext.Approval.AuthorizationAttemptId,
-                                    new ToolCallId(tc.CallId),
-                                    ctx),
-                                externalCt);
-                        }
-                        else
-                        {
-                            var bridgeCandidates = ctx.Candidates is { Count: > 0 } candidates
-                                ? candidates.Select(static candidate => new ParentApprovalCandidate(
-                                    candidate.Verb,
-                                    candidate.Directory)
-                                {
-                                    Shell = candidate.Shell,
-                                    VerbTokens = candidate.VerbTokens,
-                                }).ToList()
-                                : (IReadOnlyList<ParentApprovalCandidate>)[];
-                            var bridgeOptions = ctx.Options
-                                .Select(static option => new ParentApprovalOption(option.Key.Value, option.Label))
-                                .ToList();
-                            decision = await approvalBridge.RequestApprovalAsync(
+                        step = await consentBridge.RequestConsentAsync(
+                            new ParentApprovalRequest(
+                                toolContext.Approval.AuthorizationAttemptId,
                                 new ToolCallId(tc.CallId),
-                                ctx.ToolName,
-                                ctx.DisplayText,
-                                ctx.Patterns,
-                                ctx.CandidateVerbs,
-                                bridgeCandidates,
-                                ctx.Cwd,
-                                bridgeOptions,
-                                ctx.IsMessy,
-                                externalCt);
-                        }
+                                tc.Name,
+                                ctx),
+                            externalCt);
                     }
                     finally
                     {
                         self.Tell(SubAgentApprovalWaitCompleted.Instance);
                     }
 
-                    if (decision.IsApprovalGrant())
+                    if (step.RetryConsent is { } retryConsent)
                     {
-                        // The immediate retry needs a transient grant even for session/always
-                        // approvals because the sub-agent's scope ID differs from the parent
-                        // session's scope. Keep that retry-local so approve-once cannot bleed
-                        // across parallel tool calls or later iterations.
+                        // The retry gets its own context, so the one-time consent
+                        // cannot reach a parallel tool call or a later iteration.
                         var retryContext = CreatePerToolExecutionContext(executionContext, meta);
                         retryContext.Approval.RestoreAuthorizationAttemptId(
                             toolContext.Approval.AuthorizationAttemptId);
-                        retryContext.Approval.SeedOneTimeApproval(tc.Name, OneTimeApprovalKeys.Create(ctx));
+                        retryContext.Approval.SeedOneTimeConsent(retryConsent);
                         var result = await executor.ExecuteAsync(tc, retryContext, ct);
                         return BuildToolResult(
                             cleanedTc,
-                            result,
+                            ConsentAnswerCodec.AppendResultNote(result, step.Answer),
                             retryContext,
                             modelInputBudget,
                             consumedManagedTemporaryKey is { } approvedConsumed
@@ -1619,10 +1605,11 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                                 : null);
                     }
 
-                    var reason = decision == ParentApprovalDecision.TimedOut
-                        ? "Tool access denied: approval_timed_out"
-                        : "Tool access denied: approval_denied_by_user";
-                    if (decision == ParentApprovalDecision.Denied
+                    var refusal = (ConsentAnswer.Refused)step.Answer;
+                    var reason = ConsentRefusalText.For(
+                        refusal.Kind,
+                        "Tool access denied: approval_denied_by_user");
+                    if (refusal.Kind == RefusalKind.Denied
                         && consumedManagedTemporaryKey is { } deniedManagedTemporaryRetry)
                     {
                         reason = $"{reason}\n{ManagedTemporaryCorrection.BuildDenialHint(deniedManagedTemporaryRetry.Target.ManagedTemporaryDirectory)}";
@@ -1691,36 +1678,7 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
                         setWorkingDirectoryAvailable)
                 };
             }
-            self.Tell(new ToolExecutionCompleted
-            {
-                ToolResults = [.. results.Select(r => r.Message)],
-                ModelInputMediaReferences = [.. results.SelectMany(r => r.ModelInputMediaReferences)],
-                ManagedTemporaryCorrectionChanges = [.. results.Where(r => r.ManagedTemporaryCorrectionUpdate is not null).Select(r => r.ManagedTemporaryCorrectionUpdate!)],
-                ToolReceipts = results
-                    .Where(result => result.Receipt is not null)
-                    .ToDictionary<SubAgentToolCallResult, string, ToolInvocationReceipt>(
-                        result => result.Message.ToolCallId is { } callId
-                            ? callId.Value
-                            : throw new InvalidOperationException("A child tool receipt requires a call identity."),
-                        result => result.Receipt
-                            ?? throw new InvalidOperationException("A selected child tool result requires a receipt."),
-                        StringComparer.Ordinal),
-                ToolExposureRequests = results
-                    .Where(result => result.ExposureRequest is not null)
-                    .ToDictionary<SubAgentToolCallResult, string, ToolExposureRequest>(
-                        result => result.Message.ToolCallId is { } callId
-                            ? callId.Value
-                            : throw new InvalidOperationException("A child tool exposure request requires a call identity."),
-                        result => result.ExposureRequest
-                            ?? throw new InvalidOperationException("A selected child tool result requires an exposure request."),
-                        StringComparer.Ordinal),
-                AuthorizationAttemptIds = results.ToDictionary<SubAgentToolCallResult, string, AuthorizationAttemptId>(
-                    result => result.Message.ToolCallId is { } callId
-                        ? callId.Value
-                        : throw new InvalidOperationException("A child authorization attempt requires a call identity."),
-                    result => result.AuthorizationAttemptId,
-                    StringComparer.Ordinal)
-            });
+            self.Tell(new ToolExecutionCompleted(results));
         }
         catch (Exception ex)
         {
@@ -1795,6 +1753,27 @@ public sealed class SubAgentActor : ReceiveActor, IWithTimers
         ToolInvocationReceipt? Receipt,
         ToolExposureRequest? ExposureRequest,
         AuthorizationAttemptId AuthorizationAttemptId);
+
+    private sealed record ToolExecutionCompleted : INoSerializationVerificationNeeded
+    {
+        public ToolExecutionCompleted(SubAgentToolCallResult[] results)
+        {
+            var callIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var result in results)
+            {
+                var callId = result.Message.ToolCallId
+                    ?? throw new InvalidOperationException("A child tool result requires a call identity.");
+                // Validate before mailbox delivery so the normal task can report a malformed batch.
+                ArgumentNullException.ThrowIfNull(callId.Value);
+                if (!callIds.Add(callId.Value))
+                    throw new ArgumentException("A child tool result has a duplicate call identity.", nameof(results));
+            }
+
+            Results = results;
+        }
+
+        public SubAgentToolCallResult[] Results { get; }
+    }
 
     private string BuildSystemPrompt(
         SubAgentDefinition definition,

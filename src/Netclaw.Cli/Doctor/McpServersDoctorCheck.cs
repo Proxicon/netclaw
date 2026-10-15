@@ -6,6 +6,7 @@
 using System.Text.Json;
 using System.Net;
 using Netclaw.Cli.Daemon;
+using Netclaw.Cli.Json;
 using Netclaw.Cli.Mcp;
 using Netclaw.Configuration;
 
@@ -47,7 +48,7 @@ public sealed class McpServersDoctorCheck : IDoctorCheck
         try
         {
             var text = File.ReadAllText(_paths.NetclawConfigPath);
-            using var doc = JsonDocument.Parse(text);
+            using var doc = JsonDocument.Parse(text, JsonDefaults.ConfigDocument);
 
             if (!doc.RootElement.TryGetProperty("McpServers", out var mcpSection))
                 return DoctorCheckResult.Pass("mcp-servers",
@@ -255,6 +256,7 @@ public sealed class McpServersDoctorCheck : IDoctorCheck
         var hasAuthFailure = false;
         var hasConnectivityFailure = false;
         var hasAwaitingAuth = false;
+        var hasDegraded = false;
         var enabledCount = 0;
         var failedCount = 0;
 
@@ -282,7 +284,8 @@ public sealed class McpServersDoctorCheck : IDoctorCheck
             switch (state)
             {
                 case "Connected":
-                    statusMessages.Add($"{name}: connected ({toolCount} tools)");
+                    hasDegraded |= McpDaemonStatusText.IsDegraded(statusEntry);
+                    statusMessages.Add($"{name}: {McpDaemonStatusText.FormatConnected(statusEntry, toolCount, error)}");
                     break;
                 case "AwaitingAuth":
                     hasAwaitingAuth = true;
@@ -332,6 +335,10 @@ public sealed class McpServersDoctorCheck : IDoctorCheck
         if (hasAwaitingAuth)
             return DoctorCheckResult.Warning("mcp-servers", summary,
                 "Complete OAuth for MCP servers that are awaiting authorization.");
+
+        if (hasDegraded)
+            return DoctorCheckResult.Warning("mcp-servers", summary,
+                "Check the MCP endpoints that are connected but not responding; their cached tools are likely to fail.");
 
         return DoctorCheckResult.Pass("mcp-servers", summary);
     }

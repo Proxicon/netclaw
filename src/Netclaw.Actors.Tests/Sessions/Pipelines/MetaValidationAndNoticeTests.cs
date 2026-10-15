@@ -50,7 +50,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
         SupportsInteractiveApproval = true
     };
 
-    private async Task<ToolExecutionCompleted> RunPipelineAsync(
+    private async Task<IReadOnlyList<ToolCallResult>> RunPipelineAsync(
         IToolExecutor executor,
         Dictionary<string, object?> args,
         TimeSpan? timeout = null)
@@ -68,8 +68,8 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
 
         var pipelineTask = fixture.ExecuteAsync(TestContext.Current.CancellationToken);
 
-        var completed = await probe.ExpectMsgAsync<ToolExecutionCompleted>(
-            TimeSpan.FromSeconds(5),
+        var completed = await StreamedToolReplyProbe.ExpectAsync(
+            probe, resultCount: 1, timeout: TimeSpan.FromSeconds(5),
             cancellationToken: TestContext.Current.CancellationToken);
         await pipelineTask.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         return completed;
@@ -127,6 +127,44 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
         }
     }
 
+    private sealed class AccessDeniedExecutor(Exception denial) : IToolExecutor
+    {
+        public Task AuthorizeAsync(FunctionCallContent toolCall, ToolExecutionContext? context = null, CancellationToken ct = default)
+            => Task.CompletedTask;
+
+        public ToolArgumentRejection? ValidateToolCall(FunctionCallContent toolCall) => null;
+
+        public Task<string> ExecuteAsync(FunctionCallContent toolCall, ToolExecutionContext? context = null, CancellationToken ct = default)
+            => Task.FromException<string>(denial);
+    }
+
+    // ── A denied call carries a failure code so unattended runs can see it ──
+
+    [Fact]
+    public async Task Denied_call_reports_the_access_denied_failure_code()
+    {
+        var completed = await RunPipelineAsync(
+            new AccessDeniedExecutor(new ToolAccessDeniedException("approval_required_unattended")),
+            new Dictionary<string, object?> { ["Command"] = "curl example.com", ["_rationale"] = "Fetch the page." });
+
+        Assert.Equal(
+            SessionProtocol.ToolResultOutput.AccessDeniedFailureCode,
+            Assert.Single(completed).FailureCode);
+    }
+
+    [Theory]
+    [InlineData(typeof(InvalidOperationException))]
+    [InlineData(typeof(UnauthorizedAccessException))]
+    public async Task Failing_call_that_authorization_did_not_deny_has_no_failure_code(Type exceptionType)
+    {
+        // An operating system permission error is an ordinary tool failure, not a denial.
+        var completed = await RunPipelineAsync(
+            new AccessDeniedExecutor((Exception)Activator.CreateInstance(exceptionType, "boom")!),
+            new Dictionary<string, object?> { ["Command"] = "echo hi", ["_rationale"] = "Say hi." });
+
+        Assert.Null(Assert.Single(completed).FailureCode);
+    }
+
     // ── Timeout hint is honored exactly (no clamp, no floor) ──
 
     [Fact]
@@ -141,7 +179,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             ["_timeout_seconds"] = 1200
         });
 
-        var content = completed.ToolResults[0].Content;
+        var content = Assert.Single(completed).Message.Content;
         Assert.Equal(1, executor.Invocations);
         Assert.Equal(TimeSpan.FromSeconds(1200), executor.LastContext?.ExecutionTimeout.Value);
         Assert.DoesNotContain("clamped", content);
@@ -161,7 +199,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             ["_timeout_seconds"] = 10
         });
 
-        var content = completed.ToolResults[0].Content;
+        var content = Assert.Single(completed).Message.Content;
         Assert.Equal(1, executor.Invocations);
         Assert.Equal(TimeSpan.FromSeconds(10), executor.LastContext?.ExecutionTimeout.Value);
         Assert.DoesNotContain("[timeout", content);
@@ -182,7 +220,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
 
         Assert.Equal(1, executor.Invocations);
         Assert.Equal(TimeSpan.FromSeconds(300), executor.LastContext?.ExecutionTimeout.Value);
-        Assert.DoesNotContain("NOT executed", completed.ToolResults[0].Content);
+        Assert.DoesNotContain("NOT executed", Assert.Single(completed).Message.Content);
     }
 
     [Fact]
@@ -195,7 +233,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             ["_timeout_seconds"] = 300
         });
 
-        var content = completed.ToolResults[0].Content;
+        var content = Assert.Single(completed).Message.Content;
         Assert.Equal(1, executor.Invocations);
         Assert.Equal(TimeSpan.FromSeconds(300), executor.LastContext?.ExecutionTimeout.Value);
         Assert.DoesNotContain("[timeout", content);
@@ -214,7 +252,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             ["_timeout_seconds"] = "1200ms"
         });
 
-        var content = completed.ToolResults[0].Content;
+        var content = Assert.Single(completed).Message.Content;
         Assert.Equal(0, executor.Invocations);
         Assert.Contains("'_timeout_seconds'", content);
         Assert.Contains("'1200ms'", content);
@@ -232,7 +270,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             ["_background"] = "yes"
         });
 
-        var content = completed.ToolResults[0].Content;
+        var content = Assert.Single(completed).Message.Content;
         Assert.Equal(0, executor.Invocations);
         Assert.Contains("'_background'", content);
         Assert.Contains("boolean", content);
@@ -258,10 +296,10 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             .WithTurnContext(InteractiveTurnContext(sessionId))
             .ExecuteAsync(TestContext.Current.CancellationToken);
 
-        var completed = await probe.ExpectMsgAsync<ToolExecutionCompleted>(
-            TimeSpan.FromSeconds(3),
+        var completed = await StreamedToolReplyProbe.ExpectAsync(
+            probe, resultCount: 1, timeout: TimeSpan.FromSeconds(3),
             cancellationToken: TestContext.Current.CancellationToken);
-        var result = Assert.Single(completed.ToolResults);
+        var result = Assert.Single(completed).Message;
         Assert.Equal(0, executor.Invocations);
         Assert.Equal(new ToolCallId("call-invalid-background"), result.ToolCallId);
         Assert.Contains("NOT executed", result.Content);
@@ -291,22 +329,20 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             .WithTurnContext(InteractiveTurnContext(sessionId))
             .ExecuteAsync(TestContext.Current.CancellationToken);
 
-        var completed = await probe.ExpectMsgAsync<ToolExecutionCompleted>(
-            TimeSpan.FromSeconds(3),
+        var completed = await StreamedToolReplyProbe.ExpectAsync(
+            probe, resultCount: 2, timeout: TimeSpan.FromSeconds(3),
             cancellationToken: TestContext.Current.CancellationToken);
         await pipelineTask.WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
 
         Assert.Equal(1, executor.ExecutionCount);
-        Assert.Equal(2, completed.ToolResults.Count);
-        Assert.Contains(completed.ToolResults, result =>
-            result.ToolCallId == new ToolCallId("call-valid")
-            && result.Content == "executed:call-valid");
-        Assert.Contains(completed.ToolResults, result =>
-            result.ToolCallId == new ToolCallId("call-invalid")
-            && result.Content.Contains("'_rationale'", StringComparison.Ordinal)
-            && result.Content.Contains("NOT executed", StringComparison.Ordinal));
-        Assert.Equal("invalid_rationale", completed.ToolFailureCodes["call-invalid"]);
-        Assert.False(completed.ToolFailureCodes.ContainsKey("call-valid"));
+        Assert.Equal(2, completed.Count);
+        var valid = Assert.Single(completed, result => result.Message.ToolCallId == new ToolCallId("call-valid"));
+        var invalid = Assert.Single(completed, result => result.Message.ToolCallId == new ToolCallId("call-invalid"));
+        Assert.Equal("executed:call-valid", valid.Message.Content);
+        Assert.Contains("'_rationale'", invalid.Message.Content, StringComparison.Ordinal);
+        Assert.Contains("NOT executed", invalid.Message.Content, StringComparison.Ordinal);
+        Assert.Equal("invalid_rationale", invalid.FailureCode);
+        Assert.Null(valid.FailureCode);
     }
 
     [Fact]
@@ -319,7 +355,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
             ["_timeout_seconds"] = JsonDocument.Parse("12.5").RootElement.Clone()
         });
 
-        var content = completed.ToolResults[0].Content;
+        var content = Assert.Single(completed).Message.Content;
         Assert.Equal(0, executor.Invocations);
         Assert.Contains("'_timeout_seconds'", content);
         Assert.Contains("12.5", content);
@@ -336,7 +372,7 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
         });
 
         Assert.Equal(0, executor.Invocations);
-        Assert.Contains("NOT executed", completed.ToolResults[0].Content);
+        Assert.Contains("NOT executed", Assert.Single(completed).Message.Content);
     }
 
     // ── Provider-boundary args parse failure ──
@@ -357,11 +393,11 @@ public sealed class MetaValidationAndNoticeTests(ITestOutputHelper output) : Tes
         var second = await RunPipelineAsync(executor, args);
 
         Assert.Equal(0, executor.Invocations);
-        var content = first.ToolResults[0].Content;
+        var content = Assert.Single(first).Message.Content;
         Assert.Contains("not valid JSON", content);
         Assert.Contains("NOT executed", content);
         Assert.Contains("Raw arguments prefix:", content);
-        Assert.Equal(content, second.ToolResults[0].Content);
+        Assert.Equal(content, Assert.Single(second).Message.Content);
     }
 
 }

@@ -13,7 +13,7 @@ Output "/tmp/tape-config-teams.gif"
 # marker; the Teams first-connect flow below owns every Teams setting.
 Type "mkdir -p $NETCLAW_HOME/config"
 Enter
-Type "jq -n '{configVersion:1}' > $NETCLAW_HOME/config/netclaw.json"
+Type "jq -n --arg posture Personal '{configVersion:1,Security:{DeploymentPosture:$posture}}' > $NETCLAW_HOME/config/netclaw.json"
 Enter
 
 Type "netclaw config"

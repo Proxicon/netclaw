@@ -8,7 +8,6 @@ using Microsoft.Extensions.AI;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Sessions.Pipelines;
 using Netclaw.Actors.SubAgents;
-using Netclaw.Actors.Tools;
 using Netclaw.Tools;
 
 namespace Netclaw.Actors.Sessions;
@@ -23,8 +22,6 @@ internal sealed record LlmResponseReceived : INoSerializationVerificationNeeded
     public bool StreamedText { get; init; }
 
     public bool StreamedThinking { get; init; }
-
-    public AutomaticRecallResult? RecallResult { get; init; }
 
     /// <summary>
     /// Correlation ID matching <see cref="LlmSessionActor._activeCallId"/>.
@@ -68,25 +65,6 @@ internal sealed record LlmCallFailed(Exception Cause) : INoSerializationVerifica
     public long CallId { get; init; }
 }
 
-/// <summary>
-/// Internal message sent back to the session actor when tool execution completes.
-/// Contains the tool results to feed back into the next LLM call.
-/// </summary>
-internal sealed record ToolExecutionCompleted : INoSerializationVerificationNeeded
-{
-    public required List<Protocol.SerializableChatMessage> ToolResults { get; init; }
-    public List<SerializableMediaReference> ModelInputMediaReferences { get; init; } = [];
-    public List<FileAttachmentInfo> FileAttachments { get; init; } = [];
-    public List<CompletedSubAgentRun> CompletedSubAgentRuns { get; init; } = [];
-    public List<AcceptedSubAgentFinding> AcceptedSubAgentFindings { get; init; } = [];
-    public List<Jobs.ActiveJobInfo> StartedBackgroundJobs { get; init; } = [];
-    public List<ManagedTemporaryCorrectionChange> ManagedTemporaryCorrectionChanges { get; init; } = [];
-    public Dictionary<string, string> ToolFailureCodes { get; init; } = new(StringComparer.Ordinal);
-    public Dictionary<string, ToolInvocationReceipt> ToolReceipts { get; init; } = new(StringComparer.Ordinal);
-    public Dictionary<string, ToolExposureRequest> ToolExposureRequests { get; init; } = new(StringComparer.Ordinal);
-    public Dictionary<string, AuthorizationAttemptId> AuthorizationAttemptIds { get; init; } = new(StringComparer.Ordinal);
-}
-
 internal sealed record ToolExecutionSingleCompleted(ToolCallResult Result) : INoSerializationVerificationNeeded;
 
 internal sealed record ToolExposureRequest(ToolName ToolName);
@@ -108,8 +86,6 @@ internal sealed record ToolExecutionBatchCompleted : INoSerializationVerificatio
 
 internal sealed record WorkingContextSnapshotReady(
     long Generation,
-    bool ForceNoTools,
-    string? TurnRestartNotice,
     WorkingContextSnapshot Snapshot) : INoSerializationVerificationNeeded;
 
 internal sealed record WorkingContextSnapshotCancelled(long Generation)
@@ -117,9 +93,6 @@ internal sealed record WorkingContextSnapshotCancelled(long Generation)
 
 internal sealed record WorkingContextSnapshotFailed(
     long Generation,
-    bool ForceNoTools,
-    string? TurnRestartNotice,
-    WorkingContext WorkingContext,
     Exception Cause) : INoSerializationVerificationNeeded;
 
 internal sealed record WorkingContextSnapshotFatal(Exception Cause)
@@ -210,23 +183,6 @@ internal sealed record CompactionWorkCompleted : INoSerializationVerificationNee
 internal sealed record CompactionWorkFailed : INoSerializationVerificationNeeded
 {
     public required long OperationId { get; init; }
-    public required Exception Cause { get; init; }
-}
-
-/// <summary>
-/// Internal message completing a memory extraction LLM call.
-/// Contains extracted memories that should be persisted externally.
-/// </summary>
-internal sealed record MemoryExtractionCompleted : INoSerializationVerificationNeeded
-{
-    public required string ExtractedMemories { get; init; }
-}
-
-/// <summary>
-/// Internal message when a compaction step (extraction or summarization) fails.
-/// </summary>
-internal sealed record CompactionFailed : INoSerializationVerificationNeeded
-{
     public required Exception Cause { get; init; }
 }
 

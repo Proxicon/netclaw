@@ -7,6 +7,7 @@ using Akka.Actor;
 using Akka.Hosting;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Netclaw.Actors.Channels;
 using Netclaw.Configuration;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
@@ -68,6 +69,13 @@ public class ToolLoopCompactionTests : LlmSessionTestBase
             "builtin");
         services.AddSingleton(registry);
         services.AddSingleton(TestToolAccessPolicy.Create(new ToolConfig()));
+        // Tool exposure needs a resolved trust context. A Public deployment
+        // ceiling keeps the Public exposure that these tests assert.
+        services.AddSingleton(new TrustContextDeriver(new EffectivePolicyDefaults(
+            DeploymentPosture.Public,
+            TrustAudience.Public,
+            ShellExecutionMode.Off,
+            UsedStrictFallback: true)));
     }
 
     [Fact]
@@ -107,6 +115,14 @@ public class ToolLoopCompactionTests : LlmSessionTestBase
         }, TestContext.Current.CancellationToken);
         await subscriber.ExpectMsgAsync<SessionJoined>(cancellationToken: TestContext.Current.CancellationToken);
 
+        var busy = CreateTestProbe("tool-loop-compaction-busy");
+        await sessionManager.Ask<SessionJoined>(new JoinSession(busy)
+        {
+            SessionId = sessionId,
+            Filter = OutputFilter.ProcessingState
+        }, TestContext.Current.CancellationToken);
+        await busy.ExpectMsgAsync<SessionJoined>(cancellationToken: TestContext.Current.CancellationToken);
+
         await sessionManager.Ask<CommandAck>(new SendUserMessage
         {
             SessionId = sessionId,
@@ -129,6 +145,21 @@ public class ToolLoopCompactionTests : LlmSessionTestBase
         await subscriber.ExpectMsgAsync<TextOutput>(TimeSpan.FromSeconds(5), cancellationToken: TestContext.Current.CancellationToken);
         await subscriber.ExpectMsgAsync<UsageOutput>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
         await subscriber.ExpectMsgAsync<TurnCompleted>(TimeSpan.FromSeconds(3), cancellationToken: TestContext.Current.CancellationToken);
+
+        var child = await Sys.ActorSelection($"/user/session-manager/{Uri.EscapeDataString(sessionId.Value)}")
+            .ResolveOne(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+        child.Tell(new JoinSession(busy)
+        {
+            SessionId = sessionId,
+            Filter = OutputFilter.ProcessingState
+        }, busy);
+        Assert.True((await busy.ExpectMsgAsync<ProcessingStateOutput>(
+            cancellationToken: TestContext.Current.CancellationToken)).IsProcessing);
+        await busy.ExpectMsgAsync<CompactionOutput>(cancellationToken: TestContext.Current.CancellationToken);
+        await busy.ExpectMsgAsync<TurnCompleted>(cancellationToken: TestContext.Current.CancellationToken);
+        Assert.False((await busy.ExpectMsgAsync<ProcessingStateOutput>(
+            cancellationToken: TestContext.Current.CancellationToken)).IsProcessing);
+        await busy.ExpectMsgAsync<SessionJoined>(cancellationToken: TestContext.Current.CancellationToken);
     }
 
     [Fact]

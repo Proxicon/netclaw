@@ -46,6 +46,10 @@ public sealed record SessionState
     public ImmutableList<SerializableChatMessage> History { get; init; } =
         [];
 
+    public ImmutableList<InputAdmitted> PendingInputs { get; init; } = [];
+
+    public ImmutableList<string> RecentSourceMessageKeys { get; init; } = [];
+
     public int TurnCount { get; init; }
 
     public string? Title { get; init; }
@@ -94,27 +98,60 @@ public sealed record SessionState
 
     // ── Event application (pure functions) ──
 
-    public SessionState Apply(TurnRecorded evt)
+    public SessionState Apply(InputAdmitted evt)
     {
-        var processedReminders = ProcessedReminderIds;
+        var sourceKey = SourceMessageKey(evt);
+        var keys = sourceKey is null || RecentSourceMessageKeys.Contains(sourceKey)
+            ? RecentSourceMessageKeys
+            : RecentSourceMessageKeys.Add(sourceKey);
+        if (keys.Count > 256)
+            keys = keys.RemoveRange(0, keys.Count - 256);
+
+        return this with
+        {
+            PendingInputs = PendingInputs.Add(evt),
+            RecentSourceMessageKeys = keys
+        };
+    }
+
+    public SessionState CloseInputs(IReadOnlyList<InputId> inputIds)
+    {
+        if (inputIds.Count == 0)
+            return this;
+
+        var ids = inputIds.ToHashSet();
+        return this with { PendingInputs = PendingInputs.RemoveAll(evt => ids.Contains(evt.InputId)) };
+    }
+
+    public static string? SourceMessageKey(InputAdmitted evt)
+        => string.IsNullOrWhiteSpace(evt.SourceMessageId)
+            ? null
+            : $"{evt.TurnContext.ChannelType ?? string.Empty}:{evt.TurnContext.RequesterSenderId?.Value ?? string.Empty}:{evt.SourceMessageId}";
+
+    public SessionState Apply(TurnRecorded evt)
+        => Apply(evt, userAlreadyInHistory: false);
+
+    internal SessionState Apply(TurnRecorded evt, bool userAlreadyInHistory)
+    {
+        var closed = CloseInputs(evt.ConsumedInputIds);
+        var processedReminders = closed.ProcessedReminderIds;
         if (evt.SourceReminderId is { } reminderId && !string.IsNullOrEmpty(reminderId.Value))
             processedReminders = processedReminders.Add(reminderId);
 
-        // Background-job dedup/remove/prune is delegated to the single shared
-        // helper so the replay path here and the live turn-completion path in
-        // LlmSessionActor cannot drift.
-        return (this with
+        // Live history already has the user message. Replay can restore it by input ID.
+        var history = userAlreadyInHistory ? closed.History : closed.History.Add(evt.UserMessage);
+        return (closed with
         {
-            History = History.Add(evt.UserMessage).Add(evt.AssistantReply),
-            TurnCount = TurnCount + 1,
+            History = history.Add(evt.AssistantReply),
+            TurnCount = closed.TurnCount + 1,
             ProcessedReminderIds = processedReminders
         }).CompleteTurnBackgroundJobBookkeeping(evt.SourceBackgroundJobId);
     }
 
     /// <summary>
-    /// Single source of truth for per-turn background-job bookkeeping, shared by
-    /// the replay path (<see cref="Apply(TurnRecorded)"/>) and the live
-    /// turn-completion path (LlmSessionActor): dedup-records a delivery turn's
+    /// Single source of truth for per-turn background-job bookkeeping.
+    /// <see cref="Apply(TurnRecorded)"/> uses it for live and replay paths.
+    /// It dedup-records a delivery turn's
     /// job ID, removes the delivered entry, and prunes reaped entries that were
     /// surfaced in this turn's context block (so the agent learns of a reap
     /// exactly once instead of on every turn forever).
@@ -337,7 +374,7 @@ public sealed record SessionState
                 Role = ChatRole.User,
                 Content = $"{SystemNudgePrefix} {nudge}]",
                 // Snapshot, never alias. The model-input media nudge is built from
-                // the caller's media accumulator (ModelInputMediaBuffer.DrainSnapshot),
+                // the batch tracker's media accumulator,
                 // which reuses/empties its backing list across batches.
                 // SerializableChatMessage is an immutable persistence type that must
                 // own its media list — without this copy the caller's reuse could
@@ -432,6 +469,8 @@ public sealed record SessionState
         return new SessionSnapshot
         {
             History = new List<SerializableChatMessage>(History),
+            PendingInputs = PendingInputs.ToArray(),
+            RecentSourceMessageKeys = RecentSourceMessageKeys.ToArray(),
             TurnCount = TurnCount,
             Title = Title,
             WorkingContext = WorkingContext.IsEmpty ? null : WorkingContext,
@@ -492,6 +531,8 @@ public sealed record SessionState
         return new SessionState
         {
             History = ImmutableList.CreateRange(snapshot.History),
+            PendingInputs = ImmutableList.CreateRange(snapshot.PendingInputs),
+            RecentSourceMessageKeys = ImmutableList.CreateRange(snapshot.RecentSourceMessageKeys),
             TurnCount = snapshot.TurnCount,
             Title = snapshot.Title,
             WorkingContext = snapshot.WorkingContext ?? WorkingContext.Empty,

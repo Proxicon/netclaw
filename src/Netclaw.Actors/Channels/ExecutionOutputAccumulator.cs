@@ -33,6 +33,8 @@ public enum OutputAction
 /// </summary>
 public sealed class ExecutionOutputAccumulator
 {
+    private const int MaxDeniedDetailLength = 300;
+
     private readonly ToolName _notificationToolName;
     private readonly Action<string, string, bool>? _onNotifyTracked;
     private readonly StringBuilder _buffer = new();
@@ -40,6 +42,7 @@ public sealed class ExecutionOutputAccumulator
     private bool _notifyAttempted;
     private bool _notifyFailed;
     private string? _notifyFailureDetail;
+    private string? _firstDeniedCall;
 
     /// <summary>
     /// Creates an accumulator.
@@ -82,6 +85,20 @@ public sealed class ExecutionOutputAccumulator
     /// </summary>
     public string GetAccumulatedText() => _buffer.ToString().Trim();
 
+    /// <summary>Clears output state before the next correlated session turn.</summary>
+    public void Reset()
+    {
+        _buffer.Clear();
+        _sawTextDelta = false;
+        _notifyAttempted = false;
+        _notifyFailed = false;
+        _notifyFailureDetail = null;
+        _firstDeniedCall = null;
+        LastErrorMessage = null;
+        LastErrorCause = null;
+        LastErrorCategory = null;
+    }
+
     /// <summary>
     /// Whether a notification tool was invoked during this execution.
     /// </summary>
@@ -91,6 +108,13 @@ public sealed class ExecutionOutputAccumulator
     /// Whether the most recent notification attempt failed.
     /// </summary>
     public bool NotifyFailed => _notifyFailed;
+
+    /// <summary>
+    /// What the first denied tool call of this execution was told, or <c>null</c> when no
+    /// call was denied. One denied call marks the whole execution, because an unattended
+    /// run cannot ask anyone and the owner would otherwise see an ordinary success.
+    /// </summary>
+    public string? DeniedCallMessage => _firstDeniedCall;
 
     /// <summary>
     /// Processes a <see cref="SessionOutput"/> and returns the action the caller should take.
@@ -110,6 +134,7 @@ public sealed class ExecutionOutputAccumulator
                 return OutputAction.Continue;
 
             case ToolResultOutput toolResult:
+                TrackDeniedCall(toolResult);
                 TrackNotificationResult(toolResult);
                 return OutputAction.Continue;
 
@@ -154,6 +179,17 @@ public sealed class ExecutionOutputAccumulator
             return _notifyFailureDetail ?? "Notification tool returned an unspecified error.";
 
         return null;
+    }
+
+    private void TrackDeniedCall(ToolResultOutput toolResult)
+    {
+        if (_firstDeniedCall is not null
+            || toolResult.FailureCode != ToolResultOutput.AccessDeniedFailureCode)
+            return;
+
+        var detail = toolResult.Result.Trim();
+        _firstDeniedCall = $"Tool call denied ({toolResult.ToolName.Value}): "
+            + (detail.Length > MaxDeniedDetailLength ? detail[..MaxDeniedDetailLength] + "…" : detail);
     }
 
     private void TrackNotificationResult(ToolResultOutput toolResult)

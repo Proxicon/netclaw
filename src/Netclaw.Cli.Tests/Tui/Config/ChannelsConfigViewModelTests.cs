@@ -1202,6 +1202,7 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
             """
             {
               "configVersion": 1,
+              "Security": { "DeploymentPosture": "Team" },
               "Teams": {
                 "Enabled": true,
                 "TenantId": "tenant-a",
@@ -3724,6 +3725,7 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
             """
             {
               "configVersion": 1,
+              "Security": { "DeploymentPosture": "Personal" },
               "Slack": {
                 "Enabled": true,
                 "SocketMode": true,
@@ -3771,6 +3773,7 @@ public sealed class ChannelsConfigViewModelTests : IDisposable
             """
             {
               "configVersion": 1,
+              "Security": { "DeploymentPosture": "Personal" },
               "Slack": {
                 "Enabled": true,
                 "SocketMode": true,

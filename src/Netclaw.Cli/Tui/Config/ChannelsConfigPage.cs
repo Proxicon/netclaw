@@ -691,7 +691,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
                     ChannelsConfigScreen.AllowedGroups => "  Use comma-separated canonical Entra group IDs. Blank removes group-derived access.",
                     ChannelsConfigScreen.GroupChats => "  Space toggles ingress for all allowed Group Chats. Enter saves. Esc cancels.",
                     ChannelsConfigScreen.Attachments => "  Space saves supported inbound Teams attachment access.",
-                    ChannelsConfigScreen.DirectoryStatus => "  Run netclaw doctor for offline configuration diagnostics. Esc returns to the menu.",
+                    ChannelsConfigScreen.DirectoryStatus => "  Run `netclaw doctor` for offline configuration diagnostics. Esc returns to the menu.",
                     ChannelsConfigScreen.DirectMessages => "  Space toggles DMs. Left/right changes the DM audience.",
                     ChannelsConfigScreen.RotateCredentials => "  Blank secret fields preserve existing secrets. Tab and Shift+Tab switch fields.",
                     ChannelsConfigScreen.ResetConfirm => "  Reset writes immediately when confirmed.",
@@ -1425,9 +1425,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         }
 
         _singleInput = new TextInputNode().WithPlaceholder(placeholder);
-        _singleInput.Text = seed ?? string.Empty;
-        if (!string.IsNullOrEmpty(_singleInput.Text))
-            _singleInput.HandleInput(new ConsoleKeyInfo('\0', ConsoleKey.End, shift: false, alt: false, control: false));
+        NetclawTuiChrome.SeedTextInput(_singleInput, seed ?? string.Empty);
         _singleInputScreen = screen;
         _singleInputKey = key;
         WizardStepHelpers.SyncInputToViewModel(_singleInput, StageSingleInput, CreateCallbacks());
@@ -1452,9 +1450,7 @@ public sealed class ChannelsConfigPage : ReactivePage<ChannelsConfigViewModel>
         if (field.IsSecret)
             input.AsPassword();
 
-        input.Text = ViewModel.GetCredentialDraftValue(field.Key) ?? string.Empty;
-        if (!string.IsNullOrEmpty(input.Text))
-            input.HandleInput(new ConsoleKeyInfo('\0', ConsoleKey.End, shift: false, alt: false, control: false));
+        NetclawTuiChrome.SeedTextInput(input, ViewModel.GetCredentialDraftValue(field.Key) ?? string.Empty);
 
         _credentialInputs[field.Key] = input;
         WizardStepHelpers.SyncInputToViewModel(input, () => StageCredentialInput(field), CreateCallbacks());

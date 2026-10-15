@@ -19,12 +19,19 @@ namespace Netclaw.Cli.Model;
 /// </summary>
 internal static class ModelCommand
 {
+    /// <summary>Short one-line form for TUI status areas; the detail comes from <c>netclaw doctor</c>.</summary>
+    internal const string InvalidConfigurationMessage = "Model configuration is invalid. Run `netclaw doctor` for details.";
+
     public static async Task<int> RunAsync(
         string[] args, NetclawPaths paths,
         IProviderProbe? probe = null, TextWriter? output = null)
     {
         var writer = output ?? Console.Out;
         var subcommand = args.Length > 1 ? args[1] : "help";
+
+        // Each subcommand takes operands, so a help flag after it would be read as a name.
+        if (CliArgsParser.HasTrailingHelpToken(args, startIndex: 2, includeBareHelp: false))
+            return WriteHelp(writer);
 
         try
         {
@@ -47,7 +54,13 @@ internal static class ModelCommand
 
     private static int RunList(NetclawPaths paths, TextWriter writer)
     {
-        if (!TryLoadModelSelection(paths, out var models, out var error))
+        // Display only: the daemon layers NETCLAW_* over netclaw.json, so the list shows that view.
+        // Guards and editors keep reading the file, because they change the file.
+        var configuration = new ConfigurationBuilder()
+            .AddJsonFile(paths.NetclawConfigPath, optional: true, reloadOnChange: false)
+            .AddEnvironmentVariables("NETCLAW_")
+            .Build();
+        if (!TryResolveModelSelection(configuration, out var models, out var error))
         {
             writer.WriteLine($"Error: {error}");
             writer.WriteLine("Fix the Models section in netclaw.json, then rerun `netclaw model list`.");
@@ -74,6 +87,13 @@ internal static class ModelCommand
             WriteModelRow("Compaction", models.Compaction, writer);
         else
             writer.WriteLine($"{"Compaction",-12} {"(not set)",-20}");
+
+        var modelVariables = Environment.GetEnvironmentVariables().Keys.OfType<string>()
+            .Where(name => name.StartsWith("NETCLAW_Models__", StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (modelVariables.Count > 0)
+            writer.WriteLine($"Note: this shell's environment ({string.Join(", ", modelVariables)}) is applied. The daemon uses its own environment.");
 
         return 0;
     }
@@ -212,6 +232,8 @@ internal static class ModelCommand
 
         // Validate provider exists
         var providers = ProviderCommand.LoadProviders(paths);
+        providerName = ConfigFileHelper.ResolveName(providers.Keys, providerName);
+
         if (!providers.TryGetValue(providerName, out var providerEntry))
         {
             writer.WriteLine($"Error: Provider '{providerName}' not found in configuration.");
@@ -371,10 +393,18 @@ internal static class ModelCommand
 
         var providerName = args[2];
         var providers = ProviderCommand.LoadProviders(paths);
+        providerName = ConfigFileHelper.ResolveName(providers.Keys, providerName);
 
         if (!providers.TryGetValue(providerName, out var entry))
         {
             writer.WriteLine($"Error: Provider '{providerName}' not found in configuration.");
+            return 1;
+        }
+
+        if (!string.IsNullOrWhiteSpace(entry.Endpoint) && !ProviderCommand.IsHttpEndpoint(entry.Endpoint))
+        {
+            writer.WriteLine($"Error: Provider '{providerName}' has endpoint '{entry.Endpoint}', which is not an absolute http or https URL. "
+                + "Fix it by editing the provider's endpoint in `netclaw provider`.");
             return 1;
         }
 
@@ -514,11 +544,35 @@ internal static class ModelCommand
         if (!File.Exists(paths.NetclawConfigPath))
             return true;
 
+        var configuration = new ConfigurationBuilder()
+            .AddJsonFile(paths.NetclawConfigPath, optional: false, reloadOnChange: false)
+            .Build();
+        return TryResolveModelSelection(configuration, out models, out error);
+    }
+
+    /// <summary>
+    /// Same as the <see cref="NetclawPaths"/> overload, for callers that already hold the parsed
+    /// <c>netclaw.json</c> and must not read the file a second time.
+    /// </summary>
+    internal static bool TryLoadModelSelection(
+        Dictionary<string, object> config,
+        out ModelSelection? models,
+        out string? error)
+    {
+        using var stream = new MemoryStream(JsonSerializer.SerializeToUtf8Bytes(config, JsonDefaults.ConfigFile));
+        var configuration = new ConfigurationBuilder().AddJsonStream(stream).Build();
+        return TryResolveModelSelection(configuration, out models, out error);
+    }
+
+    private static bool TryResolveModelSelection(
+        IConfiguration configuration,
+        out ModelSelection? models,
+        out string? error)
+    {
+        models = null;
+        error = null;
         try
         {
-            var configuration = new ConfigurationBuilder()
-                .AddJsonFile(paths.NetclawConfigPath, optional: false, reloadOnChange: false)
-                .Build();
             if (!configuration.GetSection("Models").Exists())
                 return true;
 

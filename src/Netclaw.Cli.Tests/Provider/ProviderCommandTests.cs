@@ -83,6 +83,79 @@ public sealed class ProviderCommandTests : IDisposable
         Assert.Equal("http://my-gpu-server:11434", entry.GetProperty("Endpoint").GetString());
     }
 
+    [Theory]
+    [InlineData("localhost:8080")]
+    [InlineData("ftp://host/models")]
+    [InlineData("/v1")]
+    public async Task Add_EndpointThatIsNotAnAbsoluteHttpUrl_FailsInOneLineAndWritesNothing(string endpoint)
+    {
+        var exitCode = await ProviderCommand.RunAsync(
+            ["provider", "add", "noscheme", "openai-compatible", "--endpoint", endpoint],
+            _paths, output: _output);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(
+            $"Error: Endpoint '{endpoint}' is not an absolute http or https URL. Use a form like http://localhost:8080.",
+            _output.ToString().Trim());
+        Assert.False(File.Exists(_paths.NetclawConfigPath));
+    }
+
+    [Theory]
+    [InlineData("http://localhost:8080")]
+    [InlineData("https://llm.example.com/v1")]
+    public async Task Add_AbsoluteHttpEndpoint_IsAccepted(string endpoint)
+    {
+        var exitCode = await ProviderCommand.RunAsync(
+            ["provider", "add", "local", "openai-compatible", "--endpoint", endpoint],
+            _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+    }
+
+    [Fact]
+    public async Task Add_NameDifferingOnlyByCase_ReplacesTheExistingEntry()
+    {
+        await ProviderCommand.RunAsync(
+            ["provider", "add", "local", "ollama", "--endpoint", "http://one:11434"], _paths, output: _output);
+
+        var exitCode = await ProviderCommand.RunAsync(
+            ["provider", "add", "Local", "ollama", "--endpoint", "http://two:11434"], _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+        var providers = ReadConfigFile(_paths.NetclawConfigPath).RootElement.GetProperty("Providers");
+        var entry = Assert.Single(providers.EnumerateObject());
+        Assert.Equal("local", entry.Name);
+        Assert.Equal("http://two:11434", entry.Value.GetProperty("Endpoint").GetString());
+    }
+
+    [Fact]
+    public async Task Remove_WrongCase_RemovesTheConfiguredProvider()
+    {
+        await ProviderCommand.RunAsync(
+            ["provider", "add", "local", "ollama", "--endpoint", "http://one:11434"], _paths, output: _output);
+        _output.GetStringBuilder().Clear();
+
+        var exitCode = await ProviderCommand.RunAsync(["provider", "remove", "LOCAL"], _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Removed provider 'local'", _output.ToString());
+        Assert.Empty(ReadConfigFile(_paths.NetclawConfigPath).RootElement.GetProperty("Providers").EnumerateObject());
+    }
+
+    [Fact]
+    public async Task Rename_WrongCase_RenamesTheConfiguredProvider()
+    {
+        await ProviderCommand.RunAsync(
+            ["provider", "add", "local", "ollama", "--endpoint", "http://one:11434"], _paths, output: _output);
+        _output.GetStringBuilder().Clear();
+
+        var exitCode = await ProviderCommand.RunAsync(["provider", "rename", "LOCAL", "renamed"], _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Renamed provider 'local' to 'renamed'", _output.ToString());
+        Assert.Equal("renamed", Assert.Single(ReadConfigFile(_paths.NetclawConfigPath).RootElement.GetProperty("Providers").EnumerateObject()).Name);
+    }
+
     [Fact]
     public async Task Add_ApiKeyProvider_WritesConfigAndSecrets()
     {
@@ -490,6 +563,155 @@ public sealed class ProviderCommandTests : IDisposable
         Assert.Contains("Main", output);
     }
 
+    private void WriteNamedModels(string mainProvider, string? fallbackProvider = null, string? compactionProvider = null)
+    {
+        var providers = new Dictionary<string, object>();
+        foreach (var name in new[] { mainProvider, fallbackProvider, compactionProvider, "spare" })
+        {
+            if (name is not null)
+                providers[name] = new Dictionary<string, object> { ["Type"] = "ollama", ["Endpoint"] = "http://localhost:11434" };
+        }
+
+        var definitions = new Dictionary<string, object>
+        {
+            ["main-model"] = new Dictionary<string, object> { ["Provider"] = mainProvider, ["ModelId"] = "qwen3:30b" }
+        };
+        var roles = new Dictionary<string, object> { ["Main"] = "main-model" };
+        if (fallbackProvider is not null)
+        {
+            definitions["fallback-model"] = new Dictionary<string, object> { ["Provider"] = fallbackProvider, ["ModelId"] = "qwen3:8b" };
+            roles["Fallback"] = "fallback-model";
+        }
+
+        if (compactionProvider is not null)
+        {
+            definitions["compaction-model"] = new Dictionary<string, object> { ["Provider"] = compactionProvider, ["ModelId"] = "qwen3:4b" };
+            roles["Compaction"] = "compaction-model";
+        }
+
+        WriteConfig(new Dictionary<string, object>
+        {
+            ["configVersion"] = 1,
+            ["Providers"] = providers,
+            ["Models"] = new Dictionary<string, object> { ["Definitions"] = definitions, ["Roles"] = roles }
+        });
+    }
+
+    [Fact]
+    public async Task Remove_ProviderBoundToMainByNamedRoles_ReturnsError()
+    {
+        WriteNamedModels("my-ollama");
+
+        var exitCode = await ProviderCommand.RunAsync(["provider", "remove", "my-ollama"], _paths, output: _output);
+
+        Assert.Equal(1, exitCode);
+        var output = _output.ToString();
+        Assert.Contains("Cannot remove provider 'my-ollama' — referenced by model role(s): Main", output);
+        Assert.Contains("Run `netclaw model set` to reassign these roles first", output);
+        Assert.True(ProviderCommand.LoadProviders(_paths).ContainsKey("my-ollama"));
+    }
+
+    [Fact]
+    public async Task Remove_ProviderBoundOnlyToFallbackAndCompactionByNamedRoles_ReturnsError()
+    {
+        WriteNamedModels("main-host", fallbackProvider: "fallback-host", compactionProvider: "compaction-host");
+
+        Assert.Equal(1, await ProviderCommand.RunAsync(["provider", "remove", "fallback-host"], _paths, output: _output));
+        Assert.Equal(1, await ProviderCommand.RunAsync(["provider", "remove", "compaction-host"], _paths, output: _output));
+
+        var output = _output.ToString();
+        Assert.Contains("referenced by model role(s): Fallback", output);
+        Assert.Contains("referenced by model role(s): Compaction", output);
+    }
+
+    [Fact]
+    public async Task Remove_ProviderUnusedByNamedRoles_Succeeds()
+    {
+        WriteNamedModels("my-ollama");
+
+        var exitCode = await ProviderCommand.RunAsync(["provider", "remove", "spare"], _paths, output: _output);
+
+        Assert.Equal(0, exitCode);
+        Assert.False(ProviderCommand.LoadProviders(_paths).ContainsKey("spare"));
+        Assert.True(ProviderCommand.LoadProviders(_paths).ContainsKey("my-ollama"));
+    }
+
+    [Fact]
+    public void TryGetReferencingModelRoleEntries_NamedRoles_ReturnsRoleAndDefinitionModelId()
+    {
+        WriteNamedModels("my-ollama", fallbackProvider: "other");
+
+        Assert.True(ProviderCommand.TryGetReferencingModelRoleEntries("my-ollama", _paths, out var entries, out var error));
+
+        Assert.Null(error);
+        Assert.Equal([("Main", "qwen3:30b")], entries);
+    }
+
+    [Fact]
+    public void TryGetReferencingModelRoleEntries_MatchesProviderNameCaseInsensitively()
+    {
+        WriteNamedModels("my-ollama");
+
+        Assert.True(ProviderCommand.TryGetReferencingModelRoleEntries("MY-Ollama", _paths, out var entries, out _));
+
+        Assert.Equal([("Main", "qwen3:30b")], entries);
+    }
+
+    [Fact]
+    public async Task Remove_UnresolvableModelsSection_RefusesWithConfigurationError()
+    {
+        // A Models section mixing both shapes cannot be resolved, so the guard cannot prove the
+        // provider is unused. It must refuse rather than guess.
+        WriteConfig(new Dictionary<string, object>
+        {
+            ["configVersion"] = 1,
+            ["Providers"] = new Dictionary<string, object>
+            {
+                ["my-ollama"] = new Dictionary<string, object> { ["Type"] = "ollama" }
+            },
+            ["Models"] = new Dictionary<string, object>
+            {
+                ["Main"] = new Dictionary<string, object> { ["Provider"] = "my-ollama", ["ModelId"] = "m" },
+                ["Roles"] = new Dictionary<string, object> { ["Main"] = "x" }
+            }
+        });
+
+        var exitCode = await ProviderCommand.RunAsync(["provider", "remove", "my-ollama"], _paths, output: _output);
+
+        Assert.Equal(1, exitCode);
+        var output = _output.ToString();
+        Assert.Contains("Cannot remove provider 'my-ollama': the Models section in netclaw.json cannot be resolved", output);
+        Assert.Contains("mixes legacy inline roles", output);
+        Assert.Contains("`netclaw model set main <provider> <model-id>` repairs it", output);
+        Assert.Contains("edit the Models section in netclaw.json by hand", output);
+        Assert.True(ProviderCommand.LoadProviders(_paths).ContainsKey("my-ollama"));
+    }
+
+    [Fact]
+    public async Task Remove_UnknownProvider_IsNotFoundBeforeTheModelRoleGuard()
+    {
+        // Models has no Main, so the resolver's default Main (local-ollama) applies. A provider that
+        // was never configured must report "not found", not "referenced by Main".
+        WriteConfig(new Dictionary<string, object>
+        {
+            ["configVersion"] = 1,
+            ["Providers"] = new Dictionary<string, object>
+            {
+                ["other"] = new Dictionary<string, object> { ["Type"] = "ollama" }
+            },
+            ["Models"] = new Dictionary<string, object>
+            {
+                ["Fallback"] = new Dictionary<string, object> { ["Provider"] = "other", ["ModelId"] = "m" }
+            }
+        });
+
+        var exitCode = await ProviderCommand.RunAsync(["provider", "remove", "local-ollama"], _paths, output: _output);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Provider 'local-ollama' not found.", _output.ToString());
+        Assert.DoesNotContain("referenced by", _output.ToString());
+    }
+
     [Fact]
     public async Task Remove_NotFound_ReturnsError()
     {
@@ -804,7 +1026,7 @@ public sealed class ProviderCommandTests : IDisposable
     }
 
     [Fact]
-    public void GetReferencingModelRoleEntries_ReturnsRoleAndModelId()
+    public void TryGetReferencingModelRoleEntries_LegacyInlineRoles_ReturnsRoleAndModelId()
     {
         WriteConfig(new Dictionary<string, object>
         {
@@ -824,7 +1046,7 @@ public sealed class ProviderCommandTests : IDisposable
             }
         });
 
-        var entries = ProviderCommand.GetReferencingModelRoleEntries("my-vllm", _paths);
+        Assert.True(ProviderCommand.TryGetReferencingModelRoleEntries("my-vllm", _paths, out var entries, out _));
 
         Assert.Single(entries);
         Assert.Equal("Main", entries[0].Role);

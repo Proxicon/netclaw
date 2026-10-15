@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Json.Schema;
 using Netclaw.Cli;
+using Netclaw.Cli.Json;
 using Netclaw.Configuration;
 
 namespace Netclaw.Cli.Doctor;
@@ -37,7 +38,7 @@ public sealed class ConfigSchemaDoctorCheck(NetclawPaths paths) : IDoctorCheck
         JsonNode? root;
         try
         {
-            root = JsonNode.Parse(File.ReadAllText(paths.NetclawConfigPath));
+            root = JsonNode.Parse(File.ReadAllText(paths.NetclawConfigPath), documentOptions: JsonDefaults.ConfigDocument);
         }
         catch (Exception ex)
         {
@@ -118,7 +119,7 @@ public sealed class ConfigSchemaDoctorCheck(NetclawPaths paths) : IDoctorCheck
             return Task.FromResult(DoctorCheckResult.Error(
                 "Config Schema",
                 $"Config does not match schema v{version}.{errorDetails}",
-                "Run `netclaw doctor --fix --dry-run` to preview auto-repairs, or check configVersion/schema fields in netclaw.json."));
+                "Correct the fields listed above in netclaw.json, or check configVersion. Move credentials with `netclaw secrets set <key> <value>`."));
         }
 
         if (syntheticVersion)
