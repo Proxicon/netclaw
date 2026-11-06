@@ -27,6 +27,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="../Netclaw.Daemon.Tests/Providers/OpenAiResponseSse.cs"
+             Link="Providers/OpenAiResponseSse.cs" />
     <Compile Include="../Netclaw.Daemon.Tests/Configuration/DaemonConfigurationSourcesTests.cs"
              Link="Configuration/DaemonConfigurationSourcesTests.cs" />
     <!-- unify-text-safety: the log redaction registration (log-redaction-registration gate). -->

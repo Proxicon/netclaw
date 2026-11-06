@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Netclaw.Configuration;
 using Netclaw.Configuration.Http;
@@ -29,6 +30,7 @@ public static class LlmProviderServiceExtensions
     /// </summary>
     public static IServiceCollection AddLlmProviders(this IServiceCollection services)
     {
+        services.TryAddSingleton(TimeProvider.System);
         // Register descriptors (shared with CLI)
         services.AddProviderDescriptors();
 

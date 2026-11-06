@@ -32,6 +32,53 @@ message loops, dropped sessions, or unexpected policy decisions).
    `netclaw doctor` includes a daemon crash-log check that flags recent
    `Netclaw daemon*` crash files and points to remediation.
 
+## Slow OpenAI Responses Calls
+
+The OpenAI API key and OAuth paths emit safe shape diagnostics at Information level.
+The logger category is `Netclaw.Providers.OpenAi.OpenAiResponseStreamClient`.
+The normal model pipeline supplies the existing session scope.
+
+Read these events within the original session log:
+
+| Event | Meaning |
+| --- | --- |
+| `response_stream_start` | One SDK stream enumeration starts. |
+| `response_stream_first_update` | The adapter exposes its first update. |
+| `response_stream_first_function` | The provider announces its first function item. |
+| `response_stream_first_arguments` | The provider emits its first argument delta. |
+| `response_stream_function` | The adapter exposes one parsed function call. Only its index, key count, and parse-failure flag appear. |
+| `response_stream_end` | The enumeration ends. The event records elapsed time, its outcome, and shape totals. |
+
+Compare `argumentDeltaChars`, `argumentDoneBytes`, `itemDoneArgumentBytes`, and `terminalArgumentBytes`.
+The character count and the byte counts can differ for non-ASCII text.
+`emptyCalls` and `parseErrors` distinguish empty parsed dictionaries from SDK parse failures.
+The diagnostic events omit credentials, prompts, function names, argument values, and provider error text.
+Other existing log events retain their own content policies.
+Do not enable production payload traces for this investigation.
+
+`completed` means that the provider completed this model response.
+It does not prove that the turn completed or that a requested tool ran.
+`incomplete_output_limit` identifies the provider's explicit output-limit reason.
+`failed`, `incomplete`, `incomplete_content_filter`, `error`, and `missing_terminal` fail the response before tool dispatch.
+`invalid_terminal` means that a completed event carried another response status.
+`cancelled` records caller cancellation, which includes a session watchdog decision.
+`interrupted` records another exception or disposal before a terminal event.
+
+The session still emits its existing error and turn-completion events.
+A connection or a content-free update does not prove task completion.
+The existing watchdog budgets still bound a quiet model call.
+The SDK can retry HTTP requests internally before it exposes an update.
+These events do not expose those internal attempt boundaries.
+
+Use a new disposable session for a harmless read-only acceptance test.
+Keep the original session and its completed tool results intact.
+Do not resend an uncertain request or replay business actions to test this fix.
+Record the fork commit, model-call start, diagnostic milestones, validation result, and actual terminal outcome.
+Do not attribute a repeated interval to a particular timer without correlated evidence.
+
+RatelDesk #351 and #308 own its separate observation and historical-recovery defects.
+This provider repair does not change those consumer behaviors or the SignalR contract.
+
 ## Enable Debug Logging
 
 Set these in `~/.netclaw/config/netclaw.json`:

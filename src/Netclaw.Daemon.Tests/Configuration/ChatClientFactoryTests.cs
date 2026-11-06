@@ -29,7 +29,7 @@ public sealed class ProviderPluginFactoryTests
     private static readonly ILlmProviderPlugin[] AllPlugins =
     [
         new OllamaProviderPlugin(new OllamaDescriptor(SharedHttp)),
-        new OpenAiProviderPlugin(new OpenAiDescriptor(SharedHttp)),
+        new OpenAiProviderPlugin(new OpenAiDescriptor(SharedHttp), NullLoggerFactory.Instance, TimeProvider.System),
         new AnthropicProviderPlugin(new AnthropicDescriptor(SharedHttp)),
         new OpenRouterProviderPlugin(new OpenRouterDescriptor(SharedHttp)),
     ];

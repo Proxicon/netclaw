@@ -6,6 +6,7 @@
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using Netclaw.Configuration;
 using Netclaw.Providers;
 using Netclaw.Providers.OAuth;
@@ -20,12 +21,18 @@ namespace Netclaw.Providers.OpenAi;
 public sealed class OpenAiProviderPlugin : ProviderPluginBase<OpenAiDescriptor>
 {
     private readonly ProviderOAuthTokenRefreshService? _tokenRefreshService;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly TimeProvider _timeProvider;
 
     public OpenAiProviderPlugin(
         OpenAiDescriptor descriptor,
+        ILoggerFactory loggerFactory,
+        TimeProvider timeProvider,
         ProviderOAuthTokenRefreshService? tokenRefreshService = null) : base(descriptor)
     {
         _tokenRefreshService = tokenRefreshService;
+        _loggerFactory = loggerFactory;
+        _timeProvider = timeProvider;
     }
 
     public override IChatClient CreateChatClient(ProviderEntry entry, ModelReference model)
@@ -68,9 +75,9 @@ public sealed class OpenAiProviderPlugin : ProviderPluginBase<OpenAiDescriptor>
             // streaming transport), so the Codex backend's
             // 400 {"detail":"Stream must be set to true"} on non-streaming Responses
             // calls is structurally unreachable.
-            return new OpenAI.Responses.ResponsesClient(
+            return Observe(new OpenAI.Responses.ResponsesClient(
                     credential, options)
-                .AsIChatClient(model.ModelId);
+                .AsIChatClient(model.ModelId));
         }
 
         // API key path → standard endpoint
@@ -78,7 +85,10 @@ public sealed class OpenAiProviderPlugin : ProviderPluginBase<OpenAiDescriptor>
         var apiKeyOptions = new OpenAI.Responses.ResponsesClientOptions();
         if (CreateTransportOverride() is { } transport)
             apiKeyOptions.Transport = transport;
-        return new OpenAI.Responses.ResponsesClient(new ApiKeyCredential(apiKey), apiKeyOptions)
-            .AsIChatClient(model.ModelId);
+        return Observe(new OpenAI.Responses.ResponsesClient(new ApiKeyCredential(apiKey), apiKeyOptions)
+            .AsIChatClient(model.ModelId));
     }
+
+    private IChatClient Observe(IChatClient client) => new OpenAiResponseStreamClient(
+        client, _loggerFactory.CreateLogger<OpenAiResponseStreamClient>(), _timeProvider);
 }

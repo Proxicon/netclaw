@@ -43,11 +43,9 @@ public sealed class LoggingChatClient : DelegatingChatClient
         [System.Runtime.CompilerServices.EnumeratorCancellation]
         CancellationToken cancellationToken = default)
     {
-        // Tag every line this call emits (prompt summary, timing, token usage, errors)
-        // with the owning session so they correlate in Seq. No-op for sidecar calls.
-        using var sessionScope = ChatClientSessionScope.Begin(_logger, options);
         var messageList = messages as IReadOnlyList<ChatMessage> ?? messages.ToList();
-        LogPromptDiagnostics(messageList, options);
+        using (ChatClientSessionScope.Begin(_logger, options))
+            LogPromptDiagnostics(messageList, options);
 
         var start = _timeProvider.GetTimestamp();
         long inputTokens = 0;
@@ -62,45 +60,66 @@ public sealed class LoggingChatClient : DelegatingChatClient
         IAsyncEnumerable<ChatResponseUpdate> stream;
         try
         {
+            using var initializationScope = ChatClientSessionScope.Begin(_logger, options);
             stream = base.GetStreamingResponseAsync(messageList, options, cancellationToken);
         }
         catch (Exception ex)
         {
+            using var failureScope = ChatClientSessionScope.Begin(_logger, options);
             var elapsed = _timeProvider.GetElapsedTime(start);
             _logger.LogError(ex, "LLM streaming call failed after {ElapsedMs:F0}ms", elapsed.TotalMilliseconds);
             throw;
         }
 
-        await foreach (var update in stream)
+        var enumerator = stream.GetAsyncEnumerator(cancellationToken);
+        try
         {
-            foreach (var item in update.Contents)
+            while (true)
             {
-                switch (item)
+                ChatResponseUpdate update;
+                // Async-local scopes do not survive an iterator yield. Re-enter for each downstream operation.
+                using (ChatClientSessionScope.Begin(_logger, options))
                 {
-                    case TextContent tc:
-                        textDeltaCount++;
-                        textDeltaChars += tc.Text?.Length ?? 0;
+                    if (!await enumerator.MoveNextAsync())
                         break;
-                    case TextReasoningContent rc:
-                        thinkingDeltaCount++;
-                        thinkingDeltaChars += rc.Text?.Length ?? 0;
-                        break;
-                    case FunctionCallContent:
-                        toolCallDeltaCount++;
-                        break;
-                    case UsageContent usage:
-                        inputTokens += usage.Details?.InputTokenCount ?? 0;
-                        outputTokens += usage.Details?.OutputTokenCount ?? 0;
-                        break;
+                    update = enumerator.Current;
                 }
+
+                foreach (var item in update.Contents)
+                {
+                    switch (item)
+                    {
+                        case TextContent tc:
+                            textDeltaCount++;
+                            textDeltaChars += tc.Text?.Length ?? 0;
+                            break;
+                        case TextReasoningContent rc:
+                            thinkingDeltaCount++;
+                            thinkingDeltaChars += rc.Text?.Length ?? 0;
+                            break;
+                        case FunctionCallContent:
+                            toolCallDeltaCount++;
+                            break;
+                        case UsageContent usage:
+                            inputTokens += usage.Details?.InputTokenCount ?? 0;
+                            outputTokens += usage.Details?.OutputTokenCount ?? 0;
+                            break;
+                    }
+                }
+
+                if (update.FinishReason is not null)
+                    lastFinishReason = update.FinishReason;
+
+                yield return update;
             }
-
-            if (update.FinishReason is not null)
-                lastFinishReason = update.FinishReason;
-
-            yield return update;
+        }
+        finally
+        {
+            using var disposalScope = ChatClientSessionScope.Begin(_logger, options);
+            await enumerator.DisposeAsync();
         }
 
+        using var completionScope = ChatClientSessionScope.Begin(_logger, options);
         var totalElapsed = _timeProvider.GetElapsedTime(start);
 
         _logger.LogDebug(

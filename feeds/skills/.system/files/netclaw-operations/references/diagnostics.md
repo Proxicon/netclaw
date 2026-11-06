@@ -3,6 +3,16 @@
 
 ## Diagnostics
 
+For a slow OpenAI API key or OAuth call, read the original session's `response_stream_*` events.
+These Information events contain elapsed time, terminal outcomes, argument sizes, key counts, and parse-failure flags.
+They omit prompts, credentials, argument values, and provider error text.
+A successful terminal event ends the response without a wait for HTTP EOF.
+A failed, incomplete, error, or truncated response cannot dispatch its tools.
+A completed call with absent rationale still fails the required-rationale guard.
+Do not infer the cause of a long interval from its duration alone.
+Do not enable production payload traces or replay business actions for diagnosis.
+Check the actual turn-completion event; a model response or a connected socket does not prove turn completion.
+
 
 When something seems wrong with Netclaw itself:
 

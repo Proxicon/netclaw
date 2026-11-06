@@ -126,8 +126,8 @@ public sealed class RetryingChatClient : DelegatingChatClient
         var delay = _policy.GetDelay(attempt);
         // No SessionId scope is opened here: PipelineChatClientFactory.Compose always
         // wraps this decorator inside LoggingChatClient (guarded by
-        // Compose_puts_Logging_outermost), whose streaming scope stays open for the whole
-        // enumeration that drives this retry loop — so the warning already inherits the
+        // Compose_puts_Logging_outermost), which opens the session scope for each stream
+        // operation. This retry loop runs inside that operation, so the warning inherits the
         // session id. Re-opening an identical scope would be pure duplication.
         //
         // CAVEAT — this inheritance holds ONLY on the streaming path. LoggingChatClient

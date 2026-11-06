@@ -351,7 +351,8 @@ internal sealed class WireCapture
         ILlmProviderPlugin[] plugins =
         [
             new AnthropicProviderPlugin(new AnthropicDescriptor(http)) { HttpHandlerOverride = handlerFor("anthropic") },
-            new OpenAiProviderPlugin(new OpenAiDescriptor(http)) { HttpHandlerOverride = handlerFor("openai") },
+            new OpenAiProviderPlugin(new OpenAiDescriptor(http), loggerFactory ?? NullLoggerFactory.Instance,
+                timeProvider ?? TimeProvider.System) { HttpHandlerOverride = handlerFor("openai") },
             new OpenRouterProviderPlugin(new OpenRouterDescriptor(http)) { HttpHandlerOverride = handlerFor("openrouter") },
             new VeniceAiProviderPlugin(new VeniceAiDescriptor(http)) { HttpHandlerOverride = handlerFor("veniceai") },
             new DeepSeekProviderPlugin(new DeepSeekDescriptor(http), NullLoggerFactory.Instance)

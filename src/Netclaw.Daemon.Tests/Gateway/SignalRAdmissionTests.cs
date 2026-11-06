@@ -30,7 +30,9 @@ using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Sessions;
+using Netclaw.Actors.Tools;
 using Netclaw.Configuration;
+using Netclaw.Security;
 using Netclaw.Tools;
 using Netclaw.Daemon.Gateway;
 using Netclaw.Daemon.Security;
@@ -40,7 +42,7 @@ using static Netclaw.Actors.Sessions.SessionProtocol;
 
 namespace Netclaw.Daemon.Tests.Gateway;
 
-public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(output: output), IAsyncDisposable
+public sealed partial class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(output: output), IAsyncDisposable
 {
     private readonly DisposableTempDir _directory = new();
     private readonly HeldModel _model = new();
@@ -61,6 +63,12 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
             new StaticSystemPromptProvider("Reply to the user."), [], _context,
             TimeProvider.System, paths, new TestSessionStorageResolver(paths)));
         services.AddSingleton<ISessionStorageResolver>(new TestSessionStorageResolver(paths));
+        var defaults = new EffectivePolicyDefaults(DeploymentPosture.Personal, TrustAudience.Personal, ShellExecutionMode.Off, UsedStrictFallback: false);
+        var registry = new ToolRegistry();
+        var policy = new ToolAccessPolicy(paths, new ToolConfig(), defaults, new ShellCommandPolicy(), new ToolPathPolicy([]));
+        registry.RegisterCore(new LoadToolTool(registry, policy));
+        services.AddSingleton(new SessionToolServices(new DispatchingToolExecutor(registry, policy),
+            registry, policy, new TrustContextDeriver(defaults), null));
         services.AddSingleton<ISessionPipeline>(provider => _failInitialization
             ? new BrokenPipeline() : _queueFault ?? (ISessionPipeline)ActivatorUtilities.CreateInstance<SessionPipeline>(provider));
         services.AddSingleton<IHubContext<SessionHub, ISessionHubClient>>(_ =>
@@ -373,10 +381,13 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
         }
     }
 
-    private async Task<HubConnection> ConnectAsync()
+    private Task<HubConnection> ConnectAsync() => ConnectAsync(useSocket: false);
+
+    private async Task<HubConnection> ConnectAsync(bool useSocket)
     {
         var builder = WebApplication.CreateBuilder();
-        builder.WebHost.UseTestServer();
+        if (useSocket) builder.WebHost.UseKestrel().UseUrls("http://127.0.0.1:0");
+        else builder.WebHost.UseTestServer();
         builder.Services.AddSessionHubSignalR();
         builder.Services.AddSingleton(new DaemonConfig());
         builder.Services.AddAuthentication(LoopbackAuthenticationHandler.SchemeName)
@@ -393,10 +404,11 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
         _app.UseAuthorization();
         _app.MapHub<SessionHub>("/hub/session");
         await _app.StartAsync();
-        var client = new HubConnectionBuilder().WithUrl("http://localhost/hub/session", options =>
+        var endpoint = useSocket ? _app.Urls.Single() : "http://localhost";
+        var client = new HubConnectionBuilder().WithUrl($"{endpoint}/hub/session", options =>
         {
-            options.Transports = HttpTransportType.LongPolling;
-            options.HttpMessageHandlerFactory = _ => _app.GetTestServer().CreateHandler();
+            options.Transports = useSocket ? HttpTransportType.WebSockets : HttpTransportType.LongPolling;
+            if (!useSocket) options.HttpMessageHandlerFactory = _ => _app.GetTestServer().CreateHandler();
         }).Build();
         await client.StartAsync();
         return client;
@@ -471,6 +483,7 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
 
     private sealed class HeldModel : IChatClient
     {
+        public IChatClient? StreamingOverride { get; set; }
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Calls { get; private set; }
@@ -500,6 +513,14 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
         public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages,
             ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            if (StreamingOverride is { } client)
+            {
+                Calls++;
+                Started.TrySetResult();
+                await foreach (var update in client.GetStreamingResponseAsync(messages, options, cancellationToken))
+                    yield return update;
+                yield break;
+            }
             var response = await GetResponseAsync(messages, options, cancellationToken);
             foreach (var update in response.ToChatResponseUpdates()) yield return update;
         }
@@ -531,6 +552,7 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
                 if (gate.Reject) return writes.Select(_ => new IOException("Journal rejected admission.")).Cast<Exception>().ToImmutableList();
             }
             var result = await base.WriteMessagesAsync(writes, cancellationToken);
+            foreach (var batch in payloads.OfType<ToolBatchStarted>()) gate?.Observer.Tell(batch);
             foreach (var turn in payloads.OfType<TurnRecorded>()) gate?.Observer.Tell(turn);
             return result;
         }

@@ -19,6 +19,27 @@ Runtime provider implementation must expose:
 
 Session actors depend on provider-neutral chat client behavior.
 
+### OpenAI Responses terminal events
+
+`OpenAiResponseStreamClient` owns the Responses stream terminal contract.
+The owner keeps its state within one model call.
+Both the API key path and the OAuth path use this owner.
+
+- A `response.completed` event with `Completed` status ends the response without another HTTP read.
+- A failed, incomplete, or error event ends the call with a safe `ProviderException`.
+- EOF without a successful terminal event also fails the call.
+- The session dispatches no tools from a response whose enumeration fails.
+- A completed response retains the SDK's parsed arguments and the existing tool validation.
+- The owner does not reconstruct arguments, replay tools, or change the session watchdog budgets.
+
+The SDK adapter parses function arguments from `response.output_item.done`.
+It does not assemble the argument deltas within Netclaw.
+Shape counters compare delta characters, final argument bytes, parsed keys, and parse failures without payload text.
+
+Positive: a completed response releases its tool calls while the HTTP connection remains open.
+Negative: a failed response cannot dispatch an otherwise valid tool call after EOF.
+See the [verification record for issue #2791](../research/netclaw-2791-proxicon-validation.md) for the production evidence limits.
+
 ## MVP Providers
 
 - OpenRouter (default)

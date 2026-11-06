@@ -14,6 +14,7 @@
     <InternalsVisibleTo Include="Netclaw.Daemon.Tests" />
     <InternalsVisibleTo Include="Netclaw.Cli.Tests" />
     <InternalsVisibleTo Include="Netclaw.Actors.Tests" />
+    <InternalsVisibleTo Include="Netclaw.Actors.MutationTests" />
   </ItemGroup>
 
   <ItemGroup>

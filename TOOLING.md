@@ -149,6 +149,7 @@ coverage. They do not replace positive and negative behavior tests.
 
 | Target | Protected claim | Expected mutants | Command |
 |--------|-----------------|------------------|---------|
+| `OpenAiResponseStreamClient` terminal release | A successful Responses event ends enumeration before HTTP EOF. An earlier lifecycle event cannot release a partial response. | 3 required | `./scripts/run-response-terminal-release-mutations.sh` |
 | `SkillCommand.RunRemoveAsync` source, local endpoint, file boundary, and directory boundary | Removal requires a known native source, the local daemon, and two paths within the skills root without links below it. | 5 required | `./scripts/run-skill-remove-mutations.sh` |
 | `ChatClientActor.Start` (`// chat-close-dispatch-expiry:begin` to `end`) | Issue #2642, PRD-004: a held bind reply permits text dispatch at 1.5 seconds after Close, but refuses it at two seconds | 2 killed | `./scripts/run-chat-close-dispatch-expiry-mutations.sh` |
 | `PathAccessPolicy.AddSessionRoots`, `PathAccessPolicy.IsReadableByAudience`, `PathAccessPolicy.GetEffectiveAccess`, `PathAccessPolicy.IsInOtherTemporaryKeyFolder`, and `ManagedTemporaryEnvironment.CheckFolder` | Only a Personal context receives shared session roots; a reviewed phrase uses the read authority of the audience, attended or not (D2), only for a fully qualified host path of the shell's own style that is not protected; issue #2554: a Personal read or attach follows the write profile and no other audience, operation, or write mode does (write `All` gives `All`, write `Roots` adds its roots, write `None` adds nothing, and a read profile of mode `All` stays `All`); the managed temporary key folder is a session root and the shared base is not; a Team or Public root over the base does not reach another key folder; the shell launch is refused when the base or the key folder is missing, a link, owned by another user, or open to a group or others | 30 killed | `./scripts/run-path-access-mutations.sh` |
@@ -190,6 +191,23 @@ coverage. They do not replace positive and negative behavior tests.
 | The proof in `DaemonManager.StopAsync` before the signal (`// stop-proof`, `// stop-notice`, `// stale-pid`) and the home comparison (`// home-match`) | Rule 2 of #2527: a PID gets a signal only when the daemon at the port of this home answers 200 with that PID and this home, or when it does not answer (or answers 200 with no `home`) and the environment of the process shows this home, read as that process reads it (`HOME` and `NETCLAW_HOME` of the target, never of the CLI). A 409, or a 200 with another PID or home, is never overruled; two folders that a `..` in a link target could join are two homes; a home that differs by case, by a folder level, or by a link is another home; a stale PID file signals nothing | all tested mutants killed (at least 32 in `DaemonManager`; at least 49 in `HomeIdentity`, where a `Timeout` counts as killed) | `./scripts/run-stop-proof-mutations.sh` |
 | `DaemonLogRetention.Prune` (`// daemon-log-retention-cutoff:begin` to `end`) | Issue #2484: only daemon segments before the UTC retention cutoff can be deleted. A segment on the cutoff remains. | 2 killed | `./scripts/run-daemon-log-retention-mutations.sh` |
 | The log redaction registration (`// log-redaction-registration:begin` to `end` in `LoggingRegistrationExtensions`) | unify-text-safety D6: the daemon's `ILoggerFactory` is `RedactingLoggerFactory`. If either registration statement is removed, every log record reaches the sinks unredacted. | 2 killed | `./scripts/run-log-redaction-registration-mutations.sh` |
+
+### Responses Terminal Release
+
+Issue #2791 adds one provider boundary after the SDK adapter.
+The `response-terminal-release` gate selects only its successful-terminal release decision.
+The tests hold HTTP EOF and also provide unsuccessful terminal events.
+
+The gate requires three exact mutants to run and die:
+
+- Equality reversal releases a lifecycle update before the response completes.
+- An empty success string prevents release at the completed event.
+- Removal of `yield break` causes a wait for HTTP EOF after completion.
+
+The script rejects absent or duplicate markers, unexpected mutants, survivors, and timeouts.
+The first Stryker run killed all three mutants in 79 seconds.
+The CI matrix gives the gate its own group, within the existing 25-minute job limit.
+The report directory is `artifacts/stryker/response-terminal-release`.
 
 ### Daemon Log Retention Cutoff
 
