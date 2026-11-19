@@ -3805,6 +3805,8 @@ public sealed partial class LlmSessionActor : ReceivePersistentActor, IWithTimer
         bool includeText = true,
         bool includeThinking = true)
     {
+        var authority = _input.Authority;
+        var reminderId = authority.Source?.ReminderId;
         foreach (var content in message.Contents)
         {
             switch (content)
@@ -3845,7 +3847,13 @@ public sealed partial class LlmSessionActor : ReceivePersistentActor, IWithTimer
             {
                 EmitOutput(new TextOutput(fullText)
                 {
-                    SessionId = _sessionId
+                    SessionId = _sessionId,
+                    // A restart wakeup can supply its own source while it resumes older input. The key must match the admitted turn.
+                    SourceReminderId = authority.Context is { IsSignalRReminder: true } context
+                        && reminderId is { } key && context.TurnId.Value == key.Value
+                        && ReminderFireKey.TryParse(key.Value, out var fire) && fire.Value == key.Value
+                        ? key
+                        : null
                 }, OutputFilter.Text);
             }
         }
@@ -3859,7 +3867,7 @@ public sealed partial class LlmSessionActor : ReceivePersistentActor, IWithTimer
         {
             SessionId = _sessionId,
             TurnNumber = new TurnNumber(_state.TurnCount),
-            SourceReminderId = _input.Authority.Source?.ReminderId,
+            SourceReminderId = reminderId,
             OpenChildRunIds = _state.GetOpenChildRunIds()
         });
     }

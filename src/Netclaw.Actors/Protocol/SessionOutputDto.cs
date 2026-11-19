@@ -85,6 +85,8 @@ public sealed record SessionOutputDto
     [System.Text.Json.Serialization.JsonConverter(typeof(NullableTurnNumberJsonConverter))]
     public TurnNumber? TurnNumber { get; init; }
     public string? TurnOutcome { get; init; }
+
+    // Fire key on a reminder terminal or a final SignalR reminder reply.
     public string? SourceReminderId { get; init; }
 
     // Wire name: quietEnd. Written for every TurnCompleted. Absent or null comes from an earlier daemon and reads

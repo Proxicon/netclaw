@@ -24,7 +24,8 @@ public static class SessionOutputDtoMapper
             Type = SessionOutputTypes.Text,
             SessionId = msg.SessionId.Value,
             TimestampMs = msg.TimestampMs,
-            Text = msg.Text
+            Text = msg.Text,
+            SourceReminderId = msg.SourceReminderId?.Value
         },
 
         TextDeltaOutput msg => new SessionOutputDto

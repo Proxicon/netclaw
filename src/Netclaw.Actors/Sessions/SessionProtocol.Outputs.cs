@@ -40,7 +40,11 @@ public static partial class SessionProtocol
     /// User-facing text reply from the assistant.
     /// Requires <see cref="OutputFilter.Text"/>.
     /// </summary>
-    public sealed record TextOutput(string Text) : SessionOutput;
+    public sealed record TextOutput(string Text) : SessionOutput
+    {
+        /// <summary>The fire key of a final reply to a SignalR reminder.</summary>
+        public ReminderId? SourceReminderId { get; init; }
+    }
 
     /// <summary>
     /// Incremental text delta from the assistant while a turn is streaming.

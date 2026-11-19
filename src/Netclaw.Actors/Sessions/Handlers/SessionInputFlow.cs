@@ -553,7 +553,8 @@ internal sealed class SessionInputFlow
         while (start + count < _buffer.Count
                && (dispatchesCommand ? count == 0 : !IsBufferedCommand(_buffer[start + count]))
                && PassesPause(_buffer[start + count], owner, startsTurn: adoptsAuthority && count == 0, childConsentPaused)
-               && JoinsTurn(_buffer[start + count], owner))
+               && JoinsTurn(_buffer[start + count], owner)
+               && PassesReminderBoundary(_buffer[start + count], owner, startsTurn: adoptsAuthority && count == 0))
             count++;
         if (count == 0)
             return null;
@@ -591,6 +592,12 @@ internal sealed class SessionInputFlow
 
     private static bool JoinsTurn((SendUserMessage Message, bool IsReplay) input, TurnContext? owner)
         => input.IsReplay || (owner is not null && BufferedAuthority(input.Message).HasSameRequester(owner));
+
+    // Each SignalR reminder needs its own final reply and terminal. A replay keeps its place in that turn.
+    private static bool PassesReminderBoundary(
+        (SendUserMessage Message, bool IsReplay) input, TurnContext? owner, bool startsTurn)
+        => startsTurn || input.IsReplay
+           || (owner?.IsSignalRReminder != true && !BufferedAuthority(input.Message).IsSignalRReminder);
 
     // <child-consent-drain>
     // Security boundary (child consent pause, design D5). While the pause applies, automated input and child result
