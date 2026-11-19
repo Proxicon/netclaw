@@ -175,7 +175,8 @@ public static class ReminderEndpointRouteBuilderExtensions
 
             var manager = await actor.GetAsync(ct);
             var response = await manager.Ask<ReminderSavedResponse>(
-                new SaveReminderCommand(request.Definition, mode.Value, authorization),
+                // Only the live tool call can mint a SignalR registration identity.
+                new SaveReminderCommand(request.Definition with { SignalRRegistrationId = null }, mode.Value, authorization),
                 TimeSpan.FromSeconds(10),
                 ct);
 

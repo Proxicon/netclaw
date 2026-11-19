@@ -61,6 +61,39 @@ public sealed class SessionRegistryTests(ITestOutputHelper output) : TestKit(out
 
         Assert.True(result.Created);
         Assert.False(string.IsNullOrWhiteSpace(result.SessionId));
+        Assert.Equal(0, result.ScheduledReportVersion);
+    }
+
+    [Fact]
+    public async Task SignalR_binds_the_NetRatel_message_claim_to_the_attached_connection()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var inputs = CreateTestProbe();
+        var notices = CreateTestProbe();
+        var gateway = Sys.ActorOf(Props.Create(() => new AdmissionGateway(inputs, notices)));
+        var registry = BuildRegistry(actorProvider: new RequiredGateway(gateway));
+        var ensured = await registry.EnsureSessionAsync("original", null, "signalr");
+        Assert.Equal(1, ensured.TextAdmissionVersion);
+        Assert.Equal(1, ensured.ScheduledReportVersion);
+        var principal = new ClaimsPrincipal(new ClaimsIdentity([], "test"));
+        var messageId = Guid.NewGuid();
+        var text = $"[netratel-investigation:{Guid.NewGuid():D}:{messageId:D}]\nSend two reports.";
+
+        await Assert.ThrowsAsync<HubException>(() => registry.SendMessageAsync("other", ensured.SessionId, text, principal));
+        var admission = registry.SendMessageAsync("original", ensured.SessionId, text, principal);
+        var enqueue = await inputs.ExpectMsgAsync<EnqueueSignalRInput>(cancellationToken: ct);
+        var origin = Assert.IsType<SignalRMessageOrigin>(enqueue.Input.SignalRMessageOrigin);
+        Assert.Equal(messageId, origin.MessageId);
+        Assert.Equal("original", origin.ConnectionId);
+        Assert.True(origin.IsAttached());
+        Assert.Equal(text, Assert.IsType<Microsoft.Extensions.AI.TextContent>(Assert.Single(enqueue.Input.Contents)).Text);
+        Assert.False(admission.IsCompleted);
+        enqueue.Input.AckTarget!.Tell(CommandAck.For(enqueue.SessionId));
+        await admission;
+
+        var reattached = await registry.EnsureSessionAsync("other", ensured.SessionId, "tui");
+        Assert.Equal(1, reattached.ScheduledReportVersion);
+        Assert.False(origin.IsAttached());
     }
 
     [Fact]

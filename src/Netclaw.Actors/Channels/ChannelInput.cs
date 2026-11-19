@@ -144,6 +144,9 @@ public sealed record ChannelInput
     /// </summary>
     public ReminderId? ReminderId { get; init; }
 
+    internal SignalRMessageOrigin? SignalRMessageOrigin { get; init; }
+    internal Guid? SignalRRegistrationId { get; init; }
+
     /// <summary>
     /// Ephemeral ack reply target. Set by channel leaf actors when handling
     /// a <c>DeliverTrustedSessionTurn</c> to the <c>Sender</c> preserved via

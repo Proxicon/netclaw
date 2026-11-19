@@ -83,7 +83,10 @@ internal abstract class ToolInvocationReceipt
 
         public IReadOnlyList<ToolFileActivity> FileActivity { get; }
         public string? DeclaredProjectDirectory { get; }
+        internal SignalRReminderRegistration? SignalRRegistration { get; init; }
     }
+
+    internal sealed record SignalRReminderRegistration(string Id, Guid RegistrationId, bool Recurring);
 
     // The per-call output sink binds this receipt to the prepared query and its exact job arguments.
     internal sealed class PendingBackgroundJob : ToolInvocationReceipt

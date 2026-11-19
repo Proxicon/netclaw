@@ -99,6 +99,7 @@ internal sealed class SessionInputFlow
     public int SelectedCount => _selectedIds.Count;
     public bool EmittedText => _emittedText;
     public bool HasBufferedContinuation => _buffer.Count > 0 || _deferredApproval is not null;
+    public SignalRMessageOrigin? SignalRMessageOrigin { get; private set; }
     public TurnAuthorityFacts Authority => new(_context, _source, _trust);
     public TurnTelemetryFacts Telemetry => _telemetry;
     // Input closure events copy IDs before journal callbacks clear or remove the selection.
@@ -458,6 +459,7 @@ internal sealed class SessionInputFlow
         _selectedIds.Clear();
         _selectedIds.Add(id);
         _source = command.Source;
+        SignalRMessageOrigin = GetSignalRMessageOrigin(command, context);
         _noticeRunIds.Clear();
         AddNoticeRun(command.Notice?.Notice);
         _context = context;
@@ -553,7 +555,8 @@ internal sealed class SessionInputFlow
         while (start + count < _buffer.Count
                && (dispatchesCommand ? count == 0 : !IsBufferedCommand(_buffer[start + count]))
                && PassesPause(_buffer[start + count], owner, startsTurn: adoptsAuthority && count == 0, childConsentPaused)
-               && JoinsTurn(_buffer[start + count], owner))
+               && JoinsTurn(_buffer[start + count], owner)
+               && PassesReminderBoundary(_buffer[start + count], owner, startsTurn: adoptsAuthority && count == 0))
             count++;
         if (count == 0)
             return null;
@@ -574,7 +577,16 @@ internal sealed class SessionInputFlow
         }
 
         if (adoptsAuthority)
-            AdoptAuthority(messages[0], BufferedAuthority(messages[0]));
+        {
+            var authority = BufferedAuthority(messages[0]);
+            AdoptAuthority(messages[0], authority);
+            SignalRMessageOrigin = messages.Length == 1 ? GetSignalRMessageOrigin(messages[0], authority) : null;
+        }
+        else if (startsNewTurn)
+        {
+            // A tool call after a merge has no single app input to confirm.
+            SignalRMessageOrigin = null;
+        }
         foreach (var message in messages)
             AddNoticeRun(message.Notice?.Notice);
         var joinsAutomationTurn = !adoptsAuthority
@@ -591,6 +603,18 @@ internal sealed class SessionInputFlow
 
     private static bool JoinsTurn((SendUserMessage Message, bool IsReplay) input, TurnContext? owner)
         => input.IsReplay || (owner is not null && BufferedAuthority(input.Message).HasSameRequester(owner));
+
+    // Each SignalR reminder needs its own final reply and terminal. A replay keeps its place in that turn.
+    private static bool PassesReminderBoundary(
+        (SendUserMessage Message, bool IsReplay) input, TurnContext? owner, bool startsTurn)
+        => startsTurn || input.IsReplay
+           || (owner?.IsSignalRReminder != true && !BufferedAuthority(input.Message).IsSignalRReminder);
+
+    private static SignalRMessageOrigin? GetSignalRMessageOrigin(SendUserMessage input, TurnContext authority)
+        => input.AdmittedInputId is not null && authority.ChannelType is ChannelType.SignalR
+           && input.Source is { SignalRMessageOrigin: { } origin } source && source.MessageId == authority.TurnId.Value
+            ? origin
+            : null;
 
     // <child-consent-drain>
     // Security boundary (child consent pause, design D5). While the pause applies, automated input and child result
@@ -723,6 +747,7 @@ internal sealed class SessionInputFlow
 
     private void ReleaseRecordedSources(TurnRecorded evt)
     {
+        SignalRMessageOrigin = null;
         _inFlightDedup.CompleteBackgroundJob(evt.SourceBackgroundJobId);
         _selectedIds.Clear();
         // A delivery retry repeats the recorded turn with no input, so it takes the link from the pending retry.
@@ -739,15 +764,20 @@ internal sealed class SessionInputFlow
     public void FailedTurn()
     {
         _inFlightDedup.CompleteBackgroundJob(_source?.BackgroundJobId);
-        _context = null;
+        ClearTurnContext();
     }
 
     public void SetTurnContext(TurnContext context) => _context = context;
-    public void ClearTurnContext() => _context = null;
+    public void ClearTurnContext()
+    {
+        _context = null;
+        SignalRMessageOrigin = null;
+    }
 
     public void RestoreTurnAuthority(TurnContext context, TrustContextDeriver? deriver)
     {
         // Recovery restores journal authority and telemetry without inventing a transport message ID.
+        SignalRMessageOrigin = null;
         _context = context;
         _trust = deriver?.DeriveFromTurnContext(context);
         _telemetry = new TurnTelemetryFacts(context.TurnId, null, context.ChannelType);

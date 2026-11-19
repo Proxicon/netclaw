@@ -183,6 +183,11 @@ public sealed record ReminderDefinition
     /// </summary>
     public required ReminderDelivery Delivery { get; init; }
 
+    // Opaque SignalR transport identity of this registration. A new save gets a new identity.
+    [JsonInclude]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    internal Guid? SignalRRegistrationId { get; init; }
+
     /// <summary>
     /// When true, a missed delivery fails the execution and emits
     /// <see cref="OperationalAlert.ReminderExecutionFailed"/>. For

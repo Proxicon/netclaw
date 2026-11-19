@@ -4,6 +4,7 @@
 // </copyright>
 // -----------------------------------------------------------------------
 using Akka.Actor;
+using Netclaw.Actors.Channels;
 using Netclaw.Actors.Protocol;
 using Netclaw.Actors.Reminders;
 using Netclaw.Configuration;
@@ -40,7 +41,11 @@ public static partial class SessionProtocol
     /// User-facing text reply from the assistant.
     /// Requires <see cref="OutputFilter.Text"/>.
     /// </summary>
-    public sealed record TextOutput(string Text) : SessionOutput;
+    public sealed record TextOutput(string Text) : SessionOutput
+    {
+        /// <summary>The fire key of a final reply to a SignalR reminder.</summary>
+        public ReminderId? SourceReminderId { get; init; }
+    }
 
     /// <summary>
     /// Incremental text delta from the assistant while a turn is streaming.
@@ -98,7 +103,12 @@ public static partial class SessionProtocol
         /// after a normal execution.
         /// </summary>
         public string? FailureCode { get; init; }
+
+        internal SignalRReminderSaved? SignalRReminder { get; init; }
     }
+
+    internal sealed record SignalRReminderSaved(
+        SignalRMessageOrigin Origin, string Id, Guid RegistrationId, bool Recurring, TurnNumber TurnNumber);
 
     /// <summary>
     /// Token usage report for the completed turn.
@@ -180,6 +190,8 @@ public static partial class SessionProtocol
         /// </summary>
         public ReminderId? SourceReminderId { get; init; }
 
+        internal SignalRReminderFinal? SignalRReport { get; init; }
+
         /// <summary>
         /// True only when the session ended the turn on purpose with no new reply, after the model ignored the
         /// escalated nudge for a refused repeat. A channel binding then posts no empty-turn fallback, because
@@ -195,6 +207,8 @@ public static partial class SessionProtocol
         /// </summary>
         public required IReadOnlyList<SubAgentRunId> OpenChildRunIds { get; init; }
     }
+
+    internal sealed record SignalRReminderFinal(Guid RegistrationId, string Text);
 
     /// <summary>
     /// Signals that the session actor will stop after committed passivation.

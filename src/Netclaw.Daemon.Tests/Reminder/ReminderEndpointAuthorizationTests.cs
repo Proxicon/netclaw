@@ -249,7 +249,7 @@ public sealed class ReminderEndpointAuthorizationTests : IAsyncDisposable
     // ── Test case 5b: import as Operator → success ──
 
     [Fact]
-    public async Task Operator_POST_reminders_import_succeeds()
+    public async Task Operator_POST_reminders_import_succeeds_without_importing_SignalR_identity()
     {
         await using var app = await CreateAppAsync(spoofLoopback: true);
         var client = app.GetTestClient();
@@ -262,6 +262,7 @@ public sealed class ReminderEndpointAuthorizationTests : IAsyncDisposable
                 id = "import-operator",
                 title = "import-operator",
                 instructions = "check status",
+                signalRRegistrationId = Guid.NewGuid(),
                 delivery = new { kind = 2 }, // None
                 deliveryInstructions = "reply",
                 schedule = new
@@ -282,6 +283,7 @@ public sealed class ReminderEndpointAuthorizationTests : IAsyncDisposable
         var saveCmd = _testActor.ReceivedMessages.OfType<SaveReminderCommand>().FirstOrDefault();
         Assert.NotNull(saveCmd);
         Assert.Equal("import-operator", saveCmd.Definition.Id.Value);
+        Assert.Null(saveCmd.Definition.SignalRRegistrationId);
     }
 
     /// <summary>

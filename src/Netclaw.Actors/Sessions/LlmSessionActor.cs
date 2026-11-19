@@ -3805,6 +3805,9 @@ public sealed partial class LlmSessionActor : ReceivePersistentActor, IWithTimer
         bool includeText = true,
         bool includeThinking = true)
     {
+        var authority = _input.Authority;
+        var reminderId = authority.Source?.ReminderId;
+        SignalRReminderFinal? signalRReport = null;
         foreach (var content in message.Contents)
         {
             switch (content)
@@ -3843,9 +3846,17 @@ public sealed partial class LlmSessionActor : ReceivePersistentActor, IWithTimer
 
             if (fullText.Length > 0)
             {
+                // A restart wakeup can supply its own source while it resumes older input. Check the admitted turn.
+                var signalRFire = authority.Context is { IsSignalRReminder: true } context
+                    && reminderId is { } key && context.TurnId.Value == key.Value
+                    && ReminderFireKey.TryParse(key.Value, out var fire) && fire.Value == key.Value;
+                if (signalRFire && authority.Source?.SignalRRegistrationId is { } registrationId)
+                    signalRReport = new SignalRReminderFinal(registrationId, fullText);
+
                 EmitOutput(new TextOutput(fullText)
                 {
-                    SessionId = _sessionId
+                    SessionId = _sessionId,
+                    SourceReminderId = signalRFire ? reminderId : null
                 }, OutputFilter.Text);
             }
         }
@@ -3859,7 +3870,8 @@ public sealed partial class LlmSessionActor : ReceivePersistentActor, IWithTimer
         {
             SessionId = _sessionId,
             TurnNumber = new TurnNumber(_state.TurnCount),
-            SourceReminderId = _input.Authority.Source?.ReminderId,
+            SourceReminderId = reminderId,
+            SignalRReport = signalRReport,
             OpenChildRunIds = _state.GetOpenChildRunIds()
         });
     }
@@ -4431,7 +4443,11 @@ public sealed partial class LlmSessionActor : ReceivePersistentActor, IWithTimer
             CallId = toolCallId,
             ToolName = new ToolName(toolMessage.Name ?? "unknown"),
             Result = toolMessage.Content ?? string.Empty,
-            FailureCode = result.FailureCode
+            FailureCode = result.FailureCode,
+            SignalRReminder = result is { FailureCode: null, Receipt: ToolInvocationReceipt.Succeeded { SignalRRegistration: { } saved } }
+                && _input.SignalRMessageOrigin is { } origin
+                ? new SignalRReminderSaved(origin, saved.Id, saved.RegistrationId, saved.Recurring, new TurnNumber(_state.TurnCount + 1))
+                : null
         }, OutputFilter.ToolCalls);
 
         if (result.ExposureRequest is { } exposureRequest)

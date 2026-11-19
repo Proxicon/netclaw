@@ -42,6 +42,10 @@ public static class SessionOutputTypes
 /// </summary>
 public sealed record ChatMessageDto(string Role, string Content);
 
+public sealed record ScheduledReminderDto(string Id, Guid MessageId, Guid RegistrationId, bool Recurring);
+
+public sealed record ScheduledReportDto(Guid MessageId, Guid RegistrationId, string FinalText);
+
 /// <summary>
 /// Wire-safe DTO for session output. Flattens the discriminated union
 /// (<see cref="SessionOutput"/>) into a single serializable type for
@@ -85,7 +89,15 @@ public sealed record SessionOutputDto
     [System.Text.Json.Serialization.JsonConverter(typeof(NullableTurnNumberJsonConverter))]
     public TurnNumber? TurnNumber { get; init; }
     public string? TurnOutcome { get; init; }
+
+    // Fire key on a reminder terminal or a final SignalR reminder reply.
     public string? SourceReminderId { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ScheduledReminderDto? ScheduledReminder { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ScheduledReportDto? ScheduledReport { get; init; }
 
     // Wire name: quietEnd. Written for every TurnCompleted. Absent or null comes from an earlier daemon and reads
     // as false, so the channel keeps the empty-turn fallback for it.

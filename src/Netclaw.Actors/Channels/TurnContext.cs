@@ -93,6 +93,8 @@ public sealed record TurnContext
            && Provenance.TransportAuthenticity == TransportAuthenticity.LocalProcess
            && Provenance.SourceKind?.Value == ReminderExecutionActor.ReminderSourceKind;
 
+    internal bool IsSignalRReminder => ChannelType is Channels.ChannelType.SignalR && IsReminderTurn;
+
     // Three facts together make an approval notice turn: the source kind "child-consent", the sender
     // "child-consent", and the authenticity LocalProcess. A webhook can name its event type "child-consent", but
     // the webhook path sets the authenticity Verified in code, so a webhook input is never a notice. The pause lets a

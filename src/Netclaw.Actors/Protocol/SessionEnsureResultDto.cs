@@ -14,6 +14,10 @@ namespace Netclaw.Actors.Protocol;
 public sealed record SessionEnsureResultDto(string SessionId, bool Created)
 {
     public const int SupportedTextAdmissionVersion = 1;
+    public const int SupportedScheduledReportVersion = 1;
     public const string TextRejectionPrefix = "Text rejected: ";
     public int TextAdmissionVersion { get; init; }
+
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public int ScheduledReportVersion { get; init; }
 }

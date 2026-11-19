@@ -6,6 +6,7 @@
 using System.Collections.Immutable;
 using System.Net;
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using Akka;
 using Akka.Actor;
 using Akka.Hosting;
@@ -14,6 +15,7 @@ using Akka.TestKit;
 using Akka.Persistence;
 using Akka.Persistence.Hosting;
 using Akka.Persistence.Journal;
+using Akka.Reminders;
 using Akka.Streams;
 using Akka.Streams.Dsl;
 using Microsoft.AspNetCore.Builder;
@@ -29,6 +31,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Netclaw.Actors.Channels;
 using Netclaw.Actors.Hosting;
 using Netclaw.Actors.Protocol;
+using Netclaw.Actors.Reminders;
 using Netclaw.Actors.Sessions;
 using Netclaw.Configuration;
 using Netclaw.Tools;
@@ -259,6 +262,195 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
     }
 
     [Fact]
+    public async Task Ordinary_SignalR_inputs_still_share_one_buffered_turn()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var client = await ConnectAsync();
+        var frames = Channel.CreateUnbounded<SessionOutputDto>();
+        using var subscription = client.On<SessionOutputDto>("ReceiveOutput", frame => { frames.Writer.TryWrite(frame); });
+        var ensured = await client.InvokeAsync<SessionEnsureResultDto>("EnsureSession", null, "signalr", ct);
+        var sessionId = new SessionId(ensured.SessionId);
+        var writes = CreateTestProbe();
+        var journal = Persistence.Instance.Apply(Sys).JournalFor("test-journal");
+        await journal.Ask<Done>(new WriteGate(writes, Task.CompletedTask, false), TimeSpan.FromSeconds(10), ct);
+
+        await client.InvokeAsync("SendMessage", sessionId.Value, "parent", ct);
+        await _model.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        await client.InvokeAsync("SendMessage", sessionId.Value, "ordinary-A", ct);
+        await client.InvokeAsync("SendMessage", sessionId.Value, "ordinary-B", ct);
+        _model.Release.TrySetResult();
+
+        await ReadTurnAsync(frames.Reader, sessionId, ct);
+        var (final, terminal) = await ReadTurnAsync(frames.Reader, sessionId, ct);
+        Assert.Null(final.SourceReminderId);
+        Assert.Null(terminal.SourceReminderId);
+        var turn = await writes.FishForMessageAsync<TurnRecorded>(record => record.UserMessage.Content == "ordinary-B",
+            TimeSpan.FromSeconds(10), cancellationToken: ct);
+        Assert.Equal(2, turn.ConsumedInputIds.Count);
+        Assert.Equal(2, _model.Calls);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task SignalR_one_shots_keep_their_input_and_fire_key(bool simultaneous, bool redeliver)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var timeout = TimeSpan.FromSeconds(10);
+        _model.EchoLastInput = true;
+        await using var owner = await ConnectAsync();
+        await using var other = await ConnectAsync();
+        var frames = Channel.CreateUnbounded<SessionOutputDto>();
+        var otherFrames = Channel.CreateUnbounded<SessionOutputDto>();
+        using var subscription = owner.On<SessionOutputDto>("ReceiveOutput", frame => { frames.Writer.TryWrite(frame); });
+        using var otherSubscription = other.On<SessionOutputDto>("ReceiveOutput", frame => { otherFrames.Writer.TryWrite(frame); });
+        var ensured = await owner.InvokeAsync<SessionEnsureResultDto>("EnsureSession", null, "signalr", ct);
+        var sessionId = new SessionId(ensured.SessionId);
+        var otherSession = await other.InvokeAsync<SessionEnsureResultDto>("EnsureSession", null, "signalr", ct);
+        await Assert.ThrowsAsync<HubException>(() => other.InvokeAsync("SendMessage", sessionId.Value, "wrong owner", ct));
+
+        var journal = Persistence.Instance.Apply(Sys).JournalFor("test-journal");
+        var writes = CreateTestProbe();
+        var dispatcher = CreateTestProbe();
+        var pipeline = Host.Services.GetRequiredService<ISessionPipeline>();
+        await journal.Ask<Done>(new WriteGate(writes, Task.CompletedTask, false), timeout, ct);
+
+        await owner.InvokeAsync("SendMessage", sessionId.Value, "parent", ct);
+        var parent = await writes.FishForMessageAsync<InputAdmitted>(input => input.UserMessage.Content == "parent",
+            timeout, cancellationToken: ct);
+        Assert.Equal(sessionId, parent.SessionId);
+        Assert.StartsWith($"signalr:{owner.ConnectionId}:", parent.SourceMessageId);
+        await _model.Started.Task.WaitAsync(timeout, ct);
+
+        var first = CreateOneShot("fixture-a", "input-A", sessionId, 1_795_070_000_000);
+        var second = CreateOneShot("fixture-b", "input-B", sessionId, 1_795_070_000_001);
+        await DispatchAsync(first);
+        var a = await ReadAdmissionAsync(first);
+        InputAdmitted? b = null;
+        if (simultaneous)
+        {
+            await DispatchAsync(second);
+            b = await ReadAdmissionAsync(second);
+        }
+        if (redeliver)
+            await DispatchAsync(first);
+        Assert.Equal(1, _model.Calls);
+        Assert.False(_model.Release.Task.IsCompleted);
+
+        _model.Release.TrySetResult();
+        var (parentFinal, parentTerminal) = await ReadTurnAsync(frames.Reader, sessionId, ct);
+        Assert.Equal("reply:parent", parentFinal.Text);
+        Assert.Null(parentTerminal.SourceReminderId);
+        var finalA = await CheckOccurrenceAsync(a, first, new TurnNumber(2));
+
+        if (b is null)
+        {
+            await DispatchAsync(second);
+            b = await ReadAdmissionAsync(second);
+        }
+        var finalB = await CheckOccurrenceAsync(b, second, new TurnNumber(3));
+        Assert.NotEqual(a.InputId, b.InputId);
+        Assert.NotEqual(a.SourceMessageId, b.SourceMessageId);
+        Assert.Equal(a.SourceMessageId, finalA.SourceReminderId);
+        Assert.Equal(b.SourceMessageId, finalB.SourceReminderId);
+
+        if (redeliver)
+            await DispatchAsync(first);
+        await owner.InvokeAsync("SendMessage", sessionId.Value, "owner fence", ct);
+        var (fence, fenceTerminal) = await ReadTurnAsync(frames.Reader, sessionId, ct);
+        Assert.Equal("reply:owner fence", fence.Text);
+        Assert.Equal(new TurnNumber(4), fenceTerminal.TurnNumber);
+        Assert.Null(fenceTerminal.SourceReminderId);
+        Assert.Equal(4, _model.Calls);
+
+        await other.InvokeAsync("SendMessage", otherSession.SessionId, "other fence", ct);
+        var (otherFinal, otherTerminal) = await ReadTurnAsync(otherFrames.Reader, new SessionId(otherSession.SessionId), ct);
+        Assert.Equal("reply:other fence", otherFinal.Text);
+        Assert.Equal(new TurnNumber(1), otherTerminal.TurnNumber);
+
+        async Task DispatchAsync(ReminderDefinition definition)
+        {
+            var envelope = new ReminderEnvelope<ReminderPayload>(
+                new ReminderEntity(ReminderManagerActor.ShardRegionName, ReminderManagerActor.EntityId),
+                new ReminderKey(definition.Id.Value),
+                definition.Schedule.FireAt!.Value, ReminderDeadline.Infinite, new ReminderPayload { Id = definition.Id });
+            var executionId = Guid.NewGuid();
+            await dispatcher.ChildActorOfAsync(ReminderExecutionActor.CreateProps(executionId, definition,
+                pipeline, TimeProvider.System, envelope), cancellationToken: ct);
+            var dispatch = await dispatcher.ExpectMsgAsync<ReminderExecutionCompleted>(timeout, cancellationToken: ct);
+            dispatcher.Reply(new ReminderExecutionAccepted(dispatch.ExecutionId));
+            Assert.Equal(executionId, dispatch.ExecutionId);
+            Assert.True(dispatch.Success, dispatch.ErrorMessage);
+            Assert.Equal(sessionId.Value, dispatch.History.SessionId);
+        }
+
+        async Task<InputAdmitted> ReadAdmissionAsync(ReminderDefinition definition)
+        {
+            var key = new ReminderFireKey(definition.Id, definition.Schedule.FireAtMs!.Value).Value;
+            var input = await writes.FishForMessageAsync<InputAdmitted>(evt => evt.SourceMessageId == key,
+                timeout, cancellationToken: ct);
+            TestContext.Current.TestOutputHelper?.WriteLine($"admitted key={key} input={input.InputId} text={input.UserMessage.Content}");
+            Assert.Equal(sessionId, input.SessionId);
+            Assert.Equal(sessionId, input.TurnContext.SessionId);
+            Assert.Equal(key, input.TurnContext.TurnId);
+            Assert.Equal(ChannelType.SignalR.ToWireValue(), input.TurnContext.ChannelType);
+            Assert.Equal(new SenderId("reminder-system"), input.TurnContext.RequesterSenderId);
+            Assert.Equal(PrincipalClassification.VerifiedAutomation, input.TurnContext.RequesterPrincipal);
+            Assert.Equal(parent.TurnContext.Audience, input.TurnContext.Audience);
+            Assert.Equal(parent.TurnContext.Boundary, input.TurnContext.Boundary);
+            Assert.Equal(parent.TurnContext.DefaultDeliveryTarget, input.TurnContext.DefaultDeliveryTarget);
+            Assert.Equal(definition.Instructions, input.UserMessage.Content);
+            return input;
+        }
+
+        async Task<SessionOutputDto> CheckOccurrenceAsync(InputAdmitted input, ReminderDefinition definition, TurnNumber ordinal)
+        {
+            var (final, terminal) = await ReadTurnAsync(frames.Reader, sessionId, ct);
+            var record = await writes.FishForMessageAsync<TurnRecorded>(evt => evt.SourceReminderId?.Value == terminal.SourceReminderId,
+                timeout, cancellationToken: ct);
+            TestContext.Current.TestOutputHelper?.WriteLine($"owner session={terminal.SessionId} turn={terminal.TurnNumber} final={final.Text} " +
+                $"finalKey={final.SourceReminderId ?? "absent"} terminalKey={terminal.SourceReminderId} inputs={string.Join(",", record.ConsumedInputIds)}");
+            Assert.Equal($"reply:{definition.Instructions}", final.Text);
+            Assert.Equal(input.SourceMessageId, terminal.SourceReminderId);
+            Assert.Equal(ordinal, terminal.TurnNumber);
+            Assert.Equal("completed", terminal.TurnOutcome);
+            Assert.Equal(input.SessionId, record.SessionId);
+            Assert.Equal(input.InputId, Assert.Single(record.ConsumedInputIds));
+            Assert.Equal(input.UserMessage.Content, record.UserMessage.Content);
+            return final;
+        }
+    }
+
+    private static ReminderDefinition CreateOneShot(string id, string instructions, SessionId sessionId, long dueTimeMs) => new()
+    {
+        Id = new ReminderId(id),
+        Title = id,
+        Instructions = instructions,
+        Schedule = new ReminderSchedule { Type = ReminderScheduleType.OneShot, FireAtMs = dueTimeMs },
+        Delivery = new ReminderDelivery { Kind = DeliveryKind.CurrentSession, SessionId = sessionId.Value, OriginChannelType = ChannelType.SignalR },
+        Audience = TrustAudience.Personal,
+        Boundary = TrustBoundary.TrustedInstance
+    };
+
+    private static async Task<(SessionOutputDto Final, SessionOutputDto Terminal)> ReadTurnAsync(
+        ChannelReader<SessionOutputDto> frames, SessionId sessionId, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        var finals = new List<SessionOutputDto>();
+        while (true)
+        {
+            var frame = await frames.ReadAsync(deadline.Token);
+            Assert.Equal(sessionId.Value, frame.SessionId);
+            if (frame.Type == SessionOutputTypes.Text)
+                finals.Add(frame);
+            if (frame.Type == SessionOutputTypes.TurnCompleted)
+                return (Assert.Single(finals), frame);
+        }
+    }
+
+    [Fact]
     public async Task Pipeline_initialization_failure_rejects_text_without_a_model_call()
     {
         _failInitialization = true;
@@ -375,6 +567,9 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
 
     private async Task<HubConnection> ConnectAsync()
     {
+        if (_app is not null)
+            return await ConnectClientAsync(_app);
+
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddSessionHubSignalR();
@@ -393,10 +588,15 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
         _app.UseAuthorization();
         _app.MapHub<SessionHub>("/hub/session");
         await _app.StartAsync();
+        return await ConnectClientAsync(_app);
+    }
+
+    private static async Task<HubConnection> ConnectClientAsync(WebApplication app)
+    {
         var client = new HubConnectionBuilder().WithUrl("http://localhost/hub/session", options =>
         {
             options.Transports = HttpTransportType.LongPolling;
-            options.HttpMessageHandlerFactory = _ => _app.GetTestServer().CreateHandler();
+            options.HttpMessageHandlerFactory = _ => app.GetTestServer().CreateHandler();
         }).Build();
         await client.StartAsync();
         return client;
@@ -475,6 +675,7 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Calls { get; private set; }
         public bool Overflow { get; set; }
+        public bool EchoLastInput { get; set; }
         public TaskCompletionSource CompactionStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource CompactionRelease { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public async Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
@@ -492,7 +693,8 @@ public sealed class SignalRAdmissionTests(ITestOutputHelper output) : TestKit(ou
                 Started.TrySetResult();
                 await Release.Task.WaitAsync(cancellationToken);
             }
-            return new ChatResponse(new ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, "done"))
+            var text = EchoLastInput ? $"reply:{messages.Last(message => message.Role == Microsoft.Extensions.AI.ChatRole.User).Text}" : "done";
+            return new ChatResponse(new ChatMessage(Microsoft.Extensions.AI.ChatRole.Assistant, text))
             {
                 Usage = Overflow && !compacting ? new UsageDetails { InputTokenCount = 200_000, OutputTokenCount = 1 } : null
             };
