@@ -152,6 +152,9 @@ public sealed record MessageSource
     /// </summary>
     public ReminderId? ReminderId { get; init; }
 
+    internal SignalRMessageOrigin? SignalRMessageOrigin { get; init; }
+    internal Guid? SignalRRegistrationId { get; init; }
+
     /// <summary>
     /// Ephemeral dedup key for background-job-originated deliveries.
     /// Format is <c>"bg-job:{jobId}"</c>. Null for regular user messages.
@@ -171,3 +174,6 @@ public sealed record MessageSource
     /// </summary>
     public IActorRef? AckTarget { get; init; }
 }
+
+// The hub supplies this correlation claim after it checks the connection and session binding.
+internal sealed record SignalRMessageOrigin(string ConnectionId, Guid MessageId, Func<bool> IsAttached);

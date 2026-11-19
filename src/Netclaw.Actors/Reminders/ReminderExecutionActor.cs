@@ -247,7 +247,8 @@ internal sealed class ReminderExecutionActor : ReceiveActor, IWithTimers
                     SourceKind = new SourceKind(ReminderSourceKind)
                 },
                 ReceivedAt = _dispatchedAt,
-                ReminderId = new ReminderId(reminderDeliveryKey)
+                ReminderId = new ReminderId(reminderDeliveryKey),
+                SignalRRegistrationId = originChannelType is ChannelType.SignalR ? _definition.SignalRRegistrationId : null
             };
 
             if (originChannelType == Channels.ChannelType.Reminder)

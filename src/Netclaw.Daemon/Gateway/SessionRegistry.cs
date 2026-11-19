@@ -126,7 +126,7 @@ public sealed class SessionRegistry
             {
                 var requestedSessionId = ParseSessionId(sessionId);
 
-                if (_knownSessions.ContainsKey(requestedSessionId))
+                if (_knownSessions.TryGetValue(requestedSessionId, out var existingChannel))
                 {
                     // Session exists — attach the new connection; actor handles re-init internally
                     _connections.AttachSession(requestedSessionId, callerConnectionId);
@@ -138,7 +138,7 @@ public sealed class SessionRegistry
                         "Attaching connection {ConnectionId} to existing session {SessionId}.",
                         callerConnectionId.Value, requestedSessionId.Value);
 
-                    return new SessionEnsureResultDto(requestedSessionId.Value, Created: false) { TextAdmissionVersion = SessionEnsureResultDto.SupportedTextAdmissionVersion };
+                    return EnsureResult(requestedSessionId.Value, created: false, existingChannel);
                 }
 
                 // Session ID provided but unknown — create a fresh session binding
@@ -148,17 +148,23 @@ public sealed class SessionRegistry
                 var gw2 = await _gatewayProvider.GetAsync();
                 gw2.Tell(new StartSignalRSession(requestedSessionId, ct, callerConnectionId));
 
-                return new SessionEnsureResultDto(requestedSessionId.Value, Created: false) { TextAdmissionVersion = SessionEnsureResultDto.SupportedTextAdmissionVersion };
+                return EnsureResult(requestedSessionId.Value, created: false, ct);
             }
 
             var createdSessionId = await CreateSessionCoreAsync(callerConnectionId, ct);
-            return new SessionEnsureResultDto(createdSessionId, Created: true) { TextAdmissionVersion = SessionEnsureResultDto.SupportedTextAdmissionVersion };
+            return EnsureResult(createdSessionId, created: true, ct);
         }
         finally
         {
             _sessionMutationGate.Release();
         }
     }
+
+    private static SessionEnsureResultDto EnsureResult(string session, bool created, ChannelType channel) => new(session, created)
+    {
+        TextAdmissionVersion = SessionEnsureResultDto.SupportedTextAdmissionVersion,
+        ScheduledReportVersion = channel is ChannelType.SignalR ? SessionEnsureResultDto.SupportedScheduledReportVersion : 0
+    };
 
     /// <summary>
     /// Attaches the current SignalR connection to an existing session.
@@ -206,12 +212,15 @@ public sealed class SessionRegistry
         if (!attachedSessionId.Equals(requestedSessionId))
             throw new HubException($"Session '{sessionId}' is not attached to this connection.");
 
-        if (!_knownSessions.ContainsKey(attachedSessionId))
+        if (!_knownSessions.TryGetValue(attachedSessionId, out var channelType))
             throw new HubException($"Session '{sessionId}' not found.");
 
         ThrowIfIngressClosed();
 
         var identity = _mapper.Map(principal);
+        var appMessageId = channelType is ChannelType.SignalR && principal?.Identity?.IsAuthenticated == true
+            ? SignalRScheduledReports.ReadMessageId(text)
+            : null;
 
         var signalrMessageId = $"signalr:{callerConnectionId.Value}:{_timeProvider.GetUtcNow().ToUnixTimeMilliseconds()}:{Guid.NewGuid():N}";
         if (signalrMessageId.Length > 128)
@@ -232,6 +241,10 @@ public sealed class SessionRegistry
             },
             Contents = [new TextContent(text)],
             ReceivedAt = _timeProvider.GetUtcNow(),
+            SignalRMessageOrigin = appMessageId is { } messageId
+                ? new SignalRMessageOrigin(callerConnectionId.Value, messageId,
+                    () => _connections.IsAttached(callerConnectionId, attachedSessionId))
+                : null,
             DefaultDeliveryTarget = new ChannelDeliveryTargetInfo(
                 ChannelType.Tui.ToWireValue(),
                 "local_session",

@@ -30,6 +30,7 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
     private readonly ILoggingAdapter _log;
 
     private readonly SessionPipelineHandle _handle;
+    private readonly SignalRScheduledReports _scheduledReports;
     private SignalRConnectionId _currentConnectionId;
     private Actors.Channels.ChannelType _channelType = Actors.Channels.ChannelType.Tui;
 
@@ -50,6 +51,7 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
             .WithContext("Adapter", "signalr")
             .WithContext(NetclawLogProperties.SessionId, _sessionId.Value);
         _handle = new SessionPipelineHandle(pipeline, _log, "signalr");
+        _scheduledReports = new SignalRScheduledReports(_sessionId);
 
         Initializing();
     }
@@ -125,6 +127,8 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
     {
         Receive<AttachSignalRConnection>(msg =>
         {
+            if (_currentConnectionId != msg.ConnectionId)
+                _scheduledReports.Clear();
             _currentConnectionId = msg.ConnectionId;
             _log.Debug("Connection {ConnectionId} attached to session", msg.ConnectionId.Value);
         });
@@ -148,6 +152,7 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
             if (msg.Generation != _handle.Generation)
                 return;
 
+            _scheduledReports.Clear();
             var reason = msg.Cause is null
                 ? "completed"
                 : $"faulted: {msg.Cause.Message}";
@@ -204,6 +209,7 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
                 DefaultDeliveryTarget = BuildDefaultDeliveryTarget(),
                 RequestedDeliveryTarget = msg.Source.RequestedDeliveryTarget,
                 ReminderId = msg.Source.ReminderId,
+                SignalRRegistrationId = msg.Source.SignalRRegistrationId,
                 AckTarget = ackTarget
             };
 
@@ -260,7 +266,7 @@ internal sealed class SignalRSessionActor : ReceiveActor, IWithUnboundedStash, I
             if (_currentConnectionId == default)
                 return;
 
-            var dto = SessionOutputDtoMapper.ToDto(msg.Output);
+            var dto = _scheduledReports.Project(msg.Output, _currentConnectionId);
             await _hubContext.Clients.Client(_currentConnectionId.Value).ReceiveOutput(dto);
         }
         catch (Exception ex)

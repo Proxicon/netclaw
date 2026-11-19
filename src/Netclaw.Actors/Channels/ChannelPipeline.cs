@@ -76,6 +76,8 @@ public static class MessageSourceFactory
                     entry.AuthorityAtInclusion))
                 .ToArray(),
             ReminderId = input.ReminderId,
+            SignalRMessageOrigin = input.SignalRMessageOrigin,
+            SignalRRegistrationId = input.SignalRRegistrationId,
             AckTarget = input.AckTarget
         };
     }

@@ -259,6 +259,7 @@ public sealed partial class SetReminderTool : NetclawTool<SetReminderTool.Params
             Schedule = schedule,
             Instructions = args.Prompt,
             Delivery = delivery,
+            SignalRRegistrationId = delivery.OriginChannelType is ChannelType.SignalR ? Guid.NewGuid() : null,
             DeliveryRequired = args.DeliveryRequired,
             DeliveryInstructions = args.DeliveryInstructions,
             // Draft trust context — ReminderManagerActor re-resolves and
@@ -287,6 +288,14 @@ public sealed partial class SetReminderTool : NetclawTool<SetReminderTool.Params
             return response.Error == ReminderSaveError.Validation
                 ? $"Error: {message}"
                 : $"Failed to schedule reminder '{args.Name}': {message}";
+        }
+
+        if (definition.SignalRRegistrationId is { } registrationId)
+        {
+            context.TryComplete(new ToolInvocationReceipt.Succeeded([], null)
+            {
+                SignalRRegistration = new(response.Id.Value, registrationId, schedule.Type != ReminderScheduleType.OneShot)
+            });
         }
 
         var nextFireStr = FormatTimestamp(response.NextFire);
